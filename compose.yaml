@@ -75,7 +75,7 @@ services:
       LITELLM_URL: http://litellm:4000
       LITELLM_KEY: sk-local-agentstack
       API_KEY: sk-local-orchestrator
-      DEFAULT_MODEL: qwen3.6-35b-a3b
+      DEFAULT_MODEL: qwen36-35b-heretic
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://localhost:8088/health || false"]
       interval: 5s
@@ -96,7 +96,7 @@ services:
       AGENT_SERVER_IMAGE_REPOSITORY: ghcr.io/openhands/agent-server
       AGENT_SERVER_IMAGE_TAG: 1.19.1-python
       WORKSPACE_MOUNT_PATH: /opt/workspace_base
-      LLM_MODEL: openai/qwen3.6-35b-a3b
+      LLM_MODEL: openai/qwen36-35b-heretic
       LLM_API_KEY: sk-local-orchestrator
       LLM_BASE_URL: http://orchestrator:8088/v1
     volumes:

@@ -1,14 +1,14 @@
 model_list:
-  - model_name: qwen3.6-35b-a3b
+  - model_name: qwen36-35b-heretic
     litellm_params:
-      model: openai/qwen3.6-35b-a3b
+      model: openai/qwen36-35b-heretic
       api_base: http://192.168.0.33:8000/v1
       api_key: local-key
       timeout: 120
 
-  - model_name: qwen3.6-35b-a3b-fast
+  - model_name: qwen36-35b-heretic-fast
     litellm_params:
-      model: openai/qwen3.6-35b-a3b
+      model: openai/qwen36-35b-heretic
       api_base: http://192.168.0.33:8000/v1
       api_key: local-key
       timeout: 60
