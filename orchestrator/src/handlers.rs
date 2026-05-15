@@ -48,12 +48,12 @@ pub async fn health_ready(
         unhealthy.push("postgres");
     }
 
-    // Check Qdrant — /api/v1/collections returns 200 when alive
+    // Check Qdrant — /collections returns 200 when alive
     if http
-        .get(&format!("{}/api/v1/collections", state.qdrant_url))
+        .get(&format!("{}/collections", state.qdrant_url))
         .send()
         .await
-        .map(|r| r.status().is_success() || r.status() == 404)
+        .map(|r| r.status().is_success())
         .unwrap_or(false)
     {
         healthy.push("qdrant");
@@ -355,10 +355,8 @@ pub async fn chat_completions(
         inject_system_context(&mut req, &full_context);
     }
 
-    // Ensure stream flag is set for SSE path
-    req["stream"] = serde_json::json!(true);
-
     if is_stream {
+        req["stream"] = serde_json::json!(true);
         // Streaming path: proxy SSE from LiteLLM with real context
         let url = format!("{}/chat/completions", state.litellm_url);
         let http = state.http.clone();
@@ -378,12 +376,16 @@ pub async fn chat_completions(
                     let mut stream = bytes_stream;
                     while let Some(chunk) = stream.next().await {
                         match chunk {
-                            Ok(bytes) => {
+                                            Ok(bytes) => {
                                 let text = String::from_utf8_lossy(&bytes);
-                                // Strip "data: " prefix that LiteLLM adds so we don't double-wrap SSE
-                                let text = text.trim();
-                                let text = text.strip_prefix("data: ").unwrap_or(text);
-                                yield Ok::<Event, axum::Error>(Event::default().data(text.to_string()));
+                                // Parse SSE: find "data: " prefix and extract the JSON payload
+                                // We strip it because axum's Event::default().data() will re-wrap with "data: "
+                                let json = if let Some(start) = text.find("data: ") {
+                                    &text[start + 6..]
+                                } else {
+                                    text.as_ref()
+                                };
+                                yield Ok::<Event, axum::Error>(Event::default().data(json.to_string()));
                             }
                             Err(e) => {
                                 yield Ok::<Event, axum::Error>(Event::default().data(format!("Error: {}", e)));

@@ -101,6 +101,7 @@ services:
       LLM_BASE_URL: http://orchestrator:8088/v1
     volumes:
       - ./workspace:/opt/workspace_base
+      - /var/run/docker.sock:/var/run/docker.sock
       - openhands_state:/.openhands
     stdin_open: true
     tty: true
