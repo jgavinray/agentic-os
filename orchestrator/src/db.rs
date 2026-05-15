@@ -221,15 +221,16 @@ pub async fn start_session_from_request(
     Ok(id)
 }
 
+/// Returns `(event_id, qdrant_indexed)`. The Postgres write always succeeds or the
+/// whole call errors. Qdrant indexing is best-effort: if the embedding model is
+/// unavailable the event is still stored and `qdrant_indexed` is false.
 pub async fn append_event_from_request(
     pool: &Pool,
     http: &reqwest::Client,
-    litellm_url: &str,
-    litellm_key: &str,
-    embedding_model: &str,
+    embedding_url: &str,
     qdrant_url: &str,
     req: &crate::state::AppendEventRequest,
-) -> Result<String, anyhow::Error> {
+) -> Result<(String, bool), anyhow::Error> {
     let id = Uuid::new_v4().to_string();
     let actor = req.actor.as_deref().unwrap_or("agent");
     let metadata = req.metadata.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -247,9 +248,15 @@ pub async fn append_event_from_request(
     };
 
     insert_event(pool, &event).await?;
-    crate::qdrant::store_event(http, litellm_url, litellm_key, embedding_model, qdrant_url, &event).await?;
+    let qdrant_indexed = match crate::qdrant::store_event(http, embedding_url, qdrant_url, &event).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(event_id = %id, "qdrant embedding failed, event stored in postgres only: {e}");
+            false
+        }
+    };
 
-    Ok(id)
+    Ok((id, qdrant_indexed))
 }
 
 // ── Context pack builder ──────────────────────────────────────
@@ -305,4 +312,147 @@ pub fn build_context(
     }
 
     format!("{header}{body}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn mem(event_type: &str, summary: &str, evidence: Option<&str>) -> crate::state::EventMemory {
+        crate::state::EventMemory {
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            evidence: evidence.map(str::to_string),
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn event(summary: &str) -> AgentEvent {
+        AgentEvent {
+            id: "tid".to_string(),
+            session_id: "tsession".to_string(),
+            repo: "trepo".to_string(),
+            actor: "tactor".to_string(),
+            event_type: "decision".to_string(),
+            summary: summary.to_string(),
+            evidence: None,
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+        }
+    }
+
+    // ── build_context ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_context_empty_returns_no_prior_memory() {
+        let out = build_context("r", "t", &[], &[], 8000);
+        assert!(out.contains("No prior memory found"));
+    }
+
+    #[test]
+    fn build_context_header_contains_repo_and_task() {
+        let out = build_context("my-repo", "my-task", &[], &[], 8000);
+        assert!(out.starts_with("Repository: my-repo\nTask: my-task\n"));
+    }
+
+    #[test]
+    fn build_context_semantic_before_recent() {
+        let recent = vec![mem("edit", "recent item", None)];
+        let semantic = vec!["semantic item".to_string()];
+        let out = build_context("r", "t", &recent, &semantic, 8000);
+        assert!(out.find("semantic item").unwrap() < out.find("recent item").unwrap());
+    }
+
+    #[test]
+    fn build_context_deduplicates_across_semantic_and_recent() {
+        let shared = "shared summary";
+        let recent = vec![mem("edit", shared, None)];
+        let semantic = vec![shared.to_string()];
+        let out = build_context("r", "t", &recent, &semantic, 8000);
+        assert_eq!(out.matches(shared).count(), 1, "duplicate should appear once");
+    }
+
+    #[test]
+    fn build_context_deduplicates_within_recent() {
+        let recent = vec![
+            mem("edit", "same summary", None),
+            mem("decision", "same summary", None),
+        ];
+        let out = build_context("r", "t", &recent, &[], 8000);
+        assert_eq!(out.matches("same summary").count(), 1);
+    }
+
+    #[test]
+    fn build_context_includes_evidence() {
+        let recent = vec![mem("decision", "chose X", Some("because Y"))];
+        let out = build_context("r", "t", &recent, &[], 8000);
+        assert!(out.contains("Evidence: because Y"));
+    }
+
+    #[test]
+    fn build_context_omits_evidence_label_when_none() {
+        let recent = vec![mem("decision", "chose X", None)];
+        let out = build_context("r", "t", &recent, &[], 8000);
+        assert!(!out.contains("Evidence:"));
+    }
+
+    #[test]
+    fn build_context_truncates_at_char_budget() {
+        // Budget of 100 is smaller than header (~46 chars) + any event line, forcing truncation.
+        let recent: Vec<_> = (0..5)
+            .map(|i| mem("edit", &format!("event {i} with enough padding to fill the budget"), None))
+            .collect();
+        let out = build_context("r", "t", &recent, &[], 100);
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn build_context_no_truncation_marker_when_fits() {
+        let recent = vec![mem("edit", "short", None)];
+        let out = build_context("r", "t", &recent, &[], 8000);
+        assert!(!out.contains("truncated"));
+    }
+
+    // ── AgentEvent ─────────────────────────────────────────────────────
+
+    #[test]
+    fn vector_text_contains_all_fields() {
+        let mut e = event("summary text");
+        e.evidence = Some("evidence text".to_string());
+        let t = e.vector_text();
+        assert!(t.contains("trepo"));
+        assert!(t.contains("decision"));
+        assert!(t.contains("summary text"));
+        assert!(t.contains("evidence text"));
+    }
+
+    #[test]
+    fn vector_text_with_no_evidence_does_not_panic() {
+        let e = event("summary text");
+        let t = e.vector_text();
+        assert!(t.contains("summary text"));
+    }
+
+    #[test]
+    fn payload_contains_required_fields() {
+        let e = event("payload summary");
+        let p = e.payload();
+        assert_eq!(p["event_id"], "tid");
+        assert_eq!(p["repo"], "trepo");
+        assert_eq!(p["event_type"], "decision");
+        assert_eq!(p["summary"], "payload summary");
+        assert!(p["created_at"].is_string());
+    }
+
+    #[test]
+    fn to_memory_copies_fields_correctly() {
+        let mut e = event("mem summary");
+        e.evidence = Some("proof".to_string());
+        let m = e.to_memory();
+        assert_eq!(m.event_type, "decision");
+        assert_eq!(m.summary, "mem summary");
+        assert_eq!(m.evidence, Some("proof".to_string()));
+    }
 }

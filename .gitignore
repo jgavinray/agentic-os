@@ -1,3 +1,5 @@
+# Models
+models/
 # Build artifacts
 target/
 target-*
@@ -40,9 +42,12 @@ workspace/*
 .env.*
 !.env.example
 
-# Docker volumes
-postgres_data/
-qdrant_data/
+# Data volumes (bind-mounted — back up ./data/ for DR)
+data/
+
+# Downloaded model weights (large binary files — run setup-models.sh to populate)
+models/*
+!models/.gitkeep
 
 # Temporary files
 tmp/

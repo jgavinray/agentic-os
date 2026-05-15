@@ -15,14 +15,14 @@ pub struct AppState {
     pub litellm_url: String,
     /// LiteLLM API key
     pub litellm_key: String,
-    /// Orchestrator API key (for auth enforcement)
-    pub api_key: String,
+    /// Valid API keys — each key is a memory namespace (sk-work → namespace "work")
+    pub api_keys: Vec<String>,
     /// Default model name for completions
     pub default_model: String,
-    /// Embedding model served by LiteLLM (must match Qdrant collection vector size)
-    pub embedding_model: String,
-    /// When true, requests without x-agent-repo/x-agent-task return 400 instead of silently skipping memory
-    pub require_routing_headers: bool,
+    /// Default task when x-agent-task header is absent
+    pub default_task: String,
+    /// TEI embedding service base URL (e.g. http://embedding:80)
+    pub embedding_url: String,
     /// Shared HTTP client for non-streaming upstream requests (has full timeouts)
     pub http: reqwest::Client,
     /// HTTP client for streaming upstream requests (no overall request timeout)

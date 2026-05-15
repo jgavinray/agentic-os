@@ -23,13 +23,17 @@ async fn main() -> Result<(), anyhow::Error> {
     let litellm_url     = env::var("LITELLM_URL").expect("LITELLM_URL must be set");
     let litellm_key     = env::var("LITELLM_KEY").expect("LITELLM_KEY must be set");
     // BUG-12: canonical model name matches litellm-config.yaml
-    let api_key         = env::var("API_KEY").unwrap_or_else(|_| "sk-local-orchestrator".to_string());
+    // API_KEYS is comma-separated; API_KEY is the single-key fallback for backwards compat.
+    let api_keys: Vec<String> = env::var("API_KEYS")
+        .or_else(|_| env::var("API_KEY"))
+        .unwrap_or_else(|_| "sk-local-orchestrator".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let default_model   = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
-    let embedding_model = env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "bge-small-en-v1.5".to_string());
-    // BUG-5: opt-in flag to reject requests without routing headers
-    let require_routing_headers = env::var("REQUIRE_ROUTING_HEADERS")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+    let default_task    = env::var("DEFAULT_TASK").unwrap_or_else(|_| "engineering".to_string());
+    let embedding_url   = env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://embedding:80".to_string());
 
     let pool = db::create_pool(&db_url)?;
     db::init_schema(&pool).await?;
@@ -56,10 +60,10 @@ async fn main() -> Result<(), anyhow::Error> {
         qdrant_url: qdrant_url.clone(),
         litellm_url,
         litellm_key,
-        api_key,
+        api_keys,
         default_model,
-        embedding_model,
-        require_routing_headers,
+        default_task,
+        embedding_url,
         http,
         http_stream,
     });
