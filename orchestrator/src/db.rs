@@ -33,7 +33,7 @@ impl AgentEvent {
             "session_id": self.session_id,
             "repo": self.repo,
             "actor": self.actor,
-            "event_type": self.event_type,
+            ".event_type": self.event_type,
             "summary": self.summary,
             "evidence": self.evidence,
             "metadata": self.metadata,
@@ -51,15 +51,9 @@ impl AgentEvent {
     }
 }
 
-// ── Global connection pool ────────────────────────────────────
+// ── Connection pool ────────────────────────────────────────────
 
-static mut POOL: Option<Pool> = None;
-
-pub fn get_pool() -> &'static Pool {
-    unsafe { POOL.as_ref().expect("Pool not initialized — call init_pool first") }
-}
-
-pub async fn init_pool(database_url: &str) -> Result<(), anyhow::Error> {
+pub fn create_pool(database_url: &str) -> Result<Pool, anyhow::Error> {
     let mut cfg = Config::new();
     cfg.url = Some(database_url.to_string());
     if let Some(pool) = &mut cfg.pool {
@@ -67,8 +61,10 @@ pub async fn init_pool(database_url: &str) -> Result<(), anyhow::Error> {
     }
 
     let pool = cfg.create_pool(None, NoTls)?;
+    Ok(pool)
+}
 
-    // Ensure tables and indexes exist
+pub async fn init_schema(pool: &Pool) -> Result<(), anyhow::Error> {
     let conn = pool.get().await?;
     conn.batch_execute(
         r#"
@@ -89,7 +85,11 @@ CREATE TABLE IF NOT EXISTS agent_events (
     summary TEXT NOT NULL,
     evidence TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_session
+        FOREIGN KEY (session_id)
+        REFERENCES agent_sessions(id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_repo_created
@@ -98,20 +98,18 @@ ON agent_events(repo, created_at DESC);
     )
     .await?;
 
-    unsafe { POOL = Some(pool); }
-
     Ok(())
 }
 
 // ── DB query functions ────────────────────────────────────────
 
 pub async fn create_session(
+    pool: &Pool,
     session_id: &str,
     repo: &str,
     task: &str,
     actor: &str,
 ) -> Result<(), anyhow::Error> {
-    let pool = get_pool();
     let conn = pool.get().await?;
     conn.execute(
         "INSERT INTO agent_sessions (id, repo, task, actor)
@@ -122,8 +120,7 @@ pub async fn create_session(
     Ok(())
 }
 
-pub async fn insert_event(event: &AgentEvent) -> Result<(), anyhow::Error> {
-    let pool = get_pool();
+pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow::Error> {
     let conn = pool.get().await?;
     conn.execute(
         "INSERT INTO agent_events
@@ -145,10 +142,10 @@ pub async fn insert_event(event: &AgentEvent) -> Result<(), anyhow::Error> {
 }
 
 pub async fn get_events_for_repo(
+    pool: &Pool,
     repo: &str,
     limit: i64,
 ) -> Result<Vec<AgentEvent>, anyhow::Error> {
-    let pool = get_pool();
     let conn = pool.get().await?;
     let rows = conn.query(
         "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at
@@ -181,15 +178,17 @@ pub async fn get_events_for_repo(
 // ── Request adapters ──────────────────────────────────────────
 
 pub async fn start_session_from_request(
+    pool: &Pool,
     req: &crate::state::StartSessionRequest,
 ) -> Result<String, anyhow::Error> {
     let id = Uuid::new_v4().to_string();
     let actor = req.actor.as_deref().unwrap_or("agent");
-    create_session(&id, &req.repo, &req.task, actor).await?;
+    create_session(pool, &id, &req.repo, &req.task, actor).await?;
     Ok(id)
 }
 
 pub async fn append_event_from_request(
+    pool: &Pool,
     qdrant_url: &str,
     req: &crate::state::AppendEventRequest,
 ) -> Result<String, anyhow::Error> {
@@ -209,7 +208,7 @@ pub async fn append_event_from_request(
         created_at: chrono::Utc::now(),
     };
 
-    insert_event(&event).await?;
+    insert_event(pool, &event).await?;
     crate::qdrant::store_event(qdrant_url, &event).await?;
 
     Ok(id)

@@ -4,11 +4,8 @@ mod qdrant;
 mod logging;
 mod handlers;
 
-use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::Router;
-use serde_json::Value;
 use std::env;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -27,7 +24,17 @@ async fn main() -> Result<(), anyhow::Error> {
     let api_key = env::var("API_KEY").unwrap_or_else(|_| "orchestrator-local".to_string());
     let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen3.6-35b-a3b".to_string());
 
+    // Create Postgres pool
+    let pool = db::create_pool(&db_url)?;
+
+    // Initialize schema
+    db::init_schema(&pool).await?;
+
+    // Initialize Qdrant collection
+    qdrant::init(&qdrant_url).await?;
+
     let state = Arc::new(AppState {
+        pool,
         db_url,
         qdrant_url: qdrant_url.clone(),
         litellm_url,
@@ -37,24 +44,21 @@ async fn main() -> Result<(), anyhow::Error> {
         http: reqwest::Client::new(),
     });
 
-    // Initialize database schema
-    db::init_pool(&state.db_url).await?;
-
     // Build router with all routes
     let app = Router::new()
-        // Health checks (MVP required)
+        // Health checks (no auth)
         .route("/health", get(handlers::health))
         .route("/health/live", get(handlers::health_live))
         .route("/health/ready", get(handlers::health_ready))
-        // OpenAI-compatible API
+        // OpenAI-compatible API (with auth)
         .route("/v1/models", get(handlers::list_models))
-        .route("/v1/chat/completions", post(handlers::chat_completions))
-        // Internal orchestrator endpoints
+        .route("/v1/chat/completions", get(handlers::chat_completions))
+        // Internal orchestrator endpoints (with auth)
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/context/pack", post(handlers::context_pack))
         .route("/summaries/checkpoint", post(handlers::checkpoint))
-        // Semantic retrieval
+        // Semantic retrieval (with auth)
         .route("/search", post(handlers::search))
         // Layer
         .layer(CorsLayer::permissive())

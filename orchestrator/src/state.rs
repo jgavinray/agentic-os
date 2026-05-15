@@ -1,9 +1,12 @@
+use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Shared application state (cloned per request via Arc)
 #[derive(Clone)]
 pub struct AppState {
+    /// Postgres connection pool
+    pub pool: Pool,
     /// Postgres connection string
     pub db_url: String,
     /// Qdrant base URL
