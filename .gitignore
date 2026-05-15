@@ -1,0 +1,52 @@
+# Build artifacts
+target/
+target-*
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust build artifacts (if built on host)
+Cargo.lock
+*.rlib
+
+# Workspace directories
+workspace/
+workspace/*
+!/workspace/.gitkeep
+
+# OpenHands state
+.openhands/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Docker volumes
+postgres_data/
+qdrant_data/
+
+# Temporary files
+tmp/
+tmp.*
+*.tmp
+*.bak
+*.cache

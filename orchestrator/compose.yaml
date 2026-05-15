@@ -1,0 +1,118 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agentpass
+      POSTGRES_DB: agentstack
+    volumes:
+      - postgres_data://var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agentstack"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  qdrant:
+    image: qdrant/qdrant
+    container_name: agent-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:6333/health || curl -f http://localhost:6333/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: agent-litellm
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
+      LITELLM_SALT_KEY: sk-change-this-before-real-use
+      STORE_MODEL_IN_DB: "True"
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command:
+      - "--config=/app/config.yaml"
+      - "--port=4000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:4000/litellm_proxy/api/v1/health/"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+    container_name: agent-orchestrator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
+      QDRANT_URL: http://qdrant:6333
+      LITELLM_URL: http://litellm:4000/v1
+      LITELLM_KEY: sk-local-agentstack
+      API_KEY: orchestrator-local
+      DEFAULT_MODEL: qwen3.6-35b-a3b
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8088/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  openhands:
+    image: ghcr.io/openhands/openhands
+    container_name: agent-openhands
+    restart: unless-stopped
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      AGENT_SERVER_IMAGE_REPOSITORY: ghcr.io/openhands/agent-server
+      AGENT_SERVER_IMAGE_TAG: 1.19.1-python
+      WORKSPACE_MOUNT_PATH: /workspace
+      LLM_MODEL: openai/qwen3.6-35b-a3b
+      LLM_API_KEY: sk-local-orchestrator
+      LLM_BASE_URL: http://orchestrator:8088/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./workspace:/opt/workspace_base
+      - openhands_state:/.openhands
+    stdin_open: true
+    tty: true
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  openhands_state:

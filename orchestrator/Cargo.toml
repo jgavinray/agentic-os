@@ -1,0 +1,24 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7.9", features = ["tower-log"] }
+axum-extra = { version = "0.9.3", features = ["typed-header"] }
+tokio = { version = "1.42.0", features = ["full"] }
+tokio-postgres = { version = "0.7.12", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
+deadpool-postgres = { version = "0.13", features = ["serde"] }
+postgres = "0.19"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.134"
+reqwest = { version = "0.12.11", features = ["json", "rustls-tls", "stream"], default-features = false }
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.39", features = ["serde"] }
+sha2 = "0.10.8"
+anyhow = "1.0.95"
+tower-http = { version = "0.6.2", features = ["cors", "trace"] }
+async-stream = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+futures = "0.3"
