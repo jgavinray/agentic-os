@@ -44,7 +44,7 @@ services:
       - "4000:4000"
     environment:
       DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
-      LITELLM_SALT_KEY: sk-change-this-before-real-use
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?LITELLM_SALT_KEY must be set in .env — generate with: openssl rand -hex 32}
       STORE_MODEL_IN_DB: "True"
     volumes:
       - ./litellm-config.yaml:/app/config.yaml:ro
@@ -72,7 +72,7 @@ services:
     environment:
       DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
       QDRANT_URL: http://qdrant:6333
-      LITELLM_URL: http://litellm:4000
+      LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
       API_KEY: sk-local-orchestrator
       DEFAULT_MODEL: qwen36-35b-heretic

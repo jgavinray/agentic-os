@@ -1,13 +1,13 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::response::Sse;
 use axum::response::IntoResponse;
-use axum::response::sse::Event;
 use axum::response::Response;
+use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 use crate::state::*;
 use crate::db;
@@ -15,13 +15,21 @@ use crate::qdrant;
 
 // ── Auth helper ────────────────────────────────────────────────
 
+// BUG-8: Constant-time comparison prevents timing-based key recovery.
 fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
-    headers
+    let provided = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|token| token == state.api_key)
-        .unwrap_or(false)
+        .unwrap_or("");
+
+    let expected = state.api_key.as_bytes();
+    let provided = provided.as_bytes();
+
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected.ct_eq(provided).into()
 }
 
 // ── Health checks (no auth) ─────────────────────────────────────
@@ -41,14 +49,12 @@ pub async fn health_ready(
     let mut healthy = Vec::new();
     let mut unhealthy = Vec::new();
 
-    // Check Postgres via SELECT 1
     if db::check_ready(&state.pool).await.is_ok() {
         healthy.push("postgres");
     } else {
         unhealthy.push("postgres");
     }
 
-    // Check Qdrant — /collections returns 200 when alive
     if http
         .get(&format!("{}/collections", state.qdrant_url))
         .send()
@@ -61,9 +67,9 @@ pub async fn health_ready(
         unhealthy.push("qdrant");
     }
 
-    // Check LiteLLM - accept 401 as "alive" (requires auth)
+    // LITELLM_URL already includes /v1 — no extra path segment needed here.
     if http
-        .get(&format!("{}/v1/models", state.litellm_url))
+        .get(&format!("{}/models", state.litellm_url))
         .send()
         .await
         .map(|r| r.status().is_success() || r.status() == 401)
@@ -91,32 +97,37 @@ pub async fn health_ready(
     })))
 }
 
-// ── Model listing (auth required) ───────────────────────────────
+// ── Model listing — BUG-10: proxy to LiteLLM ───────────────────
 
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
-    axum::Json(serde_json::json!({
-        "data": [{
-            "id": state.default_model,
-            "object": "model",
-            "owned_by": "orchestrator",
-        }],
-        "object": "list",
-    }))
-    .into_response()
+    let url = format!("{}/models", state.litellm_url);
+    match state.http.get(&url).bearer_auth(&state.litellm_key).send().await {
+        Ok(r) => {
+            let status = r.status();
+            match r.json::<Value>().await {
+                Ok(v) => (status, axum::Json(v)).into_response(),
+                Err(_) => fallback_model_list(&state).into_response(),
+            }
+        }
+        Err(_) => fallback_model_list(&state).into_response(),
+    }
 }
 
-// ── Session management (auth required) ──────────────────────────
+fn fallback_model_list(state: &AppState) -> axum::Json<Value> {
+    axum::Json(serde_json::json!({
+        "data": [{"id": state.default_model, "object": "model", "owned_by": "orchestrator"}],
+        "object": "list"
+    }))
+}
+
+// ── Session management ──────────────────────────────────────────
 
 pub async fn start_session(
     State(state): State<Arc<AppState>>,
@@ -124,11 +135,7 @@ pub async fn start_session(
     axum::Json(req): axum::Json<StartSessionRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
     let id = match db::start_session_from_request(&state.pool, &req).await {
@@ -137,15 +144,14 @@ pub async fn start_session(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({"error": "failed_to_create_session", "detail": e.to_string()})),
-            )
-                .into_response();
+            ).into_response();
         }
     };
 
     axum::Json(StartSessionResponse { session_id: id }).into_response()
 }
 
-// ── Event management (auth required) ────────────────────────────
+// ── Event management ────────────────────────────────────────────
 
 pub async fn append_event(
     State(state): State<Arc<AppState>>,
@@ -153,28 +159,26 @@ pub async fn append_event(
     axum::Json(req): axum::Json<AppendEventRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
-    let event_id = match db::append_event_from_request(&state.pool, &state.qdrant_url, &req).await {
+    let event_id = match db::append_event_from_request(
+        &state.pool, &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url, &req,
+    ).await {
         Ok(id) => id,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({"error": "failed_to_append_event", "detail": e.to_string()})),
-            )
-                .into_response();
+            ).into_response();
         }
     };
 
     axum::Json(serde_json::json!({"event_id": event_id})).into_response()
 }
 
-// ── Context pack (auth required) ────────────────────────────────
+// ── Context pack ────────────────────────────────────────────────
 
 pub async fn context_pack(
     State(state): State<Arc<AppState>>,
@@ -182,66 +186,29 @@ pub async fn context_pack(
     axum::Json(req): axum::Json<ContextPackRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
     let limit = req.limit.unwrap_or(8);
-
     let events = match db::get_events_for_repo(&state.pool, &req.repo, limit).await {
-        Ok(events) => events,
+        Ok(e) => e,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({"error": "failed_to_fetch_context", "detail": e.to_string()})),
-            )
-                .into_response();
+            ).into_response();
         }
     };
 
     let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
-
-    // Semantic retrieval from Qdrant
     let search_query = format!("{} {}", req.repo, req.task);
-    let semantic_results = qdrant::search(&state.qdrant_url, &search_query, 5)
-        .await
-        .ok()
-        .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|arr| arr.to_vec()))
-        .unwrap_or_default();
+    let semantic_summaries = semantic_search_summaries(&state, &search_query, 5).await;
+    let context = db::build_context(&req.repo, &req.task, &memories, &semantic_summaries, 8000);
 
-    // Inject semantic memories into context pack
-    let semantic_context = if !semantic_results.is_empty() {
-        let semantic_entries: Vec<String> = semantic_results.iter()
-            .filter_map(|item| item.get("payload").and_then(|p| p.get("summary").and_then(|s| s.as_str())))
-            .map(|s| format!("- [semantic] {}", s))
-            .collect();
-        semantic_entries.join("\n")
-    } else {
-        String::new()
-    };
-
-    let context = db::build_context(&req.repo, &req.task, &memories);
-
-    // Append semantic context if available
-    let full_context = if !semantic_context.is_empty() {
-        format!("{}\n\nSemantic recall:\n{}", context, semantic_context)
-    } else {
-        context
-    };
-
-    axum::Json(ContextPackResponse {
-        repo: req.repo,
-        task: req.task,
-        context: full_context,
-        memories,
-    })
-    .into_response()
+    axum::Json(ContextPackResponse { repo: req.repo, task: req.task, context, memories }).into_response()
 }
 
-// ── Checkpoint (auth required) ──────────────────────────────────
+// ── Checkpoint ──────────────────────────────────────────────────
 
 pub async fn checkpoint(
     State(state): State<Arc<AppState>>,
@@ -249,11 +216,7 @@ pub async fn checkpoint(
     axum::Json(req): axum::Json<CheckpointRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
     let event = AppendEventRequest {
@@ -269,29 +232,99 @@ pub async fn checkpoint(
         })),
     };
 
-    let event_id = match db::append_event_from_request(&state.pool, &state.qdrant_url, &event).await {
+    let event_id = match db::append_event_from_request(
+        &state.pool, &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url, &event,
+    ).await {
         Ok(id) => id,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({"error": "failed_to_checkpoint", "detail": e.to_string()})),
-            )
-                .into_response();
+            ).into_response();
         }
     };
 
     axum::Json(serde_json::json!({"event_id": event_id})).into_response()
 }
 
-// ── Chat completions (auth required, streaming + non-streaming) ─
+// ── Chat completions ────────────────────────────────────────────
 
+/// BUG-4: Append context to an existing client system message rather than inserting
+/// a new one at position 0, which would demote the harness's carefully-tuned prompt.
 fn inject_system_context(payload: &mut Value, context: &str) {
     if let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) {
-        messages.insert(
-            0,
-            serde_json::json!({"role": "system", "content": context}),
-        );
+        if let Some(first) = messages.first_mut() {
+            if first.get("role").and_then(|r| r.as_str()) == Some("system") {
+                let existing = first["content"].as_str().unwrap_or("").to_string();
+                first["content"] = Value::String(format!("{existing}\n\n---\n{context}"));
+                return;
+            }
+        }
+        messages.insert(0, serde_json::json!({"role": "system", "content": context}));
     }
+}
+
+fn extract_assistant_from_sse(raw: &str) -> String {
+    let mut content = String::new();
+    for line in raw.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data.trim() == "[DONE]" {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    content.push_str(delta);
+                }
+            }
+        }
+    }
+    content
+}
+
+async fn persist_exchange(state: &AppState, session_id: &str, repo: &str, user_content: &str, assistant_content: &str) {
+    let make_req = |event_type: &str, actor: &str, content: &str| AppendEventRequest {
+        session_id: session_id.to_string(),
+        repo: repo.to_string(),
+        actor: Some(actor.to_string()),
+        event_type: event_type.to_string(),
+        summary: content.chars().take(500).collect(),
+        evidence: None,
+        metadata: None,
+    };
+
+    if let Err(e) = db::append_event_from_request(
+        &state.pool, &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url,
+        &make_req("user_message", "user", user_content),
+    ).await {
+        tracing::warn!("failed to persist user_message: {e}");
+    }
+
+    if let Err(e) = db::append_event_from_request(
+        &state.pool, &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url,
+        &make_req("assistant_message", "assistant", assistant_content),
+    ).await {
+        tracing::warn!("failed to persist assistant_message: {e}");
+    }
+}
+
+async fn semantic_search_summaries(state: &AppState, query: &str, limit: usize) -> Vec<String> {
+    qdrant::search(
+        &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url, query, limit,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|item| {
+        item.get("payload")
+            .and_then(|p| p.get("summary"))
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+    })
+    .collect()
 }
 
 pub async fn chat_completions(
@@ -299,152 +332,164 @@ pub async fn chat_completions(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    // Auth check
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
     let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // Extract routing headers
     let repo = headers.get("x-agent-repo").and_then(|v| v.to_str().ok()).map(str::to_string);
     let task = headers.get("x-agent-task").and_then(|v| v.to_str().ok()).map(str::to_string);
 
-    let mut req = payload.clone();
+    // BUG-5: Warn (or reject) when routing headers are absent.
+    if repo.is_none() || task.is_none() {
+        if state.require_routing_headers {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": "missing_routing_headers",
+                    "detail": "x-agent-repo and x-agent-task are required (REQUIRE_ROUTING_HEADERS=true)"
+                })),
+            ).into_response();
+        }
+        tracing::warn!(
+            missing_repo = repo.is_none(),
+            missing_task = task.is_none(),
+            "routing headers absent — memory context and persistence skipped"
+        );
+    }
 
-    // Set default model if missing
+    let mut req = payload.clone();
     if req.get("model").is_none() {
         req["model"] = Value::String(state.default_model.clone());
     }
 
-    // Shared context-building for both streaming and non-streaming paths
-    if let (Some(ref repo), Some(ref task)) = (&repo, &task) {
-        let limit = 8i64;
-        let events = db::get_events_for_repo(&state.pool, &repo, limit).await.ok();
-
-        let search_query = format!("{} {}", &repo, &task);
-        let semantic_results = qdrant::search(&state.qdrant_url, &search_query, 5)
-            .await
-            .ok()
-            .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|arr| arr.to_vec()))
-            .unwrap_or_default();
-
+    if let (Some(ref r), Some(ref t)) = (&repo, &task) {
+        let events = db::get_events_for_repo(&state.pool, r, 8).await.ok();
         let memories: Vec<EventMemory> = events
             .iter()
-            .flat_map(|e| e.iter().map(|m| m.to_memory()).collect::<Vec<_>>())
+            .flat_map(|evts| evts.iter().map(|e| e.to_memory()))
             .collect();
-
-        let context = db::build_context(&repo, &task, &memories);
-
-        let semantic_context: String = semantic_results.iter()
-            .filter_map(|item| item.get("payload").and_then(|p| p.get("summary").and_then(|s| s.as_str())))
-            .map(|s| format!("- [semantic] {}", s))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let full_context = if !semantic_context.is_empty() {
-            format!("{}\n\nSemantic recall:\n{}", context, semantic_context)
-        } else {
-            context
-        };
-
-        inject_system_context(&mut req, &full_context);
+        let semantic_summaries = semantic_search_summaries(&state, &format!("{r} {t}"), 5).await;
+        let context = db::build_context(r, t, &memories, &semantic_summaries, 8000);
+        inject_system_context(&mut req, &context);
     }
 
     if is_stream {
-        req["stream"] = serde_json::json!(true);
-        // Streaming path: proxy SSE from LiteLLM with real context
-        let url = format!("{}/chat/completions", state.litellm_url);
-        let http = state.http.clone();
-        let key = state.litellm_key.clone();
-
-        let stream = async_stream::stream! {
-            let resp = http
-                .post(&url)
-                .bearer_auth(&key)
-                .json(&req)
-                .send()
-                .await;
-
-            match resp {
-                Ok(resp) => {
-                    let bytes_stream = resp.bytes_stream();
-                    let mut stream = bytes_stream;
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                                            Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                // Parse SSE: find "data: " prefix and extract the JSON payload
-                                // We strip it because axum's Event::default().data() will re-wrap with "data: "
-                                let json = if let Some(start) = text.find("data: ") {
-                                    &text[start + 6..]
-                                } else {
-                                    text.as_ref()
-                                };
-                                yield Ok::<Event, axum::Error>(Event::default().data(json.to_string()));
-                            }
-                            Err(e) => {
-                                yield Ok::<Event, axum::Error>(Event::default().data(format!("Error: {}", e)));
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    yield Ok::<Event, axum::Error>(Event::default().data(format!("Connection error: {}", e)));
-                }
-            }
-        };
-
-        return (
-            {
-                let mut headers = axum::http::HeaderMap::new();
-                headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/event-stream".parse().unwrap(),
-                );
-                headers
-            },
-            Sse::new(stream),
-        ).into_response();
+        return handle_streaming(&state, req, repo, task).await;
     }
 
-    // Non-streaming path: forward to LiteLLM with real context
+    // ── Non-streaming ───────────────────────────────────────────
     let url = format!("{}/chat/completions", state.litellm_url);
-    let http = state.http.clone();
-    let key = state.litellm_key.clone();
+    match state.http.post(&url).bearer_auth(&state.litellm_key).json(&req).send().await {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(val) => {
+                // BUG-2: Persist after successful completion.
+                if let (Some(ref r), Some(ref t)) = (&repo, &task) {
+                    let user_content: String = req["messages"]
+                        .as_array()
+                        .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
+                        .and_then(|m| m["content"].as_str())
+                        .unwrap_or("")
+                        .chars().take(500).collect();
+                    let assistant_content: String = val["choices"][0]["message"]["content"]
+                        .as_str().unwrap_or("").chars().take(500).collect();
 
-    let resp = http
-        .post(&url)
-        .bearer_auth(&key)
-        .json(&req)
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) => {
-            let text = r.text().await;
-            let val: Value = match text {
-                Ok(t) => match serde_json::from_str(&t) {
-                    Ok(v) => v,
-                    Err(_) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_parse_error", "detail": "failed_to_parse_litellm_response"}))).into_response(),
-                },
-                Err(_) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_text_error", "detail": "failed_to_read_litellm_response_body"}))).into_response(),
-            };
-            axum::Json(val).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            axum::Json(serde_json::json!({"error": "litellm_timeout", "detail": e.to_string()})),
-        )
-            .into_response(),
+                    match db::find_or_create_session(&state.pool, r, t, "agent").await {
+                        Ok(session_id) => persist_exchange(&state, &session_id, r, &user_content, &assistant_content).await,
+                        Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
+                    }
+                }
+                axum::Json(val).into_response()
+            }
+            Err(_) => (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_parse_error"}))).into_response(),
+        },
+        Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}))).into_response(),
     }
 }
 
-// ── Semantic search (auth required) ─────────────────────────────
+/// BUG-3: Pass raw upstream SSE bytes through without re-parsing or re-wrapping.
+/// ADD-1: Tap the byte stream via a oneshot to trigger persistence after the stream ends.
+async fn handle_streaming(state: &AppState, req: Value, repo: Option<String>, task: Option<String>) -> Response {
+    let url = format!("{}/chat/completions", state.litellm_url);
+
+    let upstream = match state.http_stream.post(&url).bearer_auth(&state.litellm_key).json(&req).send().await {
+        Ok(r) => r,
+        Err(e) => return (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()})),
+        ).into_response(),
+    };
+
+    let bytes_stream = upstream.bytes_stream();
+
+    if let (Some(repo_s), Some(task_s)) = (repo, task) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+        let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let acc_clone = accumulated.clone();
+
+        // Wrap the upstream stream to accumulate bytes on the side.
+        let tapped = async_stream::stream! {
+            tokio::pin!(bytes_stream);
+            let mut tx_opt = Some(done_tx);
+            while let Some(chunk) = bytes_stream.next().await {
+                match chunk {
+                    Ok(b) => {
+                        if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
+                        yield Ok::<Bytes, std::io::Error>(b);
+                    }
+                    Err(e) => {
+                        yield Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                    }
+                }
+            }
+            // ADD-1: signal stream end so the persistence task can run immediately.
+            if let Some(tx) = tx_opt.take() {
+                let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
+                let _ = tx.send(data);
+            }
+        };
+
+        let user_content: String = req["messages"]
+            .as_array()
+            .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .chars().take(500).collect();
+
+        let state_bg = state.clone();
+        tokio::spawn(async move {
+            if let Ok(raw_bytes) = done_rx.await {
+                let raw = String::from_utf8_lossy(&raw_bytes);
+                let assistant_content = extract_assistant_from_sse(&raw);
+                match db::find_or_create_session(&state_bg.pool, &repo_s, &task_s, "agent").await {
+                    Ok(sid) => persist_exchange(&state_bg, &sid, &repo_s, &user_content, &assistant_content).await,
+                    Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
+                }
+            }
+        });
+
+        return (
+            [
+                (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+                (axum::http::header::CONNECTION, "keep-alive"),
+            ],
+            axum::body::Body::from_stream(tapped),
+        ).into_response();
+    }
+
+    // No routing headers — simple pass-through.
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::CONNECTION, "keep-alive"),
+        ],
+        axum::body::Body::from_stream(bytes_stream),
+    ).into_response()
+}
+
+// ── Semantic search ─────────────────────────────────────────────
 
 pub async fn search(
     State(state): State<Arc<AppState>>,
@@ -452,25 +497,21 @@ pub async fn search(
     axum::Json(req): axum::Json<Value>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
     let query = req.get("q").and_then(|v| v.as_str()).unwrap_or("");
     let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    let results = match qdrant::search(&state.qdrant_url, query, limit).await {
+    let results = match qdrant::search(
+        &state.http, &state.litellm_url, &state.litellm_key,
+        &state.embedding_model, &state.qdrant_url, query, limit,
+    ).await {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "search_failed", "detail": e.to_string()})),
-            )
-                .into_response();
-        }
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": "search_failed", "detail": e.to_string()})),
+        ).into_response(),
     };
 
     axum::Json(serde_json::json!({"results": results})).into_response()

@@ -7,20 +7,26 @@ use serde_json::Value;
 pub struct AppState {
     /// Postgres connection pool
     pub pool: Pool,
-    /// Postgres connection string
+    /// Postgres connection string (kept for diagnostics)
     pub db_url: String,
     /// Qdrant base URL
     pub qdrant_url: String,
-    /// LiteLLM base URL
+    /// LiteLLM base URL (must include /v1 suffix)
     pub litellm_url: String,
     /// LiteLLM API key
     pub litellm_key: String,
     /// Orchestrator API key (for auth enforcement)
     pub api_key: String,
-    /// Default model name
+    /// Default model name for completions
     pub default_model: String,
-    /// Shared HTTP client for upstream requests
+    /// Embedding model served by LiteLLM (must match Qdrant collection vector size)
+    pub embedding_model: String,
+    /// When true, requests without x-agent-repo/x-agent-task return 400 instead of silently skipping memory
+    pub require_routing_headers: bool,
+    /// Shared HTTP client for non-streaming upstream requests (has full timeouts)
     pub http: reqwest::Client,
+    /// HTTP client for streaming upstream requests (no overall request timeout)
+    pub http_stream: reqwest::Client,
 }
 
 // ── Request types ──────────────────────────────────────────────
