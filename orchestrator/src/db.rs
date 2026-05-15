@@ -1,6 +1,16 @@
+use crate::state::ErrorRecord;
 use deadpool_postgres::{Config, Pool, PoolConfig};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
+use std::collections::HashMap;
+use serde_json::Value;
+
+/// A single agent event with its relevance score from hybrid merge.
+#[derive(Debug, Clone)]
+pub struct RankedEvent {
+    pub id: String,
+    pub score: f64,
+}
 
 // ── Reusable event type ──────────────────────────────────────
 
@@ -96,6 +106,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_repo_created
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_session
     ON agent_events(session_id);
+
+CREATE INDEX IF NOT EXISTS idx_error_index_repo
+    ON error_index(repo);
+CREATE INDEX IF NOT EXISTS idx_error_index_type
+    ON error_index(error_type);
+CREATE INDEX IF NOT EXISTS idx_error_index_freq
+    ON error_index(frequency DESC);
         "#,
     )
     .await?;
@@ -207,6 +224,56 @@ pub async fn get_events_for_repo(
         .collect();
 
     Ok(events)
+}
+
+pub async fn insert_error_record(
+    pool: &Pool,
+    repo: &str,
+    task: &str,
+    error_type: &str,
+    description: &str,
+    severity: &str,
+) -> Result<(), anyhow::Error> {
+    let conn = pool.get().await?;
+    conn.execute(
+        "INSERT INTO error_index (repo, task, error_type, description, severity)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (repo, task, error_type, description)
+         DO UPDATE SET
+            frequency = error_index.frequency + 1,
+            last_seen = now()",
+        &[&repo, &task, &error_type, &description, &severity],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn get_active_errors(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<ErrorRecord>, anyhow::Error> {
+    let conn = pool.get().await?;
+    let rows = conn.query(
+        "SELECT id, repo, task, error_type, description, severity, frequency, last_seen
+         FROM error_index
+         WHERE repo = $1
+         ORDER BY frequency DESC, last_seen DESC
+         LIMIT $2",
+        &[&repo, &limit],
+    ).await?;
+    rows.into_iter().map(|row| {
+        Ok(ErrorRecord {
+            id: row.get("id"),
+            repo: row.get("repo"),
+            task: row.get("task"),
+            error_type: row.get("error_type"),
+            description: row.get("description"),
+            severity: row.get("severity"),
+            frequency: row.get(".frequency"),
+            last_seen: row.get("last_seen"),
+        })
+    }).collect()
 }
 
 // ── Request adapters ──────────────────────────────────────────

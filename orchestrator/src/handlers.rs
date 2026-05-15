@@ -188,6 +188,18 @@ pub async fn append_event(
         }
     };
 
+    // Detect and record errors from the event.
+    if let Some(error_type) = &req.error_type {
+        let error_desc = req.error_description.as_deref().unwrap_or("");
+        let task = req.task.as_deref().unwrap_or("");
+        let severity = "medium";
+        if let Err(e) = db::insert_error_record(
+            &state.pool, &req.repo, task, error_type, error_desc, severity,
+        ).await {
+            tracing::warn!(%error_type, "failed to record error: {e}");
+        }
+    }
+
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed})).into_response()
 }
 
@@ -203,6 +215,9 @@ pub async fn context_pack(
     }
 
     let limit = req.limit.unwrap_or(8);
+    let task_category = crate::state::TaskCategory::from_task(&req.task);
+    let task_config = crate::state::TaskContextConfig::for_category(task_category);
+    let limit = req.limit.unwrap_or(task_config.max_events);
     let events = match db::get_events_for_repo(&state.pool, &req.repo, limit).await {
         Ok(e) => e,
         Err(e) => {
@@ -232,6 +247,7 @@ pub async fn checkpoint(
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
     }
 
+    let task_string = format!("{}/{}", req.repo, req.summary.chars().take(50).collect::<String>());
     let event = AppendEventRequest {
         session_id: req.session_id,
         repo: req.repo,
@@ -243,6 +259,9 @@ pub async fn checkpoint(
             "next_actions": req.next_actions.unwrap_or_default(),
             "open_questions": req.open_questions.unwrap_or_default(),
         })),
+        task: Some(task_string),
+        error_type: None,
+        error_description: None,
     };
 
     let (event_id, qdrant_indexed) = match db::append_event_from_request(
@@ -303,6 +322,9 @@ async fn persist_exchange(state: &AppState, session_id: &str, repo: &str, user_c
         summary: content.chars().take(500).collect(),
         evidence: None,
         metadata: None,
+        task: None,
+        error_type: None,
+        error_description: None,
     };
 
     match db::append_event_from_request(
