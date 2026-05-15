@@ -23,12 +23,18 @@ pub async fn init(qdrant_url: &str) -> Result<(), anyhow::Error> {
         }
     });
     let http = reqwest::Client::new();
-    http.put(&url)
+    let resp = http
+        .put(&url)
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
+        .await?;
+    // Accept 200 OK, 201 Created, and 409 Conflict (already exists) for idempotency
+    if resp.status().is_success() || resp.status() == 409 {
+        Ok(())
+    } else {
+        let _ = resp.error_for_status()?;
+        Ok(())
+    }
 }
 
 pub async fn store_event(qdrant_url: &str, event: &crate::db::AgentEvent) -> Result<(), anyhow::Error> {
@@ -46,13 +52,17 @@ pub async fn store_event(qdrant_url: &str, event: &crate::db::AgentEvent) -> Res
     });
 
     let http = reqwest::Client::new();
-    http.put(&url)
+    let resp = http
+        .put(&url)
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?;
-
-    Ok(())
+        .await?;
+    if resp.status().is_success() || resp.status() == 409 {
+        Ok(())
+    } else {
+        resp.error_for_status()?;
+        Ok(())
+    }
 }
 
 pub async fn search(qdrant_url: &str, query: &str, limit: usize) -> Result<Value, anyhow::Error> {

@@ -5,7 +5,6 @@ use axum::response::Sse;
 use axum::response::IntoResponse;
 use axum::response::sse::Event;
 use axum::response::Response;
-use futures::Stream;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -42,19 +41,19 @@ pub async fn health_ready(
     let mut healthy = Vec::new();
     let mut unhealthy = Vec::new();
 
-    // Check Postgres
-    if http.get("http://localhost:5432").send().await.is_ok() {
+    // Check Postgres via SELECT 1
+    if db::check_ready(&state.pool).await.is_ok() {
         healthy.push("postgres");
     } else {
         unhealthy.push("postgres");
     }
 
-    // Check Qdrant
+    // Check Qdrant — /api/v1/collections returns 200 when alive
     if http
         .get(&format!("{}/api/v1/collections", state.qdrant_url))
         .send()
         .await
-        .map(|r| r.status().is_success())
+        .map(|r| r.status().is_success() || r.status() == 404)
         .unwrap_or(false)
     {
         healthy.push("qdrant");
@@ -62,12 +61,12 @@ pub async fn health_ready(
         unhealthy.push("qdrant");
     }
 
-    // Check LiteLLM
+    // Check LiteLLM - accept 401 as "alive" (requires auth)
     if http
-        .get(&format!("{}/models", state.litellm_url))
+        .get(&format!("{}/v1/models", state.litellm_url))
         .send()
         .await
-        .map(|r| r.status().is_success())
+        .map(|r| r.status().is_success() || r.status() == 401)
         .unwrap_or(false)
     {
         healthy.push("litellm");
@@ -322,65 +321,7 @@ pub async fn chat_completions(
         req["model"] = Value::String(state.default_model.clone());
     }
 
-    if is_stream {
-        // Streaming path: proxy SSE from LiteLLM
-        req["stream"] = serde_json::json!(true);
-
-        if let (Some(_repo), Some(_task)) = (&repo, &task) {
-            inject_system_context(
-                &mut req,
-                "Repository context active. Use prior decisions as constraints.",
-            );
-        }
-
-        let url = format!("{}/chat/completions", state.litellm_url);
-        let http = state.http.clone();
-        let key = state.litellm_key.clone();
-
-        let stream = async_stream::stream! {
-            let resp = http
-                .post(&url)
-                .bearer_auth(&key)
-                .json(&req)
-                .send()
-                .await;
-
-            match resp {
-                Ok(resp) => {
-                    let bytes_stream = resp.bytes_stream();
-                    let mut stream = bytes_stream;
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                yield Ok::<Event, axum::Error>(Event::default().data(text));
-                            }
-                            Err(e) => {
-                                yield Ok::<Event, axum::Error>(Event::default().data(format!("Error: {}", e)));
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    yield Ok::<Event, axum::Error>(Event::default().data(format!("Connection error: {}", e)));
-                }
-            }
-        };
-
-        return (
-            {
-                let mut headers = axum::http::HeaderMap::new();
-                headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/event-stream".parse().unwrap(),
-                );
-                headers
-            },
-            Sse::new(stream),
-        ).into_response();
-    }
-
-    // Non-streaming path: inject context from semantic search + Postgres
+    // Shared context-building for both streaming and non-streaming paths
     if let (Some(ref repo), Some(ref task)) = (&repo, &task) {
         let limit = 8i64;
         let events = db::get_events_for_repo(&state.pool, &repo, limit).await.ok();
@@ -414,7 +355,62 @@ pub async fn chat_completions(
         inject_system_context(&mut req, &full_context);
     }
 
-    // Forward to LiteLLM
+    // Ensure stream flag is set for SSE path
+    req["stream"] = serde_json::json!(true);
+
+    if is_stream {
+        // Streaming path: proxy SSE from LiteLLM with real context
+        let url = format!("{}/chat/completions", state.litellm_url);
+        let http = state.http.clone();
+        let key = state.litellm_key.clone();
+
+        let stream = async_stream::stream! {
+            let resp = http
+                .post(&url)
+                .bearer_auth(&key)
+                .json(&req)
+                .send()
+                .await;
+
+            match resp {
+                Ok(resp) => {
+                    let bytes_stream = resp.bytes_stream();
+                    let mut stream = bytes_stream;
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                let text = String::from_utf8_lossy(&bytes);
+                                // Strip "data: " prefix that LiteLLM adds so we don't double-wrap SSE
+                                let text = text.trim();
+                                let text = text.strip_prefix("data: ").unwrap_or(text);
+                                yield Ok::<Event, axum::Error>(Event::default().data(text.to_string()));
+                            }
+                            Err(e) => {
+                                yield Ok::<Event, axum::Error>(Event::default().data(format!("Error: {}", e)));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Ok::<Event, axum::Error>(Event::default().data(format!("Connection error: {}", e)));
+                }
+            }
+        };
+
+        return (
+            {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/event-stream".parse().unwrap(),
+                );
+                headers
+            },
+            Sse::new(stream),
+        ).into_response();
+    }
+
+    // Non-streaming path: forward to LiteLLM with real context
     let url = format!("{}/chat/completions", state.litellm_url);
     let http = state.http.clone();
     let key = state.litellm_key.clone();

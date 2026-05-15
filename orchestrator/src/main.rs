@@ -52,7 +52,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/health/ready", get(handlers::health_ready))
         // OpenAI-compatible API (with auth)
         .route("/v1/models", get(handlers::list_models))
-        .route("/v1/chat/completions", get(handlers::chat_completions))
+        .route("/v1/chat/completions", post(handlers::chat_completions))
         // Internal orchestrator endpoints (with auth)
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))

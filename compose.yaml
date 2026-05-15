@@ -72,12 +72,12 @@ services:
     environment:
       DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
       QDRANT_URL: http://qdrant:6333
-      LITELLM_URL: http://litellm:4000/v1
+      LITELLM_URL: http://litellm:4000
       LITELLM_KEY: sk-local-agentstack
-      API_KEY: sk-local--orchestrator
+      API_KEY: sk-local-orchestrator
       DEFAULT_MODEL: qwen3.6-35b-a3b
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8088/health"]
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8088/health || false"]
       interval: 5s
       timeout: 5s
       retries: 10

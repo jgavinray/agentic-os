@@ -33,7 +33,7 @@ impl AgentEvent {
             "session_id": self.session_id,
             "repo": self.repo,
             "actor": self.actor,
-            ".event_type": self.event_type,
+            "event_type": self.event_type,
             "summary": self.summary,
             "evidence": self.evidence,
             "metadata": self.metadata,
@@ -215,6 +215,12 @@ pub async fn append_event_from_request(
 }
 
 // ── Context pack builder ──────────────────────────────────────
+
+pub async fn check_ready(pool: &deadpool_postgres::Pool) -> Result<(), anyhow::Error> {
+    let conn = pool.get().await?;
+    let _ = conn.query_one("SELECT 1", &[]).await?;
+    Ok(())
+}
 
 pub fn build_context(
     repo: &str,
