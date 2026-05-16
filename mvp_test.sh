@@ -123,7 +123,7 @@ MSG_RESP=$(curl -fsS "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":32,
+    \"max_tokens\":256,
     \"messages\":[{\"role\":\"user\",\"content\":\"reply exactly: ok\"}]
   }")
 echo "$MSG_RESP" | jq .
@@ -144,7 +144,7 @@ SYS_RESP=$(curl -fsS "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":16,
+    \"max_tokens\":256,
     \"system\":\"You are a helpful assistant. Always reply in one word.\",
     \"messages\":[{\"role\":\"user\",\"content\":\"Greet me.\"}]
   }")
@@ -188,7 +188,7 @@ curl -fsS -N "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":64,
+    \"max_tokens\":2048,
     \"stream\":true,
     \"messages\":[{\"role\":\"user\",\"content\":\"count from 1 to 3\"}]
   }" | tee /tmp/agentic-os-msg-stream.out
