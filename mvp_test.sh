@@ -92,6 +92,7 @@ CHAT_RESP=$(curl -fsS "$BASE/v1/chat/completions" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
+    \"max_tokens\":8192,
     \"messages\":[{\"role\":\"user\",\"content\":\"reply exactly: ok\"}]
   }")
 echo "$CHAT_RESP" | jq .
@@ -106,6 +107,7 @@ curl -fsS -N "$BASE/v1/chat/completions" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
+    \"max_tokens\":8192,
     \"stream\":true,
     \"messages\":[{\"role\":\"user\",\"content\":\"count from 1 to 5\"}]
   }" | tee /tmp/agentic-os-stream.out
@@ -123,7 +125,7 @@ MSG_RESP=$(curl -fsS "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":256,
+    \"max_tokens\":8192,
     \"messages\":[{\"role\":\"user\",\"content\":\"reply exactly: ok\"}]
   }")
 echo "$MSG_RESP" | jq .
@@ -144,7 +146,7 @@ SYS_RESP=$(curl -fsS "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":256,
+    \"max_tokens\":8192,
     \"system\":\"You are a helpful assistant. Always reply in one word.\",
     \"messages\":[{\"role\":\"user\",\"content\":\"Greet me.\"}]
   }")
@@ -188,7 +190,7 @@ curl -fsS -N "$BASE/v1/messages" \
   "${auth[@]}" "${json[@]}" \
   -d "{
     \"model\":\"$MODEL\",
-    \"max_tokens\":2048,
+    \"max_tokens\":8192,
     \"stream\":true,
     \"messages\":[{\"role\":\"user\",\"content\":\"count from 1 to 3\"}]
   }" | tee /tmp/agentic-os-msg-stream.out
@@ -341,7 +343,7 @@ echo "context-injected chat: OK"
 # ── Restart persistence ───────────────────────────────────────────
 
 echo "== Restart persistence =="
-docker compose restart postgres qdrant orchestrator >/dev/null
+docker compose restart postgres qdrant orchestrator litellm >/dev/null
 wait_for_ready
 
 curl -fsS "$BASE/context/pack" \

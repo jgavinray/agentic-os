@@ -95,7 +95,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
-      API_KEYS: sk-local-orchestrator
+      API_KEYS: sk-local-orchestrator,agent-os
       DEFAULT_MODEL: qwen36-35b-heretic
       DEFAULT_TASK: engineering
       EMBEDDING_URL: http://embedding:80

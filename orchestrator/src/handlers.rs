@@ -412,6 +412,16 @@ fn anthropic_error(
 
 /// BUG-4: Append context to an existing client system message rather than inserting
 /// a new one at position 0, which would demote the harness's carefully-tuned prompt.
+/// Ensure the request asks for at least `MIN_MAX_TOKENS` output tokens.
+/// Anthropic requires `max_tokens`; OpenAI treats it as optional. We floor
+/// whatever the client sent so reasoning models don't get starved mid-response.
+fn enforce_min_max_tokens(req: &mut Value) {
+    let current = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    if current < MIN_MAX_TOKENS {
+        req["max_tokens"] = Value::from(MIN_MAX_TOKENS);
+    }
+}
+
 fn inject_system_context(payload: &mut Value, context: &str) {
     if let Some(messages) = payload.get_mut("messages").and_then(|v| v.as_array_mut()) {
         if let Some(first) = messages.first_mut() {
@@ -589,6 +599,9 @@ pub async fn chat_completions(
     tracing::info!(repo = %repo, task = %task, "routing request");
 
     let mut req = payload.clone();
+    // Always route to the configured backend model regardless of what the client sent.
+    req["model"] = Value::String(state.default_model.clone());
+    enforce_min_max_tokens(&mut req);
     pack_context_into_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
@@ -762,6 +775,10 @@ pub async fn messages(
             );
         }
     };
+
+    // Always route to the configured backend model regardless of what the client sent.
+    openai_req["model"] = Value::String(state.default_model.clone());
+    enforce_min_max_tokens(&mut openai_req);
 
     // Inject orchestrator memory context.
     pack_context_into_req(&state, &mut openai_req, &repo, &task).await;
@@ -1092,6 +1109,37 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], ("agent-os".to_string(), "agentic-os".to_string()));
+    }
+
+    // ── Model substitution ────────────────────────────────────────
+
+    #[test]
+    fn model_substituted_with_default_in_chat_completions() {
+        let mut req = json!({
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let default_model = "qwen36-35b-heretic";
+        req["model"] = Value::String(default_model.to_string());
+        assert_eq!(req["model"].as_str().unwrap(), default_model);
+    }
+
+    #[test]
+    fn model_substituted_with_default_for_any_client_model_name() {
+        let client_models = ["gpt-4o", "claude-sonnet-4-6", "claude-opus-4-7", "gpt-4-turbo"];
+        let default_model = "qwen36-35b-heretic";
+        for client_model in client_models {
+            let mut req = json!({
+                "model": client_model,
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            req["model"] = Value::String(default_model.to_string());
+            assert_eq!(
+                req["model"].as_str().unwrap(),
+                default_model,
+                "client model '{client_model}' was not replaced"
+            );
+        }
     }
 }
 

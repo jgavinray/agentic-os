@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::str::FromStr;
 
+// Minimum max_tokens for any upstream LiteLLM completion request.
+// vLLM backend exposes 262144 (256K) total context; 64K output leaves ~196K
+// for input and matches Claude Opus 4.x extended-output behavior so reasoning
+// + tool chains don't truncate mid-response.
+pub const MIN_MAX_TOKENS: u64 = 65536;
+
 // ── Task categories for retrieval depth ────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

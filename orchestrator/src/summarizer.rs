@@ -136,7 +136,7 @@ async fn do_summarize(
     let request_body = serde_json::json!({
         "model": "qwen36-35b-heretic",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,
+        "max_tokens": crate::state::MIN_MAX_TOKENS,
         "temperature": 0.1,
     });
 
@@ -151,10 +151,16 @@ async fn do_summarize(
         .json()
         .await?;
 
-    let summary_text = val["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no content in summarization response"))?
-        .to_string();
+    let content_val = &val["choices"][0]["message"]["content"];
+    let summary_text = match content_val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => anyhow::bail!("no content in summarization response"),
+    };
 
     let session_row = conn
         .query_one(
