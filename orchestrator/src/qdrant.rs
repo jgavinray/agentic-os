@@ -13,13 +13,7 @@ async fn embed_text(
     let url = format!("{}/embed", embedding_url);
     let body = serde_json::json!({"inputs": text});
 
-    let resp: Value = http
-        .post(&url)
-        .json(&body)
-        .send()
-        .await?
-        .json()
-        .await?;
+    let resp: Value = http.post(&url).json(&body).send().await?.json().await?;
 
     let vector: Vec<f32> = resp
         .as_array()
@@ -30,7 +24,10 @@ async fn embed_text(
         .filter_map(|v| v.as_f64().map(|f| f as f32))
         .collect();
 
-    anyhow::ensure!(!vector.is_empty(), "empty embedding vector returned from TEI");
+    anyhow::ensure!(
+        !vector.is_empty(),
+        "empty embedding vector returned from TEI"
+    );
     anyhow::ensure!(
         vector.len() == VECTOR_SIZE,
         "TEI returned {} dims but Qdrant collection expects {VECTOR_SIZE}",

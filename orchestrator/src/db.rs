@@ -2,15 +2,6 @@ use crate::state::ErrorRecord;
 use deadpool_postgres::{Config, Pool, PoolConfig};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
-use std::collections::HashMap;
-use serde_json::Value;
-
-/// A single agent event with its relevance score from hybrid merge.
-#[derive(Debug, Clone)]
-pub struct RankedEvent {
-    pub id: String,
-    pub score: f64,
-}
 
 // ── Reusable event type ──────────────────────────────────────
 
@@ -54,7 +45,9 @@ impl AgentEvent {
     pub fn vector_text(&self) -> String {
         format!(
             "{}\n{}\n{}\n{}\n{}",
-            self.repo, self.event_type, self.summary,
+            self.repo,
+            self.event_type,
+            self.summary,
             self.evidence.as_deref().unwrap_or(""),
             self.metadata
         )
@@ -77,6 +70,8 @@ pub async fn init_schema(pool: &Pool) -> Result<(), anyhow::Error> {
     let conn = pool.get().await?;
     conn.batch_execute(
         r#"
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id TEXT PRIMARY KEY,
     repo TEXT NOT NULL,
@@ -101,6 +96,18 @@ CREATE TABLE IF NOT EXISTS agent_events (
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS error_index (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    repo TEXT NOT NULL,
+    task TEXT NOT NULL,
+    error_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    frequency BIGINT NOT NULL DEFAULT 1,
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_error_index UNIQUE (repo, task, error_type, description)
+);
+
 CREATE INDEX IF NOT EXISTS idx_agent_events_repo_created
     ON agent_events(repo, created_at DESC);
 
@@ -113,6 +120,17 @@ CREATE INDEX IF NOT EXISTS idx_error_index_type
     ON error_index(error_type);
 CREATE INDEX IF NOT EXISTS idx_error_index_freq
     ON error_index(frequency DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_fts
+    ON agent_events USING gin(
+        to_tsvector('english',
+            coalesce(summary, '') || ' ' || coalesce(evidence, ''))
+    );
+
+ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS summarized BOOLEAN NOT NULL DEFAULT false;
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_type
+    ON agent_events(event_type, repo);
         "#,
     )
     .await?;
@@ -202,6 +220,7 @@ pub async fn get_events_for_repo(
             "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at
              FROM agent_events
              WHERE repo = $1
+               AND summarized = false
              ORDER BY created_at DESC
              LIMIT $2",
             &[&repo, &limit],
@@ -224,6 +243,43 @@ pub async fn get_events_for_repo(
         .collect();
 
     Ok(events)
+}
+
+/// Full-text search on agent_events.summary and evidence for a given repo.
+/// Returns results ordered by ts_rank DESC.
+pub async fn search_events_fts(
+    pool: &Pool,
+    repo: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<crate::state::SearchHit>, anyhow::Error> {
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "WITH docs AS (
+                 SELECT id, event_type, summary,
+                        to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(evidence, '')) AS tsv
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND summarized = false
+             )
+             SELECT id, event_type, summary
+             FROM docs
+             WHERE tsv @@ plainto_tsquery('english', $2)
+             ORDER BY ts_rank(tsv, plainto_tsquery('english', $2)) DESC
+             LIMIT $3",
+            &[&repo, &query, &limit],
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::state::SearchHit {
+            event_id: row.get("id"),
+            event_type: row.get("event_type"),
+            summary: row.get("summary"),
+        })
+        .collect())
 }
 
 pub async fn insert_error_record(
@@ -254,26 +310,30 @@ pub async fn get_active_errors(
     limit: i64,
 ) -> Result<Vec<ErrorRecord>, anyhow::Error> {
     let conn = pool.get().await?;
-    let rows = conn.query(
-        "SELECT id, repo, task, error_type, description, severity, frequency, last_seen
+    let rows = conn
+        .query(
+            "SELECT id, repo, task, error_type, description, severity, frequency, last_seen
          FROM error_index
          WHERE repo = $1
          ORDER BY frequency DESC, last_seen DESC
          LIMIT $2",
-        &[&repo, &limit],
-    ).await?;
-    rows.into_iter().map(|row| {
-        Ok(ErrorRecord {
-            id: row.get("id"),
-            repo: row.get("repo"),
-            task: row.get("task"),
-            error_type: row.get("error_type"),
-            description: row.get("description"),
-            severity: row.get("severity"),
-            frequency: row.get(".frequency"),
-            last_seen: row.get("last_seen"),
+            &[&repo, &limit],
+        )
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ErrorRecord {
+                id: row.get("id"),
+                repo: row.get("repo"),
+                task: row.get("task"),
+                error_type: row.get("error_type"),
+                description: row.get("description"),
+                severity: row.get("severity"),
+                frequency: row.get("frequency"),
+                last_seen: row.get("last_seen"),
+            })
         })
-    }).collect()
+        .collect()
 }
 
 // ── Request adapters ──────────────────────────────────────────
@@ -300,7 +360,11 @@ pub async fn append_event_from_request(
 ) -> Result<(String, bool), anyhow::Error> {
     let id = Uuid::new_v4().to_string();
     let actor = req.actor.as_deref().unwrap_or("agent");
-    let metadata = req.metadata.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
+    let metadata = req
+        .metadata
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let event = AgentEvent {
         id: id.clone(),
@@ -315,7 +379,9 @@ pub async fn append_event_from_request(
     };
 
     insert_event(pool, &event).await?;
-    let qdrant_indexed = match crate::qdrant::store_event(http, embedding_url, qdrant_url, &event).await {
+    let qdrant_indexed = match crate::qdrant::store_event(http, embedding_url, qdrant_url, &event)
+        .await
+    {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(event_id = %id, "qdrant embedding failed, event stored in postgres only: {e}");
@@ -340,50 +406,122 @@ pub fn build_context(
     repo: &str,
     task: &str,
     recent: &[crate::state::EventMemory],
-    semantic: &[String],
+    hybrid_hits: &[crate::state::SearchHit],
+    errors: &[crate::state::ErrorRecord],
     char_budget: usize,
 ) -> String {
-    let header = format!("Repository: {repo}\nTask: {task}\n\nRelevant prior memory:\n");
+    let header = format!("Repository: {repo}\nTask: {task}\n\n");
 
-    // Semantic results first (query-ranked), then recency; dedup by summary text.
-    let mut seen = std::collections::HashSet::new();
-    let mut lines: Vec<String> = Vec::new();
+    // Tiered budget allocations: 60% hybrid, 30% recent, 10% errors
+    let hybrid_budget = (char_budget * 60) / 100;
+    let recent_budget = (char_budget * 30) / 100;
+    let error_budget = char_budget.saturating_sub(hybrid_budget + recent_budget);
 
-    for summary in semantic {
-        if seen.insert(summary.clone()) {
-            lines.push(format!("- [semantic] {summary}"));
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // ── Section 1: Relevant Prior Memory ───────────────────────────────
+    let mut hybrid_body = String::new();
+    let mut used = 0usize;
+    for hit in hybrid_hits {
+        if !seen.insert(hit.summary.clone()) {
+            continue;
         }
-    }
-    for m in recent {
-        if seen.insert(m.summary.clone()) {
-            let line = match &m.evidence {
-                Some(ev) => format!("- [{}] {} Evidence: {}", m.event_type, m.summary, ev),
-                None => format!("- [{}] {}", m.event_type, m.summary),
-            };
-            lines.push(line);
-        }
-    }
-
-    if lines.is_empty() {
-        return format!("{header}- No prior memory found.");
-    }
-
-    let mut body = String::new();
-    for line in &lines {
-        if header.len() + body.len() + line.len() + 1 > char_budget {
-            body.push_str("- [truncated: memory budget exceeded]");
+        let line = format!("- [{}] {}\n", hit.event_type, hit.summary);
+        if used + line.len() > hybrid_budget {
+            hybrid_body.push_str("- [truncated: memory budget exceeded]\n");
             break;
         }
-        body.push_str(line);
-        body.push('\n');
+        hybrid_body.push_str(&line);
+        used += line.len();
+    }
+    let hybrid_section = if hybrid_body.is_empty() {
+        "== Relevant Prior Memory ==\n- No relevant prior memory found.\n".to_string()
+    } else {
+        format!("== Relevant Prior Memory ==\n{hybrid_body}")
+    };
+
+    // ── Sections 2 + 3 share the recent_budget ─────────────────────────
+    let mut recent_used = 0usize;
+
+    // Section 2: Recent Decisions
+    let mut decision_body = String::new();
+    for m in recent {
+        if m.event_type != "decision" {
+            continue;
+        }
+        if !seen.insert(m.summary.clone()) {
+            continue;
+        }
+        let line = match &m.evidence {
+            Some(ev) => format!("- [decision] {}\n  Evidence: {}\n", m.summary, ev),
+            None => format!("- [decision] {}\n", m.summary),
+        };
+        if recent_used + line.len() > recent_budget {
+            break;
+        }
+        decision_body.push_str(&line);
+        recent_used += line.len();
     }
 
-    format!("{header}{body}")
+    // Section 3: Open Questions
+    let mut open_body = String::new();
+    for m in recent {
+        if m.event_type != "checkpoint" {
+            continue;
+        }
+        if let Some(arr) = m.metadata.get("open_questions").and_then(|v| v.as_array()) {
+            for q in arr {
+                if let Some(text) = q.as_str() {
+                    if seen.contains(text) {
+                        continue;
+                    }
+                    let line = format!("- {text}\n");
+                    if recent_used + line.len() > recent_budget {
+                        break;
+                    }
+                    seen.insert(text.to_string());
+                    open_body.push_str(&line);
+                    recent_used += line.len();
+                }
+            }
+        }
+    }
+
+    // ── Section 4: Failed Approaches ───────────────────────────────────
+    let mut error_body = String::new();
+    let mut used = 0usize;
+    for err in errors {
+        let line = format!(
+            "- [{}] {} (seen {} times)\n",
+            err.error_type, err.description, err.frequency
+        );
+        if used + line.len() > error_budget {
+            break;
+        }
+        error_body.push_str(&line);
+        used += line.len();
+    }
+
+    // ── Assemble — omit empty optional sections ─────────────────────────
+    let mut out = format!("{header}{hybrid_section}");
+    if !decision_body.is_empty() {
+        out.push_str(&format!("\n== Recent Decisions ==\n{decision_body}"));
+    }
+    if !open_body.is_empty() {
+        out.push_str(&format!("\n== Open Questions ==\n{open_body}"));
+    }
+    if !error_body.is_empty() {
+        out.push_str(&format!(
+            "\n== Failed Approaches (do not retry) ==\n{error_body}"
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ErrorRecord, SearchHit};
     use chrono::Utc;
 
     fn mem(event_type: &str, summary: &str, evidence: Option<&str>) -> crate::state::EventMemory {
@@ -393,6 +531,41 @@ mod tests {
             evidence: evidence.map(str::to_string),
             metadata: serde_json::json!({}),
             created_at: Utc::now(),
+        }
+    }
+
+    fn mem_with_meta(
+        event_type: &str,
+        summary: &str,
+        metadata: serde_json::Value,
+    ) -> crate::state::EventMemory {
+        crate::state::EventMemory {
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            evidence: None,
+            metadata,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn hit(event_type: &str, summary: &str) -> SearchHit {
+        SearchHit {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+        }
+    }
+
+    fn err_rec(error_type: &str, description: &str, frequency: i64) -> ErrorRecord {
+        ErrorRecord {
+            id: "eid".to_string(),
+            repo: "r".to_string(),
+            task: "t".to_string(),
+            error_type: error_type.to_string(),
+            description: description.to_string(),
+            severity: "medium".to_string(),
+            frequency,
+            last_seen: Utc::now(),
         }
     }
 
@@ -410,79 +583,102 @@ mod tests {
         }
     }
 
-    // ── build_context ──────────────────────────────────────────────────
-
-    #[test]
-    fn build_context_empty_returns_no_prior_memory() {
-        let out = build_context("r", "t", &[], &[], 8000);
-        assert!(out.contains("No prior memory found"));
-    }
-
     #[test]
     fn build_context_header_contains_repo_and_task() {
-        let out = build_context("my-repo", "my-task", &[], &[], 8000);
+        let out = build_context("my-repo", "my-task", &[], &[], &[], 8000);
         assert!(out.starts_with("Repository: my-repo\nTask: my-task\n"));
     }
 
     #[test]
-    fn build_context_semantic_before_recent() {
-        let recent = vec![mem("edit", "recent item", None)];
-        let semantic = vec!["semantic item".to_string()];
-        let out = build_context("r", "t", &recent, &semantic, 8000);
-        assert!(out.find("semantic item").unwrap() < out.find("recent item").unwrap());
+    fn build_context_empty_shows_no_prior_memory() {
+        let out = build_context("r", "t", &[], &[], &[], 8000);
+        assert!(out.contains("No relevant prior memory found"));
     }
 
     #[test]
-    fn build_context_deduplicates_across_semantic_and_recent() {
-        let shared = "shared summary";
-        let recent = vec![mem("edit", shared, None)];
-        let semantic = vec![shared.to_string()];
-        let out = build_context("r", "t", &recent, &semantic, 8000);
-        assert_eq!(out.matches(shared).count(), 1, "duplicate should appear once");
+    fn build_context_hybrid_hit_appears_in_relevant_section() {
+        let hits = vec![hit("edit", "changed auth flow")];
+        let out = build_context("r", "t", &[], &hits, &[], 8000);
+        assert!(out.contains("== Relevant Prior Memory =="));
+        assert!(out.contains("changed auth flow"));
     }
 
     #[test]
-    fn build_context_deduplicates_within_recent() {
-        let recent = vec![
-            mem("edit", "same summary", None),
-            mem("decision", "same summary", None),
-        ];
-        let out = build_context("r", "t", &recent, &[], 8000);
-        assert_eq!(out.matches("same summary").count(), 1);
+    fn build_context_decision_event_appears_in_decisions_section() {
+        let recent = vec![mem(
+            "decision",
+            "chose retry logic",
+            Some("503 intermittent"),
+        )];
+        let out = build_context("r", "t", &recent, &[], &[], 8000);
+        assert!(out.contains("== Recent Decisions =="));
+        assert!(out.contains("chose retry logic"));
+        assert!(out.contains("Evidence: 503 intermittent"));
     }
 
     #[test]
-    fn build_context_includes_evidence() {
-        let recent = vec![mem("decision", "chose X", Some("because Y"))];
-        let out = build_context("r", "t", &recent, &[], 8000);
-        assert!(out.contains("Evidence: because Y"));
+    fn build_context_non_decision_recent_not_in_decisions_section() {
+        let recent = vec![mem("edit", "changed a file", None)];
+        let out = build_context("r", "t", &recent, &[], &[], 8000);
+        assert!(!out.contains("== Recent Decisions =="));
     }
 
     #[test]
-    fn build_context_omits_evidence_label_when_none() {
-        let recent = vec![mem("decision", "chose X", None)];
-        let out = build_context("r", "t", &recent, &[], 8000);
-        assert!(!out.contains("Evidence:"));
+    fn build_context_error_appears_in_failed_approaches_section() {
+        let errs = vec![err_rec("auth_500", "OAuth callback 500", 3)];
+        let out = build_context("r", "t", &[], &[], &errs, 8000);
+        assert!(out.contains("== Failed Approaches (do not retry) =="));
+        assert!(out.contains("OAuth callback 500"));
+        assert!(out.contains("seen 3 times"));
     }
 
     #[test]
-    fn build_context_truncates_at_char_budget() {
-        // Budget of 100 is smaller than header (~46 chars) + any event line, forcing truncation.
-        let recent: Vec<_> = (0..5)
-            .map(|i| mem("edit", &format!("event {i} with enough padding to fill the budget"), None))
+    fn build_context_open_questions_from_checkpoint_metadata() {
+        let recent = vec![mem_with_meta(
+            "checkpoint",
+            "end of sprint",
+            serde_json::json!({
+                "open_questions": ["Is retry threshold right?", "Do we need caching?"]
+            }),
+        )];
+        let out = build_context("r", "t", &recent, &[], &[], 8000);
+        assert!(out.contains("== Open Questions =="));
+        assert!(out.contains("Is retry threshold right?"));
+    }
+
+    #[test]
+    fn build_context_empty_sections_omitted() {
+        let hits = vec![hit("edit", "some memory")];
+        let out = build_context("r", "t", &[], &hits, &[], 8000);
+        assert!(!out.contains("== Recent Decisions =="));
+        assert!(!out.contains("== Failed Approaches"));
+        assert!(!out.contains("== Open Questions =="));
+    }
+
+    #[test]
+    fn build_context_deduplicates_same_summary_across_sections() {
+        let shared = "shared summary text";
+        let hits = vec![hit("edit", shared)];
+        let recent = vec![mem("decision", shared, None)];
+        let out = build_context("r", "t", &recent, &hits, &[], 8000);
+        assert_eq!(out.matches(shared).count(), 1);
+    }
+
+    #[test]
+    fn build_context_truncates_hybrid_section_at_budget() {
+        let hits: Vec<SearchHit> = (0..20)
+            .map(|i| {
+                hit(
+                    "edit",
+                    &format!(
+                        "event {i} with enough text to consume the hybrid budget allocation here"
+                    ),
+                )
+            })
             .collect();
-        let out = build_context("r", "t", &recent, &[], 100);
+        let out = build_context("r", "t", &[], &hits, &[], 500);
         assert!(out.contains("truncated"));
     }
-
-    #[test]
-    fn build_context_no_truncation_marker_when_fits() {
-        let recent = vec![mem("edit", "short", None)];
-        let out = build_context("r", "t", &recent, &[], 8000);
-        assert!(!out.contains("truncated"));
-    }
-
-    // ── AgentEvent ─────────────────────────────────────────────────────
 
     #[test]
     fn vector_text_contains_all_fields() {
@@ -521,5 +717,20 @@ mod tests {
         assert_eq!(m.event_type, "decision");
         assert_eq!(m.summary, "mem summary");
         assert_eq!(m.evidence, Some("proof".to_string()));
+    }
+
+    #[test]
+    fn error_record_frequency_field_accessible() {
+        let rec = crate::state::ErrorRecord {
+            id: "id".to_string(),
+            repo: "r".to_string(),
+            task: "t".to_string(),
+            error_type: "e".to_string(),
+            description: "d".to_string(),
+            severity: "medium".to_string(),
+            frequency: 3,
+            last_seen: Utc::now(),
+        };
+        assert_eq!(rec.frequency, 3);
     }
 }

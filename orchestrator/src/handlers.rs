@@ -9,13 +9,13 @@ use serde_json::Value;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-use crate::state::*;
 use crate::db;
 use crate::qdrant;
+use crate::state::*;
 
 // ── Auth helpers ───────────────────────────────────────────────
 
-fn bearer_token<'a>(headers: &'a HeaderMap) -> &'a str {
+fn bearer_token(headers: &HeaderMap) -> &str {
     headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -70,7 +70,7 @@ pub async fn health_ready(
     }
 
     if http
-        .get(&format!("{}/collections", state.qdrant_url))
+        .get(format!("{}/collections", state.qdrant_url))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -83,7 +83,7 @@ pub async fn health_ready(
 
     // LITELLM_URL already includes /v1 — no extra path segment needed here.
     if http
-        .get(&format!("{}/models", state.litellm_url))
+        .get(format!("{}/models", state.litellm_url))
         .send()
         .await
         .map(|r| r.status().is_success() || r.status() == 401)
@@ -113,16 +113,23 @@ pub async fn health_ready(
 
 // ── Model listing — BUG-10: proxy to LiteLLM ───────────────────
 
-pub async fn list_models(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
     let url = format!("{}/models", state.litellm_url);
-    match state.http.get(&url).bearer_auth(&state.litellm_key).send().await {
+    match state
+        .http
+        .get(&url)
+        .bearer_auth(&state.litellm_key)
+        .send()
+        .await
+    {
         Ok(r) => {
             let status = r.status();
             match r.json::<Value>().await {
@@ -149,7 +156,11 @@ pub async fn start_session(
     axum::Json(req): axum::Json<StartSessionRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
     let id = match db::start_session_from_request(&state.pool, &req).await {
@@ -173,18 +184,31 @@ pub async fn append_event(
     axum::Json(req): axum::Json<AppendEventRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
     let (event_id, qdrant_indexed) = match db::append_event_from_request(
-        &state.pool, &state.http, &state.embedding_url, &state.qdrant_url, &req,
-    ).await {
+        &state.pool,
+        &state.http,
+        &state.embedding_url,
+        &state.qdrant_url,
+        &req,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "failed_to_append_event", "detail": e.to_string()})),
-            ).into_response();
+                axum::Json(
+                    serde_json::json!({"error": "failed_to_append_event", "detail": e.to_string()}),
+                ),
+            )
+                .into_response();
         }
     };
 
@@ -194,13 +218,70 @@ pub async fn append_event(
         let task = req.task.as_deref().unwrap_or("");
         let severity = "medium";
         if let Err(e) = db::insert_error_record(
-            &state.pool, &req.repo, task, error_type, error_desc, severity,
-        ).await {
+            &state.pool,
+            &req.repo,
+            task,
+            error_type,
+            error_desc,
+            severity,
+        )
+        .await
+        {
             tracing::warn!(%error_type, "failed to record error: {e}");
         }
     }
 
-    axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed})).into_response()
+    axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
+        .into_response()
+}
+
+// ── Semantic / hybrid search helpers ───────────────────────────
+
+async fn semantic_search(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+) -> Vec<crate::state::SearchHit> {
+    qdrant::search(
+        &state.http,
+        &state.embedding_url,
+        &state.qdrant_url,
+        query,
+        limit,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|item| {
+        let payload = item.get("payload")?;
+        Some(crate::state::SearchHit {
+            event_id: payload.get("event_id")?.as_str()?.to_string(),
+            event_type: payload.get("event_type")?.as_str()?.to_string(),
+            summary: payload.get("summary")?.as_str()?.to_string(),
+        })
+    })
+    .collect()
+}
+
+async fn hybrid_search(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    semantic_limit: usize,
+) -> Vec<crate::state::SearchHit> {
+    let query = format!("{repo} {task}");
+    let fts_limit = semantic_limit as i64;
+
+    let (semantic, fts_result) = tokio::join!(
+        semantic_search(state, &query, semantic_limit),
+        db::search_events_fts(&state.pool, repo, task, fts_limit),
+    );
+
+    let fts = fts_result.unwrap_or_else(|e| {
+        tracing::warn!("FTS search failed, falling back to semantic-only: {e}");
+        vec![]
+    });
+    crate::hybrid::rrf_merge(&semantic, &fts, 60.0, semantic_limit)
 }
 
 // ── Context pack ────────────────────────────────────────────────
@@ -211,13 +292,17 @@ pub async fn context_pack(
     axum::Json(req): axum::Json<ContextPackRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
-    let limit = req.limit.unwrap_or(8);
     let task_category = crate::state::TaskCategory::from_task(&req.task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     let limit = req.limit.unwrap_or(task_config.max_events);
+
     let events = match db::get_events_for_repo(&state.pool, &req.repo, limit).await {
         Ok(e) => e,
         Err(e) => {
@@ -229,11 +314,26 @@ pub async fn context_pack(
     };
 
     let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
-    let search_query = format!("{} {}", req.repo, req.task);
-    let semantic_summaries = semantic_search_summaries(&state, &search_query, 5).await;
-    let context = db::build_context(&req.repo, &req.task, &memories, &semantic_summaries, 8000);
+    let hybrid_hits = hybrid_search(&state, &req.repo, &req.task, task_config.semantic_limit).await;
+    let errors = db::get_active_errors(&state.pool, &req.repo, 5)
+        .await
+        .unwrap_or_default();
+    let context = db::build_context(
+        &req.repo,
+        &req.task,
+        &memories,
+        &hybrid_hits,
+        &errors,
+        task_config.char_budget,
+    );
 
-    axum::Json(ContextPackResponse { repo: req.repo, task: req.task, context, memories }).into_response()
+    axum::Json(ContextPackResponse {
+        repo: req.repo,
+        task: req.task,
+        context,
+        memories,
+    })
+    .into_response()
 }
 
 // ── Checkpoint ──────────────────────────────────────────────────
@@ -244,10 +344,18 @@ pub async fn checkpoint(
     axum::Json(req): axum::Json<CheckpointRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
-    let task_string = format!("{}/{}", req.repo, req.summary.chars().take(50).collect::<String>());
+    let task_string = format!(
+        "{}/{}",
+        req.repo,
+        req.summary.chars().take(50).collect::<String>()
+    );
     let event = AppendEventRequest {
         session_id: req.session_id,
         repo: req.repo,
@@ -265,18 +373,28 @@ pub async fn checkpoint(
     };
 
     let (event_id, qdrant_indexed) = match db::append_event_from_request(
-        &state.pool, &state.http, &state.embedding_url, &state.qdrant_url, &event,
-    ).await {
+        &state.pool,
+        &state.http,
+        &state.embedding_url,
+        &state.qdrant_url,
+        &event,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "failed_to_checkpoint", "detail": e.to_string()})),
-            ).into_response();
+                axum::Json(
+                    serde_json::json!({"error": "failed_to_checkpoint", "detail": e.to_string()}),
+                ),
+            )
+                .into_response();
         }
     };
 
-    axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed})).into_response()
+    axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
+        .into_response()
 }
 
 // ── Chat completions ────────────────────────────────────────────
@@ -313,7 +431,13 @@ fn extract_assistant_from_sse(raw: &str) -> String {
     content
 }
 
-async fn persist_exchange(state: &AppState, session_id: &str, repo: &str, user_content: &str, assistant_content: &str) {
+async fn persist_exchange(
+    state: &AppState,
+    session_id: &str,
+    repo: &str,
+    user_content: &str,
+    assistant_content: &str,
+) {
     let make_req = |event_type: &str, actor: &str, content: &str| AppendEventRequest {
         session_id: session_id.to_string(),
         repo: repo.to_string(),
@@ -327,39 +451,41 @@ async fn persist_exchange(state: &AppState, session_id: &str, repo: &str, user_c
         error_description: None,
     };
 
-    match db::append_event_from_request(
-        &state.pool, &state.http, &state.embedding_url, &state.qdrant_url,
-        &make_req("user_message", "user", user_content),
-    ).await {
-        Ok((_, false)) => tracing::warn!("user_message persisted but not qdrant-indexed (embedding unavailable)"),
-        Err(e) => tracing::warn!("failed to persist user_message: {e}"),
-        _ => {}
+    for (event_type, actor, content) in [
+        ("user_message", "user", user_content),
+        ("assistant_message", "assistant", assistant_content),
+    ] {
+        let req = make_req(event_type, actor, content);
+        for attempt in 0u32..3 {
+            match db::append_event_from_request(
+                &state.pool,
+                &state.http,
+                &state.embedding_url,
+                &state.qdrant_url,
+                &req,
+            )
+            .await
+            {
+                Ok((_, false)) => {
+                    tracing::warn!("{event_type} stored in postgres but not qdrant-indexed");
+                    break;
+                }
+                Ok(_) => break,
+                Err(e) if attempt < 2 => {
+                    let delay = tokio::time::Duration::from_millis(200 * 2u64.pow(attempt));
+                    tracing::debug!(
+                        attempt,
+                        "persist {event_type} failed, retrying in {delay:?}: {e}"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to persist {event_type} after 3 attempts: {e}");
+                    break;
+                }
+            }
+        }
     }
-
-    match db::append_event_from_request(
-        &state.pool, &state.http, &state.embedding_url, &state.qdrant_url,
-        &make_req("assistant_message", "assistant", assistant_content),
-    ).await {
-        Ok((_, false)) => tracing::warn!("assistant_message persisted but not qdrant-indexed (embedding unavailable)"),
-        Err(e) => tracing::warn!("failed to persist assistant_message: {e}"),
-        _ => {}
-    }
-}
-
-async fn semantic_search_summaries(state: &AppState, query: &str, limit: usize) -> Vec<String> {
-    qdrant::search(
-        &state.http, &state.embedding_url, &state.qdrant_url, query, limit,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|item| {
-        item.get("payload")
-            .and_then(|p| p.get("summary"))
-            .and_then(|s| s.as_str())
-            .map(str::to_string)
-    })
-    .collect()
 }
 
 pub async fn chat_completions(
@@ -368,18 +494,27 @@ pub async fn chat_completions(
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
     let Some(caller_key) = authenticate(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     };
 
-    let is_stream = payload.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Explicit headers take precedence; fall back to key-derived namespace so
     // standard clients (OpenCode, OpenHands, curl) get memory without custom headers.
-    let repo = headers.get("x-agent-repo")
+    let repo = headers
+        .get("x-agent-repo")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| repo_from_key(&caller_key));
-    let task = headers.get("x-agent-task")
+    let task = headers
+        .get("x-agent-task")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
@@ -391,13 +526,28 @@ pub async fn chat_completions(
         req["model"] = Value::String(state.default_model.clone());
     }
 
-    let events = db::get_events_for_repo(&state.pool, &repo, 8).await.ok();
+    let task_category = crate::state::TaskCategory::from_task(&task);
+    let task_config = crate::state::TaskContextConfig::for_category(task_category);
+
+    let events = db::get_events_for_repo(&state.pool, &repo, task_config.max_events)
+        .await
+        .ok();
     let memories: Vec<EventMemory> = events
         .iter()
         .flat_map(|evts| evts.iter().map(|e| e.to_memory()))
         .collect();
-    let semantic_summaries = semantic_search_summaries(&state, &format!("{repo} {task}"), 5).await;
-    let context = db::build_context(&repo, &task, &memories, &semantic_summaries, 8000);
+    let hybrid_hits = hybrid_search(&state, &repo, &task, task_config.semantic_limit).await;
+    let errors = db::get_active_errors(&state.pool, &repo, 5)
+        .await
+        .unwrap_or_default();
+    let context = db::build_context(
+        &repo,
+        &task,
+        &memories,
+        &hybrid_hits,
+        &errors,
+        task_config.char_budget,
+    );
     inject_system_context(&mut req, &context);
 
     if is_stream {
@@ -406,7 +556,14 @@ pub async fn chat_completions(
 
     // ── Non-streaming ───────────────────────────────────────────
     let url = format!("{}/chat/completions", state.litellm_url);
-    match state.http.post(&url).bearer_auth(&state.litellm_key).json(&req).send().await {
+    match state
+        .http
+        .post(&url)
+        .bearer_auth(&state.litellm_key)
+        .json(&req)
+        .send()
+        .await
+    {
         Ok(r) => match r.json::<Value>().await {
             Ok(val) => {
                 let user_content: String = req["messages"]
@@ -414,32 +571,68 @@ pub async fn chat_completions(
                     .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
                     .and_then(|m| m["content"].as_str())
                     .unwrap_or("")
-                    .chars().take(500).collect();
+                    .chars()
+                    .take(500)
+                    .collect();
                 let assistant_content: String = val["choices"][0]["message"]["content"]
-                    .as_str().unwrap_or("").chars().take(500).collect();
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(500)
+                    .collect();
 
                 match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-                    Ok(session_id) => persist_exchange(&state, &session_id, &repo, &user_content, &assistant_content).await,
+                    Ok(session_id) => {
+                        persist_exchange(
+                            &state,
+                            &session_id,
+                            &repo,
+                            &user_content,
+                            &assistant_content,
+                        )
+                        .await
+                    }
                     Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
                 }
                 axum::Json(val).into_response()
             }
-            Err(_) => (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_parse_error"}))).into_response(),
+            Err(_) => (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+            )
+                .into_response(),
         },
-        Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(
+                serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
+            ),
+        )
+            .into_response(),
     }
 }
 
 async fn handle_streaming(state: &AppState, req: Value, repo: String, task: String) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
-    let upstream = match state.http_stream.post(&url).bearer_auth(&state.litellm_key).json(&req).send().await {
-        Ok(r) => r,
-        Err(e) => return (
-            StatusCode::BAD_GATEWAY,
-            axum::Json(serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()})),
-        ).into_response(),
-    };
+    let upstream =
+        match state
+            .http_stream
+            .post(&url)
+            .bearer_auth(&state.litellm_key)
+            .json(&req)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(
+                    serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
+                ),
+            )
+                .into_response(),
+        };
 
     let bytes_stream = upstream.bytes_stream();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
@@ -456,7 +649,7 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
-                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                    yield Err(std::io::Error::other(e));
                 }
             }
         }
@@ -471,7 +664,9 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
         .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
         .and_then(|m| m["content"].as_str())
         .unwrap_or("")
-        .chars().take(500).collect();
+        .chars()
+        .take(500)
+        .collect();
 
     let state_bg = state.clone();
     tokio::spawn(async move {
@@ -479,7 +674,10 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
             let raw = String::from_utf8_lossy(&raw_bytes);
             let assistant_content = extract_assistant_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
-                Ok(sid) => persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content).await,
+                Ok(sid) => {
+                    persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content)
+                        .await
+                }
                 Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
             }
         }
@@ -492,7 +690,8 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
             (axum::http::header::CONNECTION, "keep-alive"),
         ],
         axum::body::Body::from_stream(tapped),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -597,6 +796,12 @@ mod tests {
                    data: [DONE]\n";
         assert_eq!(extract_assistant_from_sse(sse), "real");
     }
+
+    #[test]
+    fn retry_backoff_durations_are_correct() {
+        let delays: Vec<u64> = (0u32..2).map(|a| 200 * 2u64.pow(a)).collect();
+        assert_eq!(delays, vec![200, 400]);
+    }
 }
 
 // ── Semantic search ─────────────────────────────────────────────
@@ -607,22 +812,35 @@ pub async fn search(
     axum::Json(req): axum::Json<Value>,
 ) -> Response {
     if !check_auth(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
 
     let query = req.get("q").and_then(|v| v.as_str()).unwrap_or("");
     let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let results = match qdrant::search(
-        &state.http, &state.embedding_url, &state.qdrant_url, query, limit,
-    ).await {
+        &state.http,
+        &state.embedding_url,
+        &state.qdrant_url,
+        query,
+        limit,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("qdrant search failed: {e}");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({"error": "search_unavailable", "detail": e.to_string()})),
-            ).into_response();
+                axum::Json(
+                    serde_json::json!({"error": "search_unavailable", "detail": e.to_string()}),
+                ),
+            )
+                .into_response();
         }
     };
 

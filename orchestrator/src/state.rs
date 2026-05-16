@@ -14,7 +14,6 @@ pub enum TaskCategory {
 
 #[derive(Debug, Deserialize)]
 pub struct TaskContextConfig {
-    pub task_category: TaskCategory,
     pub max_events: i64,
     pub semantic_limit: usize,
     pub char_budget: usize,
@@ -42,7 +41,6 @@ impl TaskContextConfig {
             Broad => (15i64, 10usize, 12000usize),
         };
         Self {
-            task_category: cat,
             max_events,
             semantic_limit,
             char_budget,
@@ -55,8 +53,15 @@ impl TaskCategory {
         "fix", "bug", "debug", "error", "issue", "warn", "patch", "hotfix",
     ];
     pub const BROAD_KEYWORDS: &'static [&'static str] = &[
-        "migrate", "rewrite", "refactor", "redesign", "architecture",
-        "deploy", "infrastructure", "setup", "configure",
+        "migrate",
+        "rewrite",
+        "refactor",
+        "redesign",
+        "architecture",
+        "deploy",
+        "infrastructure",
+        "setup",
+        "configure",
     ];
 
     pub fn from_task(task: &str) -> Self {
@@ -73,14 +78,6 @@ impl TaskCategory {
         }
         Self::Moderate
     }
-
-    pub fn max_events(&self) -> i64 {
-        match self {
-            Self::Narrow => 3,
-            Self::Moderate => 8,
-            Self::Broad => 15,
-        }
-    }
 }
 
 /// Shared application state (cloned per request via Arc)
@@ -88,8 +85,6 @@ impl TaskCategory {
 pub struct AppState {
     /// Postgres connection pool
     pub pool: Pool,
-    /// Postgres connection string (kept for diagnostics)
-    pub db_url: String,
     /// Qdrant base URL
     pub qdrant_url: String,
     /// LiteLLM base URL (must include /v1 suffix)
@@ -175,12 +170,24 @@ pub struct ContextPackResponse {
 
 #[derive(Debug, Clone)]
 pub struct ErrorRecord {
+    #[allow(dead_code)]
     pub id: String,
+    #[allow(dead_code)]
     pub repo: String,
+    #[allow(dead_code)]
     pub task: String,
     pub error_type: String,
     pub description: String,
+    #[allow(dead_code)]
     pub severity: String,
     pub frequency: i64,
+    #[allow(dead_code)]
     pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub event_id: String,
+    pub event_type: String,
+    pub summary: String,
 }
