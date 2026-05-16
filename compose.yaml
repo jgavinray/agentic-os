@@ -82,7 +82,7 @@ services:
   orchestrator:
     build:
       context: ./orchestrator
-    container_name: agent-orchestrator
+    container_name: agentic-os-orchestrator
     restart: unless-stopped
     depends_on:
       - postgres
