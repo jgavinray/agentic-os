@@ -1,3 +1,4 @@
+mod anthropic;
 mod db;
 mod handlers;
 mod hybrid;
@@ -85,6 +86,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/health/ready", get(handlers::health_ready))
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
+        .route("/v1/messages", post(handlers::messages))
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/context/pack", post(handlers::context_pack))

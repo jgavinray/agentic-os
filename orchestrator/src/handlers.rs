@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
+use crate::anthropic;
 use crate::db;
 use crate::qdrant;
 use crate::state::*;
@@ -393,6 +394,22 @@ pub async fn checkpoint(
 
 // ── Chat completions ────────────────────────────────────────────
 
+/// Return an Anthropic-shaped error response.
+fn anthropic_error(
+    status: StatusCode,
+    error_type: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "type": "error",
+            "error": {"type": error_type, "message": message.into()}
+        })),
+    )
+        .into_response()
+}
+
 /// BUG-4: Append context to an existing client system message rather than inserting
 /// a new one at position 0, which would demote the harness's carefully-tuned prompt.
 fn inject_system_context(payload: &mut Value, context: &str) {
@@ -482,6 +499,62 @@ async fn persist_exchange(
     }
 }
 
+/// Pack orchestrator context into an OpenAI-shaped request.
+/// Sets a default model if absent, fetches memory events, builds context string,
+/// and injects it as a system message.
+async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, task: &str) {
+    if req.get("model").is_none() {
+        req["model"] = Value::String(state.default_model.clone());
+    }
+    let task_category = crate::state::TaskCategory::from_task(task);
+    let task_config = crate::state::TaskContextConfig::for_category(task_category);
+    let events = db::get_events_for_repo(&state.pool, repo, task_config.max_events)
+        .await
+        .ok();
+    let memories: Vec<EventMemory> = events
+        .iter()
+        .flat_map(|evts| evts.iter().map(|e| e.to_memory()))
+        .collect();
+    let hybrid_hits = hybrid_search(state, repo, task, task_config.semantic_limit).await;
+    let errors = db::get_active_errors(&state.pool, repo, 5)
+        .await
+        .unwrap_or_default();
+    let context = db::build_context(repo, task, &memories, &hybrid_hits, &errors, task_config.char_budget);
+    inject_system_context(req, &context);
+}
+
+/// POST the OpenAI request to LiteLLM and return the raw response JSON.
+/// Returns Err(Response) on network or parse failure.
+async fn dispatch_non_streaming_raw(
+    state: &AppState,
+    openai_req: &Value,
+) -> Result<Value, Response> {
+    let url = format!("{}/chat/completions", state.litellm_url);
+    match state
+        .http
+        .post(&url)
+        .bearer_auth(&state.litellm_key)
+        .json(openai_req)
+        .send()
+        .await
+    {
+        Ok(r) => r.json::<Value>().await.map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+            )
+                .into_response()
+        }),
+        Err(e) => Err((
+            StatusCode::BAD_GATEWAY,
+            axum::Json(
+                serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
+            ),
+        )
+            .into_response()),
+    }
+}
+
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -516,93 +589,40 @@ pub async fn chat_completions(
     tracing::info!(repo = %repo, task = %task, "routing request");
 
     let mut req = payload.clone();
-    if req.get("model").is_none() {
-        req["model"] = Value::String(state.default_model.clone());
-    }
-
-    let task_category = crate::state::TaskCategory::from_task(&task);
-    let task_config = crate::state::TaskContextConfig::for_category(task_category);
-
-    let events = db::get_events_for_repo(&state.pool, &repo, task_config.max_events)
-        .await
-        .ok();
-    let memories: Vec<EventMemory> = events
-        .iter()
-        .flat_map(|evts| evts.iter().map(|e| e.to_memory()))
-        .collect();
-    let hybrid_hits = hybrid_search(&state, &repo, &task, task_config.semantic_limit).await;
-    let errors = db::get_active_errors(&state.pool, &repo, 5)
-        .await
-        .unwrap_or_default();
-    let context = db::build_context(
-        &repo,
-        &task,
-        &memories,
-        &hybrid_hits,
-        &errors,
-        task_config.char_budget,
-    );
-    inject_system_context(&mut req, &context);
+    pack_context_into_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
         return handle_streaming(&state, req, repo, task).await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
-    let url = format!("{}/chat/completions", state.litellm_url);
-    match state
-        .http
-        .post(&url)
-        .bearer_auth(&state.litellm_key)
-        .json(&req)
-        .send()
-        .await
-    {
-        Ok(r) => match r.json::<Value>().await {
-            Ok(val) => {
-                let user_content: String = req["messages"]
-                    .as_array()
-                    .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("")
-                    .chars()
-                    .take(500)
-                    .collect();
-                let assistant_content: String = val["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .chars()
-                    .take(500)
-                    .collect();
+    match dispatch_non_streaming_raw(&state, &req).await {
+        Ok(val) => {
+            let user_content: String = req["messages"]
+                .as_array()
+                .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .chars()
+                .take(500)
+                .collect();
+            let assistant_content: String = val["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(500)
+                .collect();
 
-                match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-                    Ok(session_id) => {
-                        persist_exchange(
-                            &state,
-                            &session_id,
-                            &repo,
-                            &user_content,
-                            &assistant_content,
-                        )
+            match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+                Ok(session_id) => {
+                    persist_exchange(&state, &session_id, &repo, &user_content, &assistant_content)
                         .await
-                    }
-                    Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
                 }
-                axum::Json(val).into_response()
+                Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
             }
-            Err(_) => (
-                StatusCode::BAD_GATEWAY,
-                axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
-            )
-                .into_response(),
-        },
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            axum::Json(
-                serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
-            ),
-        )
-            .into_response(),
+            axum::Json(val).into_response()
+        }
+        Err(resp) => resp,
     }
 }
 
@@ -673,6 +693,203 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
                         .await
                 }
                 Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
+            }
+        }
+    });
+
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::CONNECTION, "keep-alive"),
+        ],
+        axum::body::Body::from_stream(tapped),
+    )
+        .into_response()
+}
+
+// ── Anthropic /v1/messages ──────────────────────────────────────
+
+pub async fn messages(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(payload): axum::Json<Value>,
+) -> Response {
+    let Some((_caller_token, _caller_ns)) = authenticate(&state, &headers) else {
+        return anthropic_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid or missing API key",
+        );
+    };
+
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let repo = headers
+        .get("x-agent-repo")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| _caller_ns.clone());
+    let task = headers
+        .get("x-agent-task")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| state.default_task.clone());
+
+    tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
+
+    // Extract user content from the original Anthropic request for persistence.
+    let user_content = anthropic::extract_user_content_from_anthropic(&payload);
+
+    // Remember model from original request for response translation.
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&state.default_model)
+        .to_string();
+
+    // Translate Anthropic → OpenAI.
+    let mut openai_req = match anthropic::anthropic_to_openai(payload) {
+        Ok(r) => r,
+        Err(e) => {
+            return anthropic_error(
+                StatusCode::from_u16(e.http_status).unwrap_or(StatusCode::BAD_REQUEST),
+                e.error_type,
+                e.message,
+            );
+        }
+    };
+
+    // Inject orchestrator memory context.
+    pack_context_into_req(&state, &mut openai_req, &repo, &task).await;
+
+    if is_stream {
+        return handle_streaming_anthropic(&state, openai_req, user_content, repo, task, model)
+            .await;
+    }
+
+    // ── Non-streaming ───────────────────────────────────────────
+    match dispatch_non_streaming_raw(&state, &openai_req).await {
+        Ok(val) => {
+            let assistant_content: String = val["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(500)
+                .collect();
+
+            match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+                Ok(sid) => {
+                    persist_exchange(&state, &sid, &repo, &user_content, &assistant_content).await
+                }
+                Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
+            }
+
+            let anthropic_resp = anthropic::openai_to_anthropic_response(val, &model);
+            axum::Json(anthropic_resp).into_response()
+        }
+        Err(_) => anthropic_error(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            "upstream LiteLLM request failed",
+        ),
+    }
+}
+
+async fn handle_streaming_anthropic(
+    state: &AppState,
+    openai_req: Value,
+    user_content: String,
+    repo: String,
+    task: String,
+    model: String,
+) -> Response {
+    let url = format!("{}/chat/completions", state.litellm_url);
+
+    let upstream = match state
+        .http_stream
+        .post(&url)
+        .bearer_auth(&state.litellm_key)
+        .json(&openai_req)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return anthropic_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                format!("upstream unreachable: {e}"),
+            )
+        }
+    };
+
+    if !upstream.status().is_success() {
+        return anthropic_error(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            format!("upstream returned {}", upstream.status()),
+        );
+    }
+
+    let bytes_stream = upstream.bytes_stream();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let acc_clone = accumulated.clone();
+
+    let mut sse_state = anthropic::SseTranslationState::new(model);
+
+    let tapped = async_stream::stream! {
+        tokio::pin!(bytes_stream);
+        let mut tx_opt = Some(done_tx);
+        // Buffer for incomplete lines across byte chunks.
+        let mut carry = String::new();
+
+        while let Some(chunk) = bytes_stream.next().await {
+            match chunk {
+                Ok(b) => {
+                    if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
+                    carry.push_str(&String::from_utf8_lossy(&b));
+                    // Process all complete lines.
+                    while let Some(pos) = carry.find('\n') {
+                        let line = carry[..pos].trim_end_matches('\r').to_string();
+                        carry = carry[pos + 1..].to_string();
+                        for event_bytes in anthropic::translate_openai_sse_chunk(&line, &mut sse_state) {
+                            yield Ok::<Bytes, std::io::Error>(event_bytes);
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Err(std::io::Error::other(e));
+                }
+            }
+        }
+        // Flush any remaining carry buffer.
+        if !carry.trim().is_empty() {
+            for event_bytes in anthropic::translate_openai_sse_chunk(carry.trim(), &mut sse_state) {
+                yield Ok::<Bytes, std::io::Error>(event_bytes);
+            }
+        }
+        if let Some(tx) = tx_opt.take() {
+            let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
+            let _ = tx.send(data);
+        }
+    };
+
+    let state_bg = state.clone();
+    tokio::spawn(async move {
+        if let Ok(raw_bytes) = done_rx.await {
+            let raw = String::from_utf8_lossy(&raw_bytes);
+            let assistant_content = extract_assistant_from_sse(&raw);
+            match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
+                Ok(sid) => {
+                    persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content)
+                        .await
+                }
+                Err(e) => tracing::warn!("messages stream: find_or_create_session failed: {e}"),
             }
         }
     });
