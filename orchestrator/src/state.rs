@@ -91,8 +91,9 @@ pub struct AppState {
     pub litellm_url: String,
     /// LiteLLM API key
     pub litellm_key: String,
-    /// Valid API keys — each key is a memory namespace (sk-work → namespace "work")
-    pub api_keys: Vec<String>,
+    /// Valid API keys — each entry is (token, namespace). Token authenticates; namespace
+    /// partitions memory. Format in .env: `token,ns;token2,ns2`
+    pub api_keys: Vec<(String, String)>,
     /// Default model name for completions
     pub default_model: String,
     /// Default task when x-agent-task header is absent

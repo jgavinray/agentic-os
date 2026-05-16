@@ -50,19 +50,19 @@ curl localhost:8088/health/ready
 
 The orchestrator derives a memory namespace from the API key — no custom headers needed.
 
+Format: `API_KEYS=token,namespace;token2,namespace2`
+
+Example:
+
 ```
-sk-work     → namespace: work
-sk-home     → namespace: home
-sk-myteam   → namespace: myteam
+API_KEYS=agent-os,project-alpha;agent-os,project-beta;sk-work,work
 ```
+
+This means:
+- `Bearer agent-os` → routes to `project-alpha` or `project-beta` (multiple namespaces per token)
+- `Bearer sk-work` → routes to `work`
 
 Each namespace is fully isolated. Past sessions, context packs, and semantic recall are scoped to that namespace. Different clients using different keys get completely separate memory.
-
-Configure multiple keys in `.env`:
-
-```
-API_KEYS=sk-work,sk-home,sk-project-x
-```
 
 Clients need only two settings — base URL and API key:
 
@@ -70,8 +70,8 @@ Clients need only two settings — base URL and API key:
 # Work context
 opencode --api-url http://localhost:8088/v1 --api-key sk-work
 
-# Personal context
-opencode --api-url http://localhost:8088/v1 --api-key sk-home
+# Project context
+opencode --api-url http://localhost:8088/v1 --api-key agent-os
 ```
 
 Memory is automatically separated. No headers, no configuration beyond the key.

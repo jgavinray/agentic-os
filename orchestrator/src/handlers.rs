@@ -23,14 +23,14 @@ fn bearer_token(headers: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
-// Returns the matched API key if auth passes; None otherwise.
-// Constant-time comparison on each candidate prevents timing-based key recovery.
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<String> {
+// Returns the (token, namespace) pair if auth passes; None otherwise.
+// Constant-time comparison prevents timing-based key recovery.
+fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
     let provided = bearer_token(headers).as_bytes();
-    for key in &state.api_keys {
-        let expected = key.as_bytes();
+    for (token, namespace) in &state.api_keys {
+        let expected = token.as_bytes();
         if expected.len() == provided.len() && expected.ct_eq(provided).into() {
-            return Some(key.clone());
+            return Some((token.clone(), namespace.clone()));
         }
     }
     None
@@ -38,12 +38,6 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<String> {
 
 fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     authenticate(state, headers).is_some()
-}
-
-// Derives the memory namespace (repo) from the API key by stripping the "sk-" prefix.
-// sk-work → work, sk-project-x → project-x
-fn repo_from_key(key: &str) -> String {
-    key.strip_prefix("sk-").unwrap_or(key).to_string()
 }
 
 // ── Health checks (no auth) ─────────────────────────────────────
@@ -493,7 +487,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    let Some(caller_key) = authenticate(&state, &headers) else {
+    let Some((_caller_token, _caller_ns)) = authenticate(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({"error": "unauthorized"})),
@@ -506,13 +500,13 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Explicit headers take precedence; fall back to key-derived namespace so
+    // Explicit headers take precedence; fall back to token-bound namespace so
     // standard clients (OpenCode, OpenHands, curl) get memory without custom headers.
     let repo = headers
         .get("x-agent-repo")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .unwrap_or_else(|| repo_from_key(&caller_key));
+        .unwrap_or_else(|| _caller_ns.clone());
     let task = headers
         .get("x-agent-task")
         .and_then(|v| v.to_str().ok())
@@ -801,6 +795,86 @@ mod tests {
     fn retry_backoff_durations_are_correct() {
         let delays: Vec<u64> = (0u32..2).map(|a| 200 * 2u64.pow(a)).collect();
         assert_eq!(delays, vec![200, 400]);
+    }
+
+    // ── API_KEYS parsing: semicolon-delimited token,namespace entries ──
+
+    #[test]
+    fn parse_simple_single_entry() {
+        let input = "agent-os,project-alpha";
+        let mut parts = input.splitn(2, ',');
+        let token = parts.next().unwrap_or(input).trim().to_string();
+        let namespace = parts.next().unwrap_or(&token).trim().to_string();
+        assert_eq!(token, "agent-os");
+        assert_eq!(namespace, "project-alpha");
+    }
+
+    #[test]
+    fn parse_multiple_semicolon_entries() {
+        let input = "agent-os,project-alpha;agent-os,project-beta;sk-work,work";
+        let entries: Vec<(String, String)> = input
+            .split(';')
+            .map(|s| {
+                let s = s.trim();
+                let mut parts = s.splitn(2, ',');
+                let token = parts.next().unwrap_or(s).trim().to_string();
+                let namespace = parts.next().unwrap_or(&token).trim().to_string();
+                (token, namespace)
+            })
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], ("agent-os".to_string(), "project-alpha".to_string()));
+        assert_eq!(entries[1], ("agent-os".to_string(), "project-beta".to_string()));
+        assert_eq!(entries[2], ("sk-work".to_string(), "work".to_string()));
+    }
+
+    #[test]
+    fn parse_empty_token_filtered() {
+        let input = "token1,ns1;;token2,ns2";
+        let entries: Vec<(String, String)> = input
+            .split(';')
+            .map(|s| {
+                let s = s.trim();
+                let mut parts = s.splitn(2, ',');
+                let token = parts.next().unwrap_or(s).trim().to_string();
+                let namespace = parts.next().unwrap_or(&token).trim().to_string();
+                (token, namespace)
+            })
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn parse_fallback_to_token_when_no_namespace() {
+        let input = "my-token";
+        let mut parts = input.splitn(2, ',');
+        let token = parts.next().unwrap_or(input).trim().to_string();
+        let namespace = parts.next().unwrap_or(&token).trim().to_string();
+        assert_eq!(token, "my-token");
+        assert_eq!(namespace, "my-token");
+    }
+
+    #[test]
+    fn parse_default_value() {
+        let input = "agent-os,agentic-os";
+        let entries: Vec<(String, String)> = input
+            .split(';')
+            .map(|s| {
+                let s = s.trim();
+                let mut parts = s.splitn(2, ',');
+                let token = parts.next().unwrap_or(s).trim().to_string();
+                let namespace = parts.next().unwrap_or(&token).trim().to_string();
+                (token, namespace)
+            })
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], ("agent-os".to_string(), "agentic-os".to_string()));
     }
 }
 

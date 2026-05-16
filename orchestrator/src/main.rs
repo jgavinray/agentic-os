@@ -25,13 +25,18 @@ async fn main() -> Result<(), anyhow::Error> {
     let litellm_url = env::var("LITELLM_URL").expect("LITELLM_URL must be set");
     let litellm_key = env::var("LITELLM_KEY").expect("LITELLM_KEY must be set");
     // BUG-12: canonical model name matches litellm-config.yaml
-    // API_KEYS is comma-separated; API_KEY is the single-key fallback for backwards compat.
-    let api_keys: Vec<String> = env::var("API_KEYS")
-        .or_else(|_| env::var("API_KEY"))
-        .unwrap_or_else(|_| "sk-local-orchestrator".to_string())
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    // API_KEYS is semicolon-delimited entries: `token,namespace;token2,namespace2`
+    let api_keys: Vec<(String, String)> = env::var("API_KEYS")
+        .unwrap_or_else(|_| "agent-os,agentic-os".to_string())
+        .split(';')
+        .map(|s| {
+            let s = s.trim();
+            let mut parts = s.splitn(2, ',');
+            let token = parts.next().unwrap_or(s).trim().to_string();
+            let namespace = parts.next().unwrap_or(&token).trim().to_string();
+            (token, namespace)
+        })
+        .filter(|(t, _)| !t.is_empty())
         .collect();
     let default_model =
         env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
