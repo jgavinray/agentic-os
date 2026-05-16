@@ -65,10 +65,12 @@ pub(crate) fn anthropic_to_openai(req: Value) -> Result<Value, TranslationError>
         oai["stop"] = v.clone();
     }
 
-    // Translate tools: input_schema → parameters
+    // Translate tools: input_schema → parameters (omit if empty — vLLM rejects tools: [])
     if let Some(tools) = req.get("tools").and_then(|v| v.as_array()) {
         let oai_tools: Vec<Value> = tools.iter().map(translate_tool_def).collect();
-        oai["tools"] = json!(oai_tools);
+        if !oai_tools.is_empty() {
+            oai["tools"] = json!(oai_tools);
+        }
     }
 
     if let Some(tc) = req.get("tool_choice") {
@@ -637,6 +639,16 @@ mod tests {
         assert_eq!(tool["function"]["description"], "Run a shell command");
         assert!(tool["function"].get("input_schema").is_none());
         assert_eq!(tool["function"]["parameters"]["properties"]["command"]["type"], "string");
+    }
+
+    #[test]
+    fn tools_empty_array_omitted_from_output() {
+        let oai = translate(json!({
+            "model": "m", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": []
+        }));
+        assert!(oai["tools"].is_null());
     }
 
     #[test]
