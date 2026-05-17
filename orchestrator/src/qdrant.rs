@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-const VECTOR_SIZE: usize = 384;
+const VECTOR_SIZE: usize = 1024;
 const EVENT_COLLECTION: &str = "agent_events";
 
 // Calls TEI /embed directly — bypasses LiteLLM to avoid format translation issues.
