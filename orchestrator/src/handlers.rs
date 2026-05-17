@@ -155,6 +155,18 @@ pub async fn cache_stats(State(state): State<Arc<AppState>>, headers: HeaderMap)
     axum::Json(state.cache.stats()).into_response()
 }
 
+pub async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !check_auth(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    axum::Json(state.metrics.snapshot()).into_response()
+}
+
 // ── Session management ──────────────────────────────────────────
 
 pub async fn start_session(
@@ -241,12 +253,20 @@ pub async fn append_event(
     state
         .cache
         .invalidate(&req.repo, req.task.as_deref().unwrap_or(""));
+    state.metrics.record_cache_invalidation();
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
 }
 
 // ── Semantic / hybrid search helpers ───────────────────────────
+
+struct HybridSearchResult {
+    hits: Vec<crate::state::SearchHit>,
+    semantic_hits: usize,
+    fts_hits: usize,
+    deduped_hits: usize,
+}
 
 async fn semantic_search(
     state: &AppState,
@@ -285,7 +305,7 @@ async fn hybrid_search(
     repo: &str,
     task: &str,
     semantic_limit: usize,
-) -> Vec<crate::state::SearchHit> {
+) -> HybridSearchResult {
     let query = format!("{repo} {task}");
     let fts_limit = semantic_limit as i64;
 
@@ -304,13 +324,21 @@ async fn hybrid_search(
         tracing::warn!("FTS search failed, falling back to semantic-only: {e}");
         vec![]
     });
-    crate::hybrid::rrf_merge_decay(
+    let hits = crate::hybrid::rrf_merge_decay(
         &semantic,
         &fts,
         60.0,
         semantic_limit,
         state.context_decay_rate,
-    )
+    );
+    let deduped_hits = hits.len();
+
+    HybridSearchResult {
+        hits,
+        semantic_hits: semantic.len(),
+        fts_hits: fts.len(),
+        deduped_hits,
+    }
 }
 
 // ── Context pack ────────────────────────────────────────────────
@@ -319,39 +347,61 @@ async fn get_or_build_cached_context(
     state: &AppState,
     repo: &str,
     task: &str,
-    limit: i64,
+    limit_override: Option<i64>,
     task_config: &TaskContextConfig,
 ) -> Result<CachedContext, anyhow::Error> {
     let event_count = db::count_events_for_repo(&state.pool, repo).await?;
-    let cache_key = context_cache_key(repo, task, event_count);
+    let cache_task = limit_override
+        .map(|limit| format!("{task}:limit={limit}"))
+        .unwrap_or_else(|| task.to_string());
+    let cache_key = context_cache_key(repo, &cache_task, event_count);
     if let Some(cached) = state.cache.get(&cache_key) {
+        let mut cached = cached;
+        cached.stats.cache_hit = true;
+        state.metrics.record_context_pack(&cached.stats);
         return Ok(cached);
     }
 
-    let (events_result, hybrid_hits, errors_result) = tokio::join!(
-        db::get_context_events_for_repo(&state.pool, repo, event_count, limit),
+    let build_started = std::time::Instant::now();
+    let mut policy = crate::state::ContextPolicy::for_task(task);
+    if let Some(limit) = limit_override {
+        policy.l0_recent_limit = limit.max(0);
+    } else {
+        policy.l0_recent_limit = policy.l0_recent_limit.min(task_config.max_events);
+    }
+    let (evidence_result, hybrid_result, errors_result) = tokio::join!(
+        db::get_context_evidence_for_policy(&state.pool, repo, &policy),
         hybrid_search(state, repo, task, task_config.semantic_limit),
         db::get_active_errors(&state.pool, repo, 5),
     );
 
-    let events = events_result?;
+    let evidence = evidence_result?;
     let errors = errors_result.unwrap_or_default();
-    let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
-    let context = db::build_context(
+    let memories = evidence.memories();
+    let (context, mut stats) = db::build_layered_context(
         repo,
         task,
-        &memories,
-        &hybrid_hits,
+        &evidence,
+        &hybrid_result.hits,
         &errors,
+        &policy,
         task_config.char_budget,
     );
+    stats.build_ms = build_started.elapsed().as_millis() as u64;
+    stats.retrieval_semantic_hits = hybrid_result.semantic_hits;
+    stats.retrieval_fts_hits = hybrid_result.fts_hits;
+    stats.retrieval_deduped_hits = hybrid_result.deduped_hits;
+    stats.cache_hit = false;
+
     let cached = CachedContext {
         context,
         memories,
         cached_at: std::time::Instant::now(),
+        stats,
     };
 
     state.cache.put(cache_key, cached.clone());
+    state.metrics.record_context_pack(&cached.stats);
     Ok(cached)
 }
 
@@ -370,13 +420,12 @@ pub async fn context_pack(
 
     let task_category = crate::state::TaskCategory::from_task(&req.task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let limit = req.limit.unwrap_or(task_config.max_events);
 
     let cached = match get_or_build_cached_context(
         &state,
         &req.repo,
         &req.task,
-        limit,
+        req.limit,
         &task_config,
     )
     .await
@@ -459,6 +508,7 @@ pub async fn checkpoint(
     state
         .cache
         .invalidate(&event.repo, event.task.as_deref().unwrap_or(""));
+    state.metrics.record_cache_invalidation();
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
@@ -524,6 +574,26 @@ fn extract_assistant_from_sse(raw: &str) -> String {
     content
 }
 
+fn extract_token_usage_from_sse(raw: &str) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data.trim() == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let chunk_usage = TokenUsage::from_openai_value(&value);
+        usage.processed_tokens = usage.processed_tokens.max(chunk_usage.processed_tokens);
+        usage.cached_tokens = usage.cached_tokens.max(chunk_usage.cached_tokens);
+        usage.generated_tokens = usage.generated_tokens.max(chunk_usage.generated_tokens);
+    }
+    usage
+}
+
 async fn persist_exchange(
     state: &AppState,
     session_id: &str,
@@ -581,6 +651,7 @@ async fn persist_exchange(
     }
 
     state.cache.invalidate(repo, "");
+    state.metrics.record_cache_invalidation();
 }
 
 /// Pack orchestrator context into an OpenAI-shaped request.
@@ -592,8 +663,7 @@ async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, ta
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    match get_or_build_cached_context(state, repo, task, task_config.max_events, &task_config).await
-    {
+    match get_or_build_cached_context(state, repo, task, None, &task_config).await {
         Ok(cached) => inject_system_context(req, &cached.context),
         Err(e) => {
             tracing::warn!(repo, task, "failed to build cached context: {e}");
@@ -681,6 +751,10 @@ pub async fn chat_completions(
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &req).await {
         Ok(val) => {
+            state
+                .metrics
+                .record_tokens(&TokenUsage::from_openai_value(&val));
+
             let user_content: String = req["messages"]
                 .as_array()
                 .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
@@ -775,6 +849,9 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
+            state_bg
+                .metrics
+                .record_tokens(&extract_token_usage_from_sse(&raw));
             let assistant_content = extract_assistant_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
@@ -867,6 +944,10 @@ pub async fn messages(
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &openai_req).await {
         Ok(val) => {
+            state
+                .metrics
+                .record_tokens(&TokenUsage::from_openai_value(&val));
+
             let assistant_content: String = val["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or("")
@@ -976,6 +1057,9 @@ async fn handle_streaming_anthropic(
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
+            state_bg
+                .metrics
+                .record_tokens(&extract_token_usage_from_sse(&raw));
             let assistant_content = extract_assistant_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
@@ -1001,6 +1085,7 @@ async fn handle_streaming_anthropic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use serde_json::json;
 
     // ── inject_system_context ──────────────────────────────────────────
@@ -1091,6 +1176,17 @@ mod tests {
                    data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
                    data: [DONE]\n";
         assert_eq!(extract_assistant_from_sse(sse), "hi");
+    }
+
+    #[test]
+    fn extract_sse_usage_records_processed_cached_and_generated_tokens() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\
+                   data: [DONE]\n";
+        let usage = extract_token_usage_from_sse(sse);
+        assert_eq!(usage.processed_tokens, 120);
+        assert_eq!(usage.cached_tokens, 80);
+        assert_eq!(usage.generated_tokens, 40);
     }
 
     #[test]
@@ -1232,10 +1328,121 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metrics_include_context_pack_counts() {
+        let metrics = AppMetrics::new();
+        metrics.record_context_pack(&ContextPackStats {
+            context_chars: 400,
+            context_tokens_estimate: 100,
+            l0_items_injected: 1,
+            l1_items_injected: 2,
+            l2_items_injected: 3,
+            l3_items_injected: 4,
+            failed_attempts_injected: 1,
+            remediations_injected: 1,
+            retrieval_semantic_hits: 5,
+            retrieval_fts_hits: 6,
+            retrieval_deduped_hits: 7,
+            cache_hit: false,
+            ..Default::default()
+        });
+        metrics.record_tokens(&TokenUsage {
+            processed_tokens: 120,
+            cached_tokens: 80,
+            generated_tokens: 40,
+        });
+        metrics.record_promotion(false, false);
+        metrics.record_promotion(true, true);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.context_pack_requests, 1);
+        assert_eq!(snapshot.context_cache_misses, 1);
+        assert_eq!(snapshot.l3_items_injected, 4);
+        assert_eq!(snapshot.retrieval_deduped_hits, 7);
+        assert_eq!(snapshot.processed_tokens, 120);
+        assert_eq!(snapshot.cached_tokens, 80);
+        assert_eq!(snapshot.generated_tokens, 40);
+        assert_eq!(snapshot.promotion_attempts, 2);
+        assert_eq!(snapshot.promotion_accepted, 1);
+        assert_eq!(snapshot.promotion_rejected, 1);
+        assert_eq!(snapshot.memory_source_coverage, 0.5);
+    }
+
+    #[test]
+    fn context_pack_sections_are_stable() {
+        let mut evidence = db::ContextEvidence::default();
+        evidence.l3_project = vec![test_event("summary", "L3 architecture truth", 3)];
+        evidence.l2_repo = vec![test_event("summary", "L2 repo pattern", 2)];
+        evidence.l1_matching = vec![test_event("summary", "L1 task summary", 1)];
+        evidence.l0_recent = vec![test_event("edit", "L0 raw evidence", 0)];
+        evidence.failures = vec![test_event("failed_attempt", "do not repeat this", 0)];
+        let policy = ContextPolicy::for_category(TaskCategory::Architecture);
+
+        let (context, _stats) = db::build_layered_context(
+            "repo",
+            "architecture task",
+            &evidence,
+            &[],
+            &[],
+            &policy,
+            16_000,
+        );
+
+        let l3 = context.find("== Durable Project Memory ==").unwrap();
+        let l2 = context.find("== Repo Patterns and Decisions ==").unwrap();
+        let l1 = context.find("== Relevant Session Summaries ==").unwrap();
+        let l0 = context.find("== Recent Evidence ==").unwrap();
+        let failures = context
+            .find("== Failed Attempts and Remediations ==")
+            .unwrap();
+
+        assert!(l3 < l2);
+        assert!(l2 < l1);
+        assert!(l1 < l0);
+        assert!(l0 < failures);
+    }
+
+    #[test]
+    fn failed_attempts_are_injected_for_debug_tasks() {
+        let mut evidence = db::ContextEvidence::default();
+        evidence.failures = vec![db::AgentEvent {
+            evidence: Some("the old retry loop timed out".to_string()),
+            metadata: json!({"outcome": "bounded retry fixed the lag"}),
+            ..test_event("failed_attempt", "unbounded retries caused lag", 0)
+        }];
+        let policy = ContextPolicy::for_category(TaskCategory::Narrow);
+
+        let (context, stats) =
+            db::build_layered_context("repo", "debug lag", &evidence, &[], &[], &policy, 8000);
+
+        assert!(context.contains("unbounded retries caused lag"));
+        assert!(context.contains("Evidence: the old retry loop timed out"));
+        assert!(context.contains("Outcome: bounded retry fixed the lag"));
+        assert_eq!(stats.failed_attempts_injected, 1);
+    }
+
+    #[test]
+    fn cache_hit_rate_updates() {
+        let metrics = AppMetrics::new();
+        metrics.record_context_pack(&ContextPackStats {
+            cache_hit: false,
+            ..Default::default()
+        });
+        metrics.record_context_pack(&ContextPackStats {
+            cache_hit: true,
+            ..Default::default()
+        });
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.context_pack_requests, 2);
+        assert_eq!(snapshot.context_cache_misses, 1);
+        assert_eq!(snapshot.context_cache_hits, 1);
+    }
+
     // ── context_pack tokio::join! parallelization ─────────────────
 
     /// Verifies the shared context builder uses tokio::join! to parallelize
-    /// the three independent I/O calls: db::get_context_events_for_repo,
+    /// the three independent I/O calls: db::get_context_evidence_for_policy,
     /// hybrid_search, and db::get_active_errors.
     #[test]
     fn context_pack_parallelizes_three_io_calls() {
@@ -1251,8 +1458,8 @@ mod tests {
         );
 
         assert!(
-            ctx_body.contains("db::get_context_events_for_repo"),
-            "get_context_events_for_repo should be in tokio::join!"
+            ctx_body.contains("db::get_context_evidence_for_policy"),
+            "get_context_evidence_for_policy should be in tokio::join!"
         );
         assert!(
             ctx_body.contains("hybrid_search"),
@@ -1268,7 +1475,7 @@ mod tests {
             .expect("tokio::join! not found");
         let join_block: String = ctx_body[join_block_start..].chars().take(1500).collect();
         assert!(
-            join_block.contains("get_context_events_for_repo")
+            join_block.contains("get_context_evidence_for_policy")
                 && join_block.contains("hybrid_search")
                 && join_block.contains("get_active_errors"),
             "All three I/O calls should be within the same tokio::join!"
@@ -1319,6 +1526,21 @@ mod tests {
             !body.contains("tokio::join!"),
             "pack_context_into_req should NOT use tokio::join!"
         );
+    }
+
+    fn test_event(event_type: &str, summary: &str, summary_level: i32) -> db::AgentEvent {
+        db::AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: "session".to_string(),
+            repo: "repo".to_string(),
+            actor: "actor".to_string(),
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            evidence: None,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            summary_level,
+        }
     }
 }
 

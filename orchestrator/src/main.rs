@@ -85,6 +85,7 @@ async fn main() -> Result<(), anyhow::Error> {
         http_stream,
         cache: state::ContextCache::new(cache_ttl_ms),
         context_decay_rate,
+        metrics: state::AppMetrics::new(),
     });
 
     tokio::spawn(crate::summarizer::run(Arc::clone(&state)));
@@ -101,6 +102,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/events/append", post(handlers::append_event))
         .route("/context/pack", post(handlers::context_pack))
         .route("/cache/stats", get(handlers::cache_stats))
+        .route("/metrics", get(handlers::metrics))
         .route("/summaries/checkpoint", post(handlers::checkpoint))
         .route("/search", post(handlers::search))
         .layer(TraceLayer::new_for_http())

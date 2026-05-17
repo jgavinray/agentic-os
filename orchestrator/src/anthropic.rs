@@ -29,7 +29,9 @@ pub(crate) fn anthropic_to_openai(req: Value) -> Result<Value, TranslationError>
         return Err(TranslationError::invalid("missing required field: model"));
     }
     if req.get("max_tokens").is_none() {
-        return Err(TranslationError::invalid("missing required field: max_tokens"));
+        return Err(TranslationError::invalid(
+            "missing required field: max_tokens",
+        ));
     }
     let messages = req
         .get("messages")
@@ -154,7 +156,10 @@ fn translate_user_content(blocks: &[Value]) -> Result<Vec<Value>, TranslationErr
                     out.push(json!({"role": "user", "content": text_parts.join("")}));
                     text_parts.clear();
                 }
-                let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                let tool_use_id = block
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let content = match block.get("content") {
                     Some(Value::String(s)) => s.clone(),
                     Some(Value::Array(bs)) => bs
@@ -271,6 +276,29 @@ fn map_finish_reason(reason: Option<&str>) -> &'static str {
     }
 }
 
+fn usage_u64(usage: &Value, primary: &str, fallback: &str) -> u64 {
+    usage[primary]
+        .as_u64()
+        .or_else(|| usage[fallback].as_u64())
+        .unwrap_or(0)
+}
+
+fn cached_input_tokens(usage: &Value) -> u64 {
+    usage["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| usage["input_token_details"]["cache_read"].as_u64())
+        .or_else(|| usage["cache_read_input_tokens"].as_u64())
+        .unwrap_or(0)
+}
+
+fn cache_creation_input_tokens(usage: &Value) -> u64 {
+    usage["prompt_tokens_details"]["cache_creation_tokens"]
+        .as_u64()
+        .or_else(|| usage["input_token_details"]["cache_creation"].as_u64())
+        .or_else(|| usage["cache_creation_input_tokens"].as_u64())
+        .unwrap_or(0)
+}
+
 /// Translate an OpenAI chat/completions response into an Anthropic message response.
 pub(crate) fn openai_to_anthropic_response(resp: Value, model: &str) -> Value {
     let id = resp
@@ -287,8 +315,11 @@ pub(crate) fn openai_to_anthropic_response(resp: Value, model: &str) -> Value {
 
     let finish_reason = resp["choices"][0]["finish_reason"].as_str();
     let stop_reason = map_finish_reason(finish_reason);
-    let input_tokens = resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-    let output_tokens = resp["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    let usage = &resp["usage"];
+    let input_tokens = usage_u64(usage, "prompt_tokens", "input_tokens");
+    let output_tokens = usage_u64(usage, "completion_tokens", "output_tokens");
+    let cache_read_input_tokens = cached_input_tokens(usage);
+    let cache_creation_input_tokens = cache_creation_input_tokens(usage);
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -300,7 +331,11 @@ pub(crate) fn openai_to_anthropic_response(resp: Value, model: &str) -> Value {
                 .iter()
                 .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                 .collect::<String>();
-            if joined.is_empty() { None } else { Some(joined) }
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
         }
         _ => None,
     };
@@ -312,8 +347,14 @@ pub(crate) fn openai_to_anthropic_response(resp: Value, model: &str) -> Value {
     if let Some(tool_calls) = resp["choices"][0]["message"]["tool_calls"].as_array() {
         for tc in tool_calls {
             let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let name = tc["function"].get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = tc["function"].get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+            let name = tc["function"]
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let args = tc["function"]
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
             let input: Value = serde_json::from_str(args).unwrap_or(json!({}));
             content.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
         }
@@ -333,7 +374,9 @@ pub(crate) fn openai_to_anthropic_response(resp: Value, model: &str) -> Value {
         "stop_sequence": null,
         "usage": {
             "input_tokens": input_tokens,
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens
         }
     })
 }
@@ -344,7 +387,10 @@ pub(crate) struct SseTranslationState {
     pub msg_id: String,
     pub model: String,
     pub header_emitted: bool,
+    pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
     pub stop_reason: String,
     // Maps OpenAI tool_call index → Anthropic content block index.
     tool_block_map: HashMap<u64, u32>,
@@ -360,7 +406,10 @@ impl SseTranslationState {
             msg_id: format!("msg_{}", uuid::Uuid::new_v4()),
             model,
             header_emitted: false,
+            input_tokens: 0,
             output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
             stop_reason: "end_turn".to_string(),
             tool_block_map: HashMap::new(),
             next_block_index: 0,
@@ -415,10 +464,18 @@ pub(crate) fn translate_openai_sse_chunk(
             &json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": {"output_tokens": state.output_tokens}
+                "usage": {
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                    "cache_creation_input_tokens": state.cache_creation_input_tokens,
+                    "cache_read_input_tokens": state.cache_read_input_tokens
+                }
             }),
         ));
-        out.push(anthropic_sse_event("message_stop", &json!({"type": "message_stop"})));
+        out.push(anthropic_sse_event(
+            "message_stop",
+            &json!({"type": "message_stop"}),
+        ));
         return out;
     }
 
@@ -430,8 +487,12 @@ pub(crate) fn translate_openai_sse_chunk(
     if let Some(r) = chunk["choices"][0]["finish_reason"].as_str() {
         state.stop_reason = map_finish_reason(Some(r)).to_string();
     }
-    if let Some(n) = chunk["usage"]["completion_tokens"].as_u64() {
-        state.output_tokens = n;
+    let usage = &chunk["usage"];
+    if usage.is_object() {
+        state.input_tokens = usage_u64(usage, "prompt_tokens", "input_tokens");
+        state.output_tokens = usage_u64(usage, "completion_tokens", "output_tokens");
+        state.cache_creation_input_tokens = cache_creation_input_tokens(usage);
+        state.cache_read_input_tokens = cached_input_tokens(usage);
     }
 
     if !state.header_emitted {
@@ -476,7 +537,10 @@ pub(crate) fn translate_openai_sse_chunk(
                 state.tool_block_map.insert(oai_idx, block_idx);
 
                 let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = tc["function"].get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = tc["function"]
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 out.push(anthropic_sse_event(
                     "content_block_start",
                     &json!({
@@ -488,7 +552,10 @@ pub(crate) fn translate_openai_sse_chunk(
             }
 
             let block_idx = state.tool_block_map[&oai_idx];
-            let args = tc["function"].get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+            let args = tc["function"]
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !args.is_empty() {
                 out.push(anthropic_sse_event(
                     "content_block_delta",
@@ -519,7 +586,12 @@ fn emit_message_start(state: &mut SseTranslationState) -> Bytes {
                 "model": state.model,
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": {"input_tokens": 0, "output_tokens": 0}
+                "usage": {
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                    "cache_creation_input_tokens": state.cache_creation_input_tokens,
+                    "cache_read_input_tokens": state.cache_read_input_tokens
+                }
             }
         }),
     )
@@ -638,7 +710,10 @@ mod tests {
         assert_eq!(tool["function"]["name"], "bash");
         assert_eq!(tool["function"]["description"], "Run a shell command");
         assert!(tool["function"].get("input_schema").is_none());
-        assert_eq!(tool["function"]["parameters"]["properties"]["command"]["type"], "string");
+        assert_eq!(
+            tool["function"]["parameters"]["properties"]["command"]["type"],
+            "string"
+        );
     }
 
     #[test]
@@ -701,8 +776,11 @@ mod tests {
         assert_eq!(asst["tool_calls"][0]["id"], "call_1");
         assert_eq!(asst["tool_calls"][0]["function"]["name"], "bash");
         let args: Value = serde_json::from_str(
-            asst["tool_calls"][0]["function"]["arguments"].as_str().unwrap()
-        ).unwrap();
+            asst["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(args["command"], "ls");
     }
 
@@ -804,6 +882,26 @@ mod tests {
     }
 
     #[test]
+    fn cached_tokens_mapped_to_anthropic_usage() {
+        let out = openai_to_anthropic_response(
+            json!({
+                "id":"x",
+                "choices":[{"message":{"content":""},"finish_reason":"stop"}],
+                "usage":{
+                    "prompt_tokens":10,
+                    "completion_tokens":3,
+                    "prompt_tokens_details":{"cached_tokens":7}
+                }
+            }),
+            "m",
+        );
+        assert_eq!(out["usage"]["input_tokens"], 10);
+        assert_eq!(out["usage"]["output_tokens"], 3);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 7);
+        assert_eq!(out["usage"]["cache_creation_input_tokens"], 0);
+    }
+
+    #[test]
     fn id_prefixed_with_msg_when_missing_prefix() {
         let out = openai_to_anthropic_response(
             json!({"id":"abc","choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0}}),
@@ -860,6 +958,25 @@ mod tests {
         assert!(all.contains("content_block_stop"));
         assert!(all.contains("message_delta"));
         assert!(all.contains("message_stop"));
+    }
+
+    #[test]
+    fn sse_translate_usage_includes_input_cache_and_output_tokens() {
+        let mut state = SseTranslationState::new("m".to_string());
+        translate_openai_sse_chunk(
+            r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
+            &mut state,
+        );
+        translate_openai_sse_chunk(
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":25,"prompt_tokens_details":{"cached_tokens":60}}}"#,
+            &mut state,
+        );
+        let events = translate_openai_sse_chunk("data: [DONE]", &mut state);
+        let all = concat_events(&events);
+        assert!(all.contains(r#""input_tokens":100"#));
+        assert!(all.contains(r#""output_tokens":25"#));
+        assert!(all.contains(r#""cache_read_input_tokens":60"#));
+        assert!(all.contains(r#""cache_creation_input_tokens":0"#));
     }
 
     #[test]

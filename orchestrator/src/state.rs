@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 /// Minimum max_tokens for any upstream LiteLLM completion request.
@@ -59,12 +59,30 @@ Session summaries:
 {messages}",
 ];
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ContextPackStats {
+    pub build_ms: u64,
+    pub context_chars: usize,
+    pub context_tokens_estimate: usize,
+    pub l0_items_injected: usize,
+    pub l1_items_injected: usize,
+    pub l2_items_injected: usize,
+    pub l3_items_injected: usize,
+    pub failed_attempts_injected: usize,
+    pub remediations_injected: usize,
+    pub retrieval_semantic_hits: usize,
+    pub retrieval_fts_hits: usize,
+    pub retrieval_deduped_hits: usize,
+    pub cache_hit: bool,
+}
+
 /// Cached context pack with timestamp.
 #[derive(Clone, Debug)]
 pub struct CachedContext {
     pub context: String,
     pub memories: Vec<EventMemory>,
     pub cached_at: Instant,
+    pub stats: ContextPackStats,
 }
 
 /// Context cache keyed by repo:task:version.
@@ -124,14 +142,15 @@ pub fn context_cache_key(repo: &str, task: &str, event_count: i64) -> String {
 
 // ── Task categories for retrieval depth ────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskCategory {
     Narrow,
     Moderate,
     Broad,
+    Architecture,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TaskContextConfig {
     pub max_events: i64,
     pub semantic_limit: usize,
@@ -146,6 +165,7 @@ impl FromStr for TaskCategory {
             "narrow" => Ok(TaskCategory::Narrow),
             "moderate" => Ok(TaskCategory::Moderate),
             "broad" => Ok(TaskCategory::Broad),
+            "architecture" => Ok(TaskCategory::Architecture),
             _ => Err(format!("unknown task category: {s}")),
         }
     }
@@ -158,6 +178,7 @@ impl TaskContextConfig {
             Narrow => (3i64, 3usize, 5000usize),
             Moderate => (8i64, 5usize, 8000usize),
             Broad => (15i64, 10usize, 12000usize),
+            Architecture => (20i64, 12usize, 16000usize),
         };
         Self {
             max_events,
@@ -168,6 +189,15 @@ impl TaskContextConfig {
 }
 
 impl TaskCategory {
+    pub const ARCHITECTURE_KEYWORDS: &'static [&'static str] = &[
+        "architecture",
+        "architectural",
+        "design",
+        "invariant",
+        "durable",
+        "project truth",
+        "system design",
+    ];
     pub const NARROW_KEYWORDS: &'static [&'static str] = &[
         "fix", "bug", "debug", "error", "issue", "warn", "patch", "hotfix",
     ];
@@ -176,7 +206,6 @@ impl TaskCategory {
         "rewrite",
         "refactor",
         "redesign",
-        "architecture",
         "deploy",
         "infrastructure",
         "setup",
@@ -185,6 +214,11 @@ impl TaskCategory {
 
     pub fn from_task(task: &str) -> Self {
         let task_lower = task.to_lowercase();
+        for kw in Self::ARCHITECTURE_KEYWORDS {
+            if task_lower.contains(kw) {
+                return Self::Architecture;
+            }
+        }
         for kw in Self::BROAD_KEYWORDS {
             if task_lower.contains(kw) {
                 return Self::Broad;
@@ -196,6 +230,263 @@ impl TaskCategory {
             }
         }
         Self::Moderate
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryLevel {
+    L0 = 0,
+    L1 = 1,
+    L2 = 2,
+    L3 = 3,
+}
+
+impl MemoryLevel {
+    pub fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum MemoryScope {
+    Session,
+    Repo,
+    Project,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum PromotionReason {
+    AutomaticSessionSummary,
+    RepeatedPattern,
+    ReferencedAgain,
+    MarkedImportant,
+    FailedAttemptRemediated,
+    StableOverTime,
+    ManualConfirmation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ContextPolicy {
+    pub task_category: TaskCategory,
+    pub l0_recent_pct: u8,
+    pub l1_matching_pct: u8,
+    pub l2_repo_pct: u8,
+    pub l3_project_pct: u8,
+    pub failure_pct: u8,
+    pub l0_recent_limit: i64,
+    pub l1_limit: i64,
+    pub l2_limit: i64,
+    pub l3_limit: i64,
+    pub failure_limit: i64,
+}
+
+impl ContextPolicy {
+    pub fn for_task(task: &str) -> Self {
+        Self::for_category(TaskCategory::from_task(task))
+    }
+
+    pub fn for_category(task_category: TaskCategory) -> Self {
+        match task_category {
+            TaskCategory::Narrow => Self {
+                task_category,
+                l0_recent_pct: 40,
+                l1_matching_pct: 30,
+                l2_repo_pct: 10,
+                l3_project_pct: 0,
+                failure_pct: 20,
+                l0_recent_limit: 5,
+                l1_limit: 4,
+                l2_limit: 2,
+                l3_limit: 0,
+                failure_limit: 4,
+            },
+            TaskCategory::Moderate => Self {
+                task_category,
+                l0_recent_pct: 25,
+                l1_matching_pct: 35,
+                l2_repo_pct: 20,
+                l3_project_pct: 5,
+                failure_pct: 15,
+                l0_recent_limit: 5,
+                l1_limit: 6,
+                l2_limit: 4,
+                l3_limit: 2,
+                failure_limit: 3,
+            },
+            TaskCategory::Broad => Self {
+                task_category,
+                l0_recent_pct: 10,
+                l1_matching_pct: 35,
+                l2_repo_pct: 35,
+                l3_project_pct: 10,
+                failure_pct: 10,
+                l0_recent_limit: 3,
+                l1_limit: 8,
+                l2_limit: 8,
+                l3_limit: 3,
+                failure_limit: 3,
+            },
+            TaskCategory::Architecture => Self {
+                task_category,
+                l0_recent_pct: 5,
+                l1_matching_pct: 20,
+                l2_repo_pct: 35,
+                l3_project_pct: 30,
+                failure_pct: 10,
+                l0_recent_limit: 2,
+                l1_limit: 5,
+                l2_limit: 8,
+                l3_limit: 6,
+                failure_limit: 3,
+            },
+        }
+    }
+
+    pub fn budget_for(&self, pct: u8, char_budget: usize) -> usize {
+        (char_budget * pct as usize) / 100
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct TokenUsage {
+    pub processed_tokens: u64,
+    pub cached_tokens: u64,
+    pub generated_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn from_openai_value(value: &Value) -> Self {
+        let usage = &value["usage"];
+        let processed_tokens = usage["prompt_tokens"]
+            .as_u64()
+            .or_else(|| usage["input_tokens"].as_u64())
+            .unwrap_or(0);
+        let generated_tokens = usage["completion_tokens"]
+            .as_u64()
+            .or_else(|| usage["output_tokens"].as_u64())
+            .unwrap_or(0);
+        let cached_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| usage["input_token_details"]["cache_read"].as_u64())
+            .or_else(|| usage["cache_read_input_tokens"].as_u64())
+            .unwrap_or(0);
+
+        Self {
+            processed_tokens,
+            cached_tokens,
+            generated_tokens,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.processed_tokens == 0 && self.cached_tokens == 0 && self.generated_tokens == 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MetricsSnapshot {
+    pub context_pack_requests: u64,
+    pub context_cache_hits: u64,
+    pub context_cache_misses: u64,
+    pub context_pack_build_ms_total: u64,
+    pub context_pack_chars_total: u64,
+    pub context_pack_tokens_estimate_total: u64,
+    pub l0_items_injected: u64,
+    pub l1_items_injected: u64,
+    pub l2_items_injected: u64,
+    pub l3_items_injected: u64,
+    pub failed_attempts_injected: u64,
+    pub remediations_injected: u64,
+    pub retrieval_semantic_hits: u64,
+    pub retrieval_fts_hits: u64,
+    pub retrieval_deduped_hits: u64,
+    pub processed_tokens: u64,
+    pub cached_tokens: u64,
+    pub generated_tokens: u64,
+    pub promotion_attempts: u64,
+    pub promotion_accepted: u64,
+    pub promotion_rejected: u64,
+    pub memory_source_items: u64,
+    pub memory_source_items_with_sources: u64,
+    pub memory_source_coverage: f64,
+    pub stale_cache_invalidations: u64,
+}
+
+#[derive(Clone)]
+pub struct AppMetrics {
+    inner: Arc<RwLock<MetricsSnapshot>>,
+}
+
+impl AppMetrics {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(MetricsSnapshot::default())),
+        }
+    }
+
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        self.inner.read().unwrap().clone()
+    }
+
+    pub fn record_context_pack(&self, stats: &ContextPackStats) {
+        let mut metrics = self.inner.write().unwrap();
+        metrics.context_pack_requests += 1;
+        if stats.cache_hit {
+            metrics.context_cache_hits += 1;
+        } else {
+            metrics.context_cache_misses += 1;
+        }
+        metrics.context_pack_build_ms_total += stats.build_ms;
+        metrics.context_pack_chars_total += stats.context_chars as u64;
+        metrics.context_pack_tokens_estimate_total += stats.context_tokens_estimate as u64;
+        metrics.l0_items_injected += stats.l0_items_injected as u64;
+        metrics.l1_items_injected += stats.l1_items_injected as u64;
+        metrics.l2_items_injected += stats.l2_items_injected as u64;
+        metrics.l3_items_injected += stats.l3_items_injected as u64;
+        metrics.failed_attempts_injected += stats.failed_attempts_injected as u64;
+        metrics.remediations_injected += stats.remediations_injected as u64;
+        metrics.retrieval_semantic_hits += stats.retrieval_semantic_hits as u64;
+        metrics.retrieval_fts_hits += stats.retrieval_fts_hits as u64;
+        metrics.retrieval_deduped_hits += stats.retrieval_deduped_hits as u64;
+    }
+
+    pub fn record_tokens(&self, usage: &TokenUsage) {
+        if usage.is_empty() {
+            return;
+        }
+        let mut metrics = self.inner.write().unwrap();
+        metrics.processed_tokens += usage.processed_tokens;
+        metrics.cached_tokens += usage.cached_tokens;
+        metrics.generated_tokens += usage.generated_tokens;
+    }
+
+    pub fn record_cache_invalidation(&self) {
+        let mut metrics = self.inner.write().unwrap();
+        metrics.stale_cache_invalidations += 1;
+    }
+
+    pub fn record_promotion(&self, accepted: bool, has_sources: bool) {
+        let mut metrics = self.inner.write().unwrap();
+        metrics.promotion_attempts += 1;
+        if accepted {
+            metrics.promotion_accepted += 1;
+        } else {
+            metrics.promotion_rejected += 1;
+        }
+        metrics.memory_source_items += 1;
+        if has_sources {
+            metrics.memory_source_items_with_sources += 1;
+        }
+        metrics.memory_source_coverage =
+            metrics.memory_source_items_with_sources as f64 / metrics.memory_source_items as f64;
+    }
+}
+
+impl Default for AppMetrics {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -227,6 +518,8 @@ pub struct AppState {
     pub cache: ContextCache,
     /// Exponential decay rate used by hybrid search scoring.
     pub context_decay_rate: f64,
+    /// Runtime metrics for context assembly and token usage.
+    pub metrics: AppMetrics,
 }
 
 // ── Request types ──────────────────────────────────────────────
@@ -282,6 +575,7 @@ pub struct EventMemory {
     pub evidence: Option<String>,
     pub metadata: Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub summary_level: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +639,7 @@ mod tests {
                 context: "a".to_string(),
                 memories: vec![],
                 cached_at: Instant::now(),
+                stats: ContextPackStats::default(),
             },
         );
         cache.put(
@@ -353,6 +648,7 @@ mod tests {
                 context: "b".to_string(),
                 memories: vec![],
                 cached_at: Instant::now(),
+                stats: ContextPackStats::default(),
             },
         );
 
@@ -360,5 +656,42 @@ mod tests {
 
         assert!(cache.get(&context_cache_key("repo-a", "task", 1)).is_none());
         assert!(cache.get(&context_cache_key("repo-b", "task", 1)).is_some());
+    }
+
+    #[test]
+    fn task_category_detects_architecture_before_broad() {
+        assert_eq!(
+            TaskCategory::from_task("architecture refactor for memory"),
+            TaskCategory::Architecture
+        );
+    }
+
+    #[test]
+    fn context_policy_small_task_includes_l0_and_l1() {
+        let policy = ContextPolicy::for_category(TaskCategory::Narrow);
+        assert!(policy.l0_recent_pct > 0);
+        assert!(policy.l1_matching_pct > 0);
+        assert!(policy.failure_pct > 0);
+    }
+
+    #[test]
+    fn context_policy_architecture_task_prioritizes_l2_l3() {
+        let policy = ContextPolicy::for_category(TaskCategory::Architecture);
+        assert!(policy.l2_repo_pct + policy.l3_project_pct > policy.l0_recent_pct);
+        assert!(policy.l3_limit > 0);
+    }
+
+    #[test]
+    fn token_usage_extracts_processed_cached_and_generated_tokens() {
+        let usage = TokenUsage::from_openai_value(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "prompt_tokens_details": {"cached_tokens": 40}
+            }
+        }));
+        assert_eq!(usage.processed_tokens, 100);
+        assert_eq!(usage.cached_tokens, 40);
+        assert_eq!(usage.generated_tokens, 25);
     }
 }
