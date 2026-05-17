@@ -298,7 +298,13 @@ pub async fn context_pack(
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     let limit = req.limit.unwrap_or(task_config.max_events);
 
-    let events = match db::get_events_for_repo(&state.pool, &req.repo, limit).await {
+    let (events_result, hybrid_hits, errors_result) = tokio::join!(
+        db::get_events_for_repo(&state.pool, &req.repo, limit),
+        hybrid_search(&state, &req.repo, &req.task, task_config.semantic_limit),
+        db::get_active_errors(&state.pool, &req.repo, 5),
+    );
+
+    let events = match events_result {
         Ok(e) => e,
         Err(e) => {
             return (
@@ -307,12 +313,8 @@ pub async fn context_pack(
             ).into_response();
         }
     };
-
+    let errors = errors_result.unwrap_or_default();
     let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
-    let hybrid_hits = hybrid_search(&state, &req.repo, &req.task, task_config.semantic_limit).await;
-    let errors = db::get_active_errors(&state.pool, &req.repo, 5)
-        .await
-        .unwrap_or_default();
     let context = db::build_context(
         &req.repo,
         &req.task,
@@ -1140,6 +1142,99 @@ mod tests {
                 "client model '{client_model}' was not replaced"
             );
         }
+    }
+
+    // ── context_pack tokio::join! parallelization ─────────────────
+
+    /// Verifies the context_pack handler uses tokio::join! to parallelize
+    /// the three independent I/O calls: db::get_events_for_repo,
+    /// hybrid_search, and db::get_active_errors.
+    #[test]
+    fn context_pack_parallelizes_three_io_calls() {
+        let src = include_str!("handlers.rs");
+        // Find context_pack by looking for it after #[cfg(test)].
+        let ctx_start = src
+            .find("pub async fn context_pack")
+            .expect("context_pack not found in source");
+        let ctx_body = &src[ctx_start..ctx_start + 2000];
+
+        // 1. tokio::join! should appear.
+        assert!(
+            ctx_body.contains("tokio::join!"),
+            "context_pack should use tokio::join! for parallelization"
+        );
+
+        // 2. All three I/O calls should be inside the join! block.
+        assert!(
+            ctx_body.contains("db::get_events_for_repo"),
+            "get_events_for_repo should be in tokio::join!"
+        );
+        assert!(
+            ctx_body.contains("hybrid_search"),
+            "hybrid_search should be in tokio::join!"
+        );
+        assert!(
+            ctx_body.contains("db::get_active_errors"),
+            "get_active_errors should be in tokio::join!"
+        );
+
+        // 3. Verify all three are in the same tokio::.join! block.
+        let join_block_start = ctx_body
+            .find("tokio::join!")
+            .expect("tokio::join! not found");
+        let max_len = ctx_body.len().saturating_sub(join_block_start);
+        let join_block = &ctx_body[join_block_start..(join_block_start + 1500).min(max_len)];
+        assert!(
+            join_block.contains("get_events_for_repo")
+                && join_block.contains("hybrid_search")
+                && join_block.contains("get_active_errors"),
+            "All three I/O calls should be within the same tokio::join!"
+        );
+    }
+
+    /// Verifies error propagation is preserved after parallelization.
+    #[test]
+    fn context_pack_preserves_error_propagation_for_events() {
+        let src = include_str!("handlers.rs");
+        let ctx_start = src.find("pub async fn context_pack").expect("context_pack not found");
+        let ctx_body = &src[ctx_start..ctx_start + 2000];
+        assert!(
+            ctx_body.contains("INTERNAL_SERVER_ERROR"),
+            "context_pack should return 500 on events_for_repo error"
+        );
+    }
+
+    /// Verify hybrid_search still uses tokio::join! internally.
+    #[test]
+    fn hybrid_search_uses_tokio_join() {
+        let src = include_str!("handlers.rs");
+        let hs_start = src
+            .find("async fn hybrid_search")
+            .expect("hybrid_search not found");
+        let body = &src[hs_start..hs_start + 500];
+        assert!(
+            body.contains("tokio::join!"),
+            "hybrid_search should parallelize semantic_search and FTS via tokio::join!"
+        );
+        assert!(
+            body.contains("semantic_search")
+                && body.contains("db::search_events_fts"),
+            "hybrid_search should parallelize semantic_search and FTS"
+        );
+    }
+
+    /// Verify pack_context_into_req is sequential (doesn't use tokio::join!).
+    #[test]
+    fn pack_context_into_req_is_sequential() {
+        let src = include_str!("handlers.rs");
+        let pctr_start = src
+            .find("async fn pack_context_into_req")
+            .expect("pack_context_into_req not found");
+        let body = &src[pctr_start..pctr_start + 1500];
+        assert!(
+            !body.contains("tokio::join!"),
+            "pack_context_into_req should NOT use tokio::join!"
+        );
     }
 }
 
