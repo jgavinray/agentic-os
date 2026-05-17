@@ -520,6 +520,13 @@ async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, ta
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
+    let cache_key = format!("{repo}:{task}");
+    // Check cache first — if we have a valid entry, use it directly.
+    if let Some(cached) = state.cache.get(&cache_key) {
+        inject_system_context(req, &cached.context);
+        return;
+    }
+    // Cache miss — build context, store it, and inject.
     let events = db::get_events_for_repo(&state.pool, repo, task_config.max_events)
         .await
         .ok();
@@ -532,6 +539,14 @@ async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, ta
         .await
         .unwrap_or_default();
     let context = db::build_context(repo, task, &memories, &hybrid_hits, &errors, task_config.char_budget);
+    state.cache.put(
+        cache_key,
+        CachedContext {
+            context: context.clone(),
+            memories,
+            cached_at: std::time::Instant::now(),
+        },
+    );
     inject_system_context(req, &context);
 }
 

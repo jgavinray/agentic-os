@@ -1,13 +1,63 @@
 use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-// Minimum max_tokens for any upstream LiteLLM completion request.
-// vLLM backend exposes 262144 (256K) total context; 64K output leaves ~196K
-// for input and matches Claude Opus 4.x extended-output behavior so reasoning
-// + tool chains don't truncate mid-response.
-pub const MIN_MAX_TOKENS: u64 = 65536;
+/// Minimum max_tokens for any upstream LiteLLM completion request.
+/// vLLM backend exposes 262144 (256K) total context; 16K output leaves ~245K
+/// for input and provides enough output budget for a complete LLM response.
+pub const MIN_MAX_TOKENS: u64 = 16384;
+
+/// Default TTL for cached context packs: 5 minutes.
+const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
+
+/// Cached context pack with timestamp.
+#[derive(Clone, Debug)]
+pub struct CachedContext {
+    pub context: String,
+    pub memories: Vec<EventMemory>,
+    pub cached_at: Instant,
+}
+
+/// Context cache keyed by repo:task:version.
+#[derive(Clone)]
+pub struct ContextCache {
+    entries: Arc<std::sync::RwLock<HashMap<String, CachedContext>>>,
+    ttl_ms: u64,
+}
+
+impl ContextCache {
+    pub fn new(ttl_ms: u64) -> Self {
+        Self {
+            entries: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            ttl_ms,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<CachedContext> {
+        let entries = self.entries.read().unwrap();
+        let entry = entries.get(key)?;
+        if entry.cached_at.elapsed() < Duration::from_millis(self.ttl_ms) {
+            Some(entry.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn put(&self, key: String, value: CachedContext) {
+        let mut entries = self.entries.write().unwrap();
+        entries.insert(key, value);
+    }
+
+    /// Invalidate all entries matching a repo (wildcard: "repo:*").
+    pub fn invalidate(&self, repo: &str, _task: &str) {
+        let mut entries = self.entries.write().unwrap();
+        entries.retain(|k, _| !k.starts_with(&format!("{repo}:")));
+    }
+}
 
 // ── Task categories for retrieval depth ────────────────────────
 
@@ -110,6 +160,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// HTTP client for streaming upstream requests (no overall request timeout)
     pub http_stream: reqwest::Client,
+    /// Context cache — keys by "repo:task:version"
+    pub cache: ContextCache,
 }
 
 // ── Request types ──────────────────────────────────────────────
@@ -158,7 +210,7 @@ pub struct StartSessionResponse {
     pub session_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct EventMemory {
     pub event_type: String,
     pub summary: String,
