@@ -143,6 +143,18 @@ fn fallback_model_list(state: &AppState) -> axum::Json<Value> {
     }))
 }
 
+pub async fn cache_stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !check_auth(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    axum::Json(state.cache.stats()).into_response()
+}
+
 // ── Session management ──────────────────────────────────────────
 
 pub async fn start_session(
@@ -226,6 +238,10 @@ pub async fn append_event(
         }
     }
 
+    state
+        .cache
+        .invalidate(&req.repo, req.task.as_deref().unwrap_or(""));
+
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
 }
@@ -249,10 +265,16 @@ async fn semantic_search(
     .into_iter()
     .filter_map(|item| {
         let payload = item.get("payload")?;
+        let created_at = payload
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
         Some(crate::state::SearchHit {
             event_id: payload.get("event_id")?.as_str()?.to_string(),
             event_type: payload.get("event_type")?.as_str()?.to_string(),
             summary: payload.get("summary")?.as_str()?.to_string(),
+            created_at,
         })
     })
     .collect()
@@ -272,14 +294,66 @@ async fn hybrid_search(
         db::search_events_fts(&state.pool, repo, task, fts_limit),
     );
 
+    let semantic = db::hydrate_active_search_hits(&state.pool, repo, semantic)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("semantic hit hydration failed, falling back to FTS-only: {e}");
+            vec![]
+        });
     let fts = fts_result.unwrap_or_else(|e| {
         tracing::warn!("FTS search failed, falling back to semantic-only: {e}");
         vec![]
     });
-    crate::hybrid::rrf_merge(&semantic, &fts, 60.0, semantic_limit)
+    crate::hybrid::rrf_merge_decay(
+        &semantic,
+        &fts,
+        60.0,
+        semantic_limit,
+        state.context_decay_rate,
+    )
 }
 
 // ── Context pack ────────────────────────────────────────────────
+
+async fn get_or_build_cached_context(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    limit: i64,
+    task_config: &TaskContextConfig,
+) -> Result<CachedContext, anyhow::Error> {
+    let event_count = db::count_events_for_repo(&state.pool, repo).await?;
+    let cache_key = context_cache_key(repo, task, event_count);
+    if let Some(cached) = state.cache.get(&cache_key) {
+        return Ok(cached);
+    }
+
+    let (events_result, hybrid_hits, errors_result) = tokio::join!(
+        db::get_context_events_for_repo(&state.pool, repo, event_count, limit),
+        hybrid_search(state, repo, task, task_config.semantic_limit),
+        db::get_active_errors(&state.pool, repo, 5),
+    );
+
+    let events = events_result?;
+    let errors = errors_result.unwrap_or_default();
+    let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
+    let context = db::build_context(
+        repo,
+        task,
+        &memories,
+        &hybrid_hits,
+        &errors,
+        task_config.char_budget,
+    );
+    let cached = CachedContext {
+        context,
+        memories,
+        cached_at: std::time::Instant::now(),
+    };
+
+    state.cache.put(cache_key, cached.clone());
+    Ok(cached)
+}
 
 pub async fn context_pack(
     State(state): State<Arc<AppState>>,
@@ -298,14 +372,16 @@ pub async fn context_pack(
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     let limit = req.limit.unwrap_or(task_config.max_events);
 
-    let (events_result, hybrid_hits, errors_result) = tokio::join!(
-        db::get_events_for_repo(&state.pool, &req.repo, limit),
-        hybrid_search(&state, &req.repo, &req.task, task_config.semantic_limit),
-        db::get_active_errors(&state.pool, &req.repo, 5),
-    );
-
-    let events = match events_result {
-        Ok(e) => e,
+    let cached = match get_or_build_cached_context(
+        &state,
+        &req.repo,
+        &req.task,
+        limit,
+        &task_config,
+    )
+    .await
+    {
+        Ok(cached) => cached,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -313,22 +389,12 @@ pub async fn context_pack(
             ).into_response();
         }
     };
-    let errors = errors_result.unwrap_or_default();
-    let memories: Vec<EventMemory> = events.iter().map(|e| e.to_memory()).collect();
-    let context = db::build_context(
-        &req.repo,
-        &req.task,
-        &memories,
-        &hybrid_hits,
-        &errors,
-        task_config.char_budget,
-    );
 
     axum::Json(ContextPackResponse {
         repo: req.repo,
         task: req.task,
-        context,
-        memories,
+        context: cached.context,
+        memories: cached.memories,
     })
     .into_response()
 }
@@ -389,6 +455,10 @@ pub async fn checkpoint(
                 .into_response();
         }
     };
+
+    state
+        .cache
+        .invalidate(&event.repo, event.task.as_deref().unwrap_or(""));
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
@@ -509,6 +579,8 @@ async fn persist_exchange(
             }
         }
     }
+
+    state.cache.invalidate(repo, "");
 }
 
 /// Pack orchestrator context into an OpenAI-shaped request.
@@ -520,34 +592,15 @@ async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, ta
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let cache_key = format!("{repo}:{task}");
-    // Check cache first — if we have a valid entry, use it directly.
-    if let Some(cached) = state.cache.get(&cache_key) {
-        inject_system_context(req, &cached.context);
-        return;
+    match get_or_build_cached_context(state, repo, task, task_config.max_events, &task_config).await
+    {
+        Ok(cached) => inject_system_context(req, &cached.context),
+        Err(e) => {
+            tracing::warn!(repo, task, "failed to build cached context: {e}");
+            let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
+            inject_system_context(req, &context);
+        }
     }
-    // Cache miss — build context, store it, and inject.
-    let events = db::get_events_for_repo(&state.pool, repo, task_config.max_events)
-        .await
-        .ok();
-    let memories: Vec<EventMemory> = events
-        .iter()
-        .flat_map(|evts| evts.iter().map(|e| e.to_memory()))
-        .collect();
-    let hybrid_hits = hybrid_search(state, repo, task, task_config.semantic_limit).await;
-    let errors = db::get_active_errors(&state.pool, repo, 5)
-        .await
-        .unwrap_or_default();
-    let context = db::build_context(repo, task, &memories, &hybrid_hits, &errors, task_config.char_budget);
-    state.cache.put(
-        cache_key,
-        CachedContext {
-            context: context.clone(),
-            memories,
-            cached_at: std::time::Instant::now(),
-        },
-    );
-    inject_system_context(req, &context);
 }
 
 /// POST the OpenAI request to LiteLLM and return the raw response JSON.
@@ -645,8 +698,14 @@ pub async fn chat_completions(
 
             match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
                 Ok(session_id) => {
-                    persist_exchange(&state, &session_id, &repo, &user_content, &assistant_content)
-                        .await
+                    persist_exchange(
+                        &state,
+                        &session_id,
+                        &repo,
+                        &user_content,
+                        &assistant_content,
+                    )
+                    .await
                 }
                 Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
             }
@@ -1076,8 +1135,14 @@ mod tests {
             .collect();
 
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0], ("agent-os".to_string(), "project-alpha".to_string()));
-        assert_eq!(entries[1], ("agent-os".to_string(), "project-beta".to_string()));
+        assert_eq!(
+            entries[0],
+            ("agent-os".to_string(), "project-alpha".to_string())
+        );
+        assert_eq!(
+            entries[1],
+            ("agent-os".to_string(), "project-beta".to_string())
+        );
         assert_eq!(entries[2], ("sk-work".to_string(), "work".to_string()));
     }
 
@@ -1125,7 +1190,10 @@ mod tests {
             .collect();
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], ("agent-os".to_string(), "agentic-os".to_string()));
+        assert_eq!(
+            entries[0],
+            ("agent-os".to_string(), "agentic-os".to_string())
+        );
     }
 
     // ── Model substitution ────────────────────────────────────────
@@ -1143,7 +1211,12 @@ mod tests {
 
     #[test]
     fn model_substituted_with_default_for_any_client_model_name() {
-        let client_models = ["gpt-4o", "claude-sonnet-4-6", "claude-opus-4-7", "gpt-4-turbo"];
+        let client_models = [
+            "gpt-4o",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "gpt-4-turbo",
+        ];
         let default_model = "qwen36-35b-heretic";
         for client_model in client_models {
             let mut req = json!({
@@ -1161,28 +1234,25 @@ mod tests {
 
     // ── context_pack tokio::join! parallelization ─────────────────
 
-    /// Verifies the context_pack handler uses tokio::join! to parallelize
-    /// the three independent I/O calls: db::get_events_for_repo,
+    /// Verifies the shared context builder uses tokio::join! to parallelize
+    /// the three independent I/O calls: db::get_context_events_for_repo,
     /// hybrid_search, and db::get_active_errors.
     #[test]
     fn context_pack_parallelizes_three_io_calls() {
         let src = include_str!("handlers.rs");
-        // Find context_pack by looking for it after #[cfg(test)].
         let ctx_start = src
-            .find("pub async fn context_pack")
-            .expect("context_pack not found in source");
-        let ctx_body = &src[ctx_start..ctx_start + 2000];
+            .find("async fn get_or_build_cached_context")
+            .expect("get_or_build_cached_context not found in source");
+        let ctx_body: String = src[ctx_start..].chars().take(2500).collect();
 
-        // 1. tokio::join! should appear.
         assert!(
             ctx_body.contains("tokio::join!"),
-            "context_pack should use tokio::join! for parallelization"
+            "context builder should use tokio::join! for parallelization"
         );
 
-        // 2. All three I/O calls should be inside the join! block.
         assert!(
-            ctx_body.contains("db::get_events_for_repo"),
-            "get_events_for_repo should be in tokio::join!"
+            ctx_body.contains("db::get_context_events_for_repo"),
+            "get_context_events_for_repo should be in tokio::join!"
         );
         assert!(
             ctx_body.contains("hybrid_search"),
@@ -1193,14 +1263,12 @@ mod tests {
             "get_active_errors should be in tokio::join!"
         );
 
-        // 3. Verify all three are in the same tokio::.join! block.
         let join_block_start = ctx_body
             .find("tokio::join!")
             .expect("tokio::join! not found");
-        let max_len = ctx_body.len().saturating_sub(join_block_start);
-        let join_block = &ctx_body[join_block_start..(join_block_start + 1500).min(max_len)];
+        let join_block: String = ctx_body[join_block_start..].chars().take(1500).collect();
         assert!(
-            join_block.contains("get_events_for_repo")
+            join_block.contains("get_context_events_for_repo")
                 && join_block.contains("hybrid_search")
                 && join_block.contains("get_active_errors"),
             "All three I/O calls should be within the same tokio::join!"
@@ -1211,7 +1279,9 @@ mod tests {
     #[test]
     fn context_pack_preserves_error_propagation_for_events() {
         let src = include_str!("handlers.rs");
-        let ctx_start = src.find("pub async fn context_pack").expect("context_pack not found");
+        let ctx_start = src
+            .find("pub async fn context_pack")
+            .expect("context_pack not found");
         let ctx_body = &src[ctx_start..ctx_start + 2000];
         assert!(
             ctx_body.contains("INTERNAL_SERVER_ERROR"),
@@ -1232,8 +1302,7 @@ mod tests {
             "hybrid_search should parallelize semantic_search and FTS via tokio::join!"
         );
         assert!(
-            body.contains("semantic_search")
-                && body.contains("db::search_events_fts"),
+            body.contains("semantic_search") && body.contains("db::search_events_fts"),
             "hybrid_search should parallelize semantic_search and FTS"
         );
     }

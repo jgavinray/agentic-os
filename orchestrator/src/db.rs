@@ -15,6 +15,7 @@ pub struct AgentEvent {
     pub evidence: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub summary_level: i32,
 }
 
 impl AgentEvent {
@@ -38,7 +39,8 @@ impl AgentEvent {
             "summary": self.summary,
             "evidence": self.evidence,
             "metadata": self.metadata,
-            "created_at": self.created_at
+            "created_at": self.created_at,
+            "summary_level": self.summary_level
         })
     }
 
@@ -128,9 +130,12 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_fts
     );
 
 ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS summarized BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS summary_level INT NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_type
     ON agent_events(event_type, repo);
+CREATE INDEX IF NOT EXISTS idx_agent_events_summary_level
+    ON agent_events(repo, summary_level, summarized, created_at DESC);
         "#,
     )
     .await?;
@@ -192,8 +197,8 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     let conn = pool.get().await?;
     conn.execute(
         "INSERT INTO agent_events
-         (id, session_id, repo, actor, event_type, summary, evidence, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+         (id, session_id, repo, actor, event_type, summary, evidence, metadata, summary_level)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         &[
             &event.id,
             &event.session_id,
@@ -203,6 +208,7 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
             &event.summary,
             &event.evidence,
             &event.metadata,
+            &event.summary_level,
         ],
     )
     .await?;
@@ -217,10 +223,11 @@ pub async fn get_events_for_repo(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summarized = false
+               AND summary_level = 0
              ORDER BY created_at DESC
              LIMIT $2",
             &[&repo, &limit],
@@ -239,10 +246,90 @@ pub async fn get_events_for_repo(
             evidence: row.get("evidence"),
             metadata: row.get("metadata"),
             created_at: row.get("created_at"),
+            summary_level: row.get("summary_level"),
         })
         .collect();
 
     Ok(events)
+}
+
+pub async fn count_events_for_repo(pool: &Pool, repo: &str) -> Result<i64, anyhow::Error> {
+    let conn = pool.get().await?;
+    let row = conn
+        .query_one(
+            "SELECT count(*)::BIGINT AS count FROM agent_events WHERE repo = $1",
+            &[&repo],
+        )
+        .await?;
+    Ok(row.get("count"))
+}
+
+pub fn preferred_summary_levels(event_count: i64) -> Vec<i32> {
+    match event_count {
+        n if n < 20 => vec![0],
+        n if n < 200 => vec![1],
+        n if n < 2000 => vec![2],
+        _ => vec![3, 2],
+    }
+}
+
+pub async fn get_context_events_for_repo(
+    pool: &Pool,
+    repo: &str,
+    event_count: i64,
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let levels = preferred_summary_levels(event_count);
+    let mut events = get_events_for_repo_by_levels(pool, repo, &levels, limit).await?;
+
+    // Fresh or partially migrated repositories may not yet have promoted summaries.
+    // Fall back through lower levels so context remains available while the
+    // background summarizer catches up.
+    if events.is_empty() && !levels.contains(&0) {
+        events = get_events_for_repo_by_levels(pool, repo, &[1, 0], limit).await?;
+    }
+    if events.is_empty() {
+        events = get_events_for_repo(pool, repo, limit).await?;
+    }
+
+    Ok(events)
+}
+
+async fn get_events_for_repo_by_levels(
+    pool: &Pool,
+    repo: &str,
+    levels: &[i32],
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND summarized = false
+               AND summary_level = ANY($2)
+             ORDER BY summary_level DESC, created_at DESC
+             LIMIT $3",
+            &[&repo, &levels, &limit],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| AgentEvent {
+            id: row.get("id"),
+            session_id: row.get("session_id"),
+            repo: row.get("repo"),
+            actor: row.get("actor"),
+            event_type: row.get("event_type"),
+            summary: row.get("summary"),
+            evidence: row.get("evidence"),
+            metadata: row.get("metadata"),
+            created_at: row.get("created_at"),
+            summary_level: row.get("summary_level"),
+        })
+        .collect())
 }
 
 /// Full-text search on agent_events.summary and evidence for a given repo.
@@ -257,13 +344,13 @@ pub async fn search_events_fts(
     let rows = conn
         .query(
             "WITH docs AS (
-                 SELECT id, event_type, summary,
+                 SELECT id, event_type, summary, created_at,
                         to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(evidence, '')) AS tsv
                  FROM agent_events
                  WHERE repo = $1
                    AND summarized = false
              )
-             SELECT id, event_type, summary
+             SELECT id, event_type, summary, created_at
              FROM docs
              WHERE tsv @@ plainto_tsquery('english', $2)
              ORDER BY ts_rank(tsv, plainto_tsquery('english', $2)) DESC
@@ -278,7 +365,52 @@ pub async fn search_events_fts(
             event_id: row.get("id"),
             event_type: row.get("event_type"),
             summary: row.get("summary"),
+            created_at: Some(row.get("created_at")),
         })
+        .collect())
+}
+
+pub async fn hydrate_active_search_hits(
+    pool: &Pool,
+    repo: &str,
+    hits: Vec<crate::state::SearchHit>,
+) -> Result<Vec<crate::state::SearchHit>, anyhow::Error> {
+    if hits.is_empty() {
+        return Ok(hits);
+    }
+
+    let ids: Vec<String> = hits.iter().map(|h| h.event_id.clone()).collect();
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT id, event_type, summary, created_at
+             FROM agent_events
+             WHERE repo = $1
+               AND summarized = false
+               AND id = ANY($2)",
+            &[&repo, &ids],
+        )
+        .await?;
+
+    let by_id: std::collections::HashMap<String, crate::state::SearchHit> = rows
+        .into_iter()
+        .map(|row| {
+            let id: String = row.get("id");
+            (
+                id.clone(),
+                crate::state::SearchHit {
+                    event_id: id,
+                    event_type: row.get("event_type"),
+                    summary: row.get("summary"),
+                    created_at: Some(row.get("created_at")),
+                },
+            )
+        })
+        .collect();
+
+    Ok(hits
+        .into_iter()
+        .filter_map(|hit| by_id.get(&hit.event_id).cloned())
         .collect())
 }
 
@@ -376,6 +508,7 @@ pub async fn append_event_from_request(
         evidence: req.evidence.clone(),
         metadata,
         created_at: chrono::Utc::now(),
+        summary_level: 0,
     };
 
     insert_event(pool, &event).await?;
@@ -553,6 +686,7 @@ mod tests {
             event_id: uuid::Uuid::new_v4().to_string(),
             event_type: event_type.to_string(),
             summary: summary.to_string(),
+            created_at: Some(Utc::now()),
         }
     }
 
@@ -580,6 +714,7 @@ mod tests {
             evidence: None,
             metadata: serde_json::json!({}),
             created_at: Utc::now(),
+            summary_level: 0,
         }
     }
 
@@ -732,5 +867,16 @@ mod tests {
             last_seen: Utc::now(),
         };
         assert_eq!(rec.frequency, 3);
+    }
+
+    #[test]
+    fn summary_level_filters_correctly() {
+        assert_eq!(preferred_summary_levels(0), vec![0]);
+        assert_eq!(preferred_summary_levels(19), vec![0]);
+        assert_eq!(preferred_summary_levels(20), vec![1]);
+        assert_eq!(preferred_summary_levels(199), vec![1]);
+        assert_eq!(preferred_summary_levels(200), vec![2]);
+        assert_eq!(preferred_summary_levels(1999), vec![2]);
+        assert_eq!(preferred_summary_levels(2000), vec![3, 2]);
     }
 }

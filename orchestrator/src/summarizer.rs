@@ -3,23 +3,6 @@ use crate::state::AppState;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
-const SUMMARIZE_PROMPT: &str = "\
-You are a precise technical summarizer. Extract information from conversation messages \
-into these exact sections. Include only what is explicitly stated. \
-Output nothing else — no preamble, no explanation.
-
-DECISIONS:
-(one decision per line, or the word \"none\")
-OPEN_QUESTIONS:
-(one question per line, or the word \"none\")
-FAILED_APPROACHES:
-(one failed approach per line, or the word \"none\")
-KEY_FACTS:
-(one key fact per line, or the word \"none\")
-
-Messages:
-{messages}";
-
 pub async fn run(state: Arc<AppState>) {
     let mut tick = interval(Duration::from_secs(60));
     loop {
@@ -34,25 +17,52 @@ async fn check_sessions(state: Arc<AppState>) -> Result<(), anyhow::Error> {
     let conn = state.pool.get().await?;
     let rows = conn
         .query(
-            "SELECT session_id
-             FROM agent_events
-             WHERE event_type IN ('user_message', 'assistant_message')
-               AND summarized = false
-             GROUP BY session_id
-             HAVING count(*) > 20",
+            "WITH candidates AS (
+                 SELECT session_id, 1 AS target_level
+                 FROM agent_events
+                 WHERE event_type IN ('user_message', 'assistant_message')
+                   AND summary_level = 0
+                   AND summarized = false
+                 GROUP BY session_id
+                 HAVING count(*) > 20
+                 UNION ALL
+                 SELECT session_id, 2 AS target_level
+                 FROM agent_events
+                 WHERE event_type = 'summary'
+                   AND summary_level = 1
+                   AND summarized = false
+                 GROUP BY session_id
+                 HAVING count(*) > 20
+                 UNION ALL
+                 SELECT session_id, 3 AS target_level
+                 FROM agent_events
+                 WHERE event_type = 'summary'
+                   AND summary_level = 2
+                   AND summarized = false
+                 GROUP BY session_id
+                 HAVING count(*) > 200
+             )
+             SELECT session_id, target_level FROM candidates",
             &[],
         )
         .await?;
-    let session_ids: Vec<String> = rows.iter().map(|r| r.get("session_id")).collect();
+    let candidates: Vec<(String, i32)> = rows
+        .iter()
+        .map(|r| (r.get("session_id"), r.get("target_level")))
+        .collect();
     drop(conn);
 
-    for session_id in session_ids {
-        tokio::spawn(summarize_session(Arc::clone(&state), session_id));
+    for (session_id, target_level) in candidates {
+        tokio::spawn(summarize_session(
+            Arc::clone(&state),
+            session_id,
+            target_level,
+        ));
     }
     Ok(())
 }
 
-async fn summarize_session(state: Arc<AppState>, session_id: String) {
+async fn summarize_session(state: Arc<AppState>, session_id: String, target_level: i32) {
     let conn = match state.pool.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -64,7 +74,7 @@ async fn summarize_session(state: Arc<AppState>, session_id: String) {
     let lock_key: i64 = match conn
         .query_one(
             "SELECT ('x' || substr(md5($1), 1, 16))::bit(64)::bigint AS k",
-            &[&session_id],
+            &[&format!("{session_id}:{target_level}")],
         )
         .await
     {
@@ -85,7 +95,7 @@ async fn summarize_session(state: Arc<AppState>, session_id: String) {
         return;
     }
 
-    if let Err(e) = do_summarize(&state, &conn, &session_id).await {
+    if let Err(e) = do_summarize(&state, &conn, &session_id, target_level).await {
         tracing::warn!(target: "summarizer", session_id = %session_id, "summarization failed: {e}");
     }
 
@@ -98,17 +108,29 @@ async fn do_summarize(
     state: &AppState,
     conn: &deadpool_postgres::Object,
     session_id: &str,
+    target_level: i32,
 ) -> Result<(), anyhow::Error> {
+    let source_level = source_level_for_target(target_level)?;
+    let prompt_template = summary_prompt_for_level(target_level)?;
+
     let rows = conn
         .query(
             "SELECT id, event_type, summary
              FROM agent_events
              WHERE session_id = $1
-               AND event_type IN ('user_message', 'assistant_message')
+               AND summary_level = $2
                AND summarized = false
+               AND (
+                   ($2 = 0 AND event_type IN ('user_message', 'assistant_message'))
+                   OR ($2 > 0 AND event_type = 'summary')
+               )
              ORDER BY created_at ASC
-             LIMIT 10",
-            &[&session_id],
+             LIMIT $3",
+            &[
+                &session_id,
+                &source_level,
+                &crate::state::MAX_SUMMARIZER_EVENTS,
+            ],
         )
         .await?;
 
@@ -131,7 +153,7 @@ async fn do_summarize(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let prompt = SUMMARIZE_PROMPT.replace("{messages}", &messages_text);
+    let prompt = prompt_template.replace("{messages}", &messages_text);
 
     let request_body = serde_json::json!({
         "model": "qwen36-35b-heretic",
@@ -173,12 +195,13 @@ async fn do_summarize(
     let summary_id = uuid::Uuid::new_v4().to_string();
     let metadata = serde_json::json!({
         "summarized_event_ids": event_ids,
-        "summary_version": 1,
+        "summary_version": target_level,
+        "source_summary_level": source_level,
     });
 
     conn.execute(
-        "INSERT INTO agent_events (id, session_id, repo, actor, event_type, summary, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO agent_events (id, session_id, repo, actor, event_type, summary, metadata, summary_level)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         &[
             &summary_id,
             &session_id,
@@ -187,6 +210,7 @@ async fn do_summarize(
             &"summary",
             &summary_text,
             &metadata,
+            &target_level,
         ],
     )
     .await?;
@@ -201,6 +225,7 @@ async fn do_summarize(
         evidence: None,
         metadata,
         created_at: chrono::Utc::now(),
+        summary_level: target_level,
     };
 
     if let Err(e) = crate::qdrant::store_event(
@@ -229,8 +254,50 @@ async fn do_summarize(
         session_id = %session_id,
         summarized_count = event_ids.len(),
         summary_id = %summary_id,
+        target_level,
         "summarized session messages"
     );
 
+    state.cache.invalidate(&repo, "");
+
     Ok(())
+}
+
+pub(crate) fn source_level_for_target(target_level: i32) -> Result<i32, anyhow::Error> {
+    match target_level {
+        1 => Ok(0),
+        2 => Ok(1),
+        3 => Ok(2),
+        _ => anyhow::bail!("invalid summary target level: {target_level}"),
+    }
+}
+
+pub(crate) fn summary_prompt_for_level(target_level: i32) -> Result<&'static str, anyhow::Error> {
+    let idx = usize::try_from(target_level - 1).unwrap_or(usize::MAX);
+    crate::state::SUMMARY_PROMPTS
+        .get(idx)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("invalid summary target level: {target_level}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn promotion_sequence() {
+        assert_eq!(source_level_for_target(1).unwrap(), 0);
+        assert_eq!(source_level_for_target(2).unwrap(), 1);
+        assert_eq!(source_level_for_target(3).unwrap(), 2);
+        assert!(source_level_for_target(4).is_err());
+
+        assert_ne!(
+            summary_prompt_for_level(1).unwrap(),
+            summary_prompt_for_level(2).unwrap()
+        );
+        assert_ne!(
+            summary_prompt_for_level(2).unwrap(),
+            summary_prompt_for_level(3).unwrap()
+        );
+    }
 }

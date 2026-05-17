@@ -12,7 +12,52 @@ use std::time::{Duration, Instant};
 pub const MIN_MAX_TOKENS: u64 = 16384;
 
 /// Default TTL for cached context packs: 5 minutes.
-const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
+pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
+
+/// Default exponential decay rate for search results.
+///
+/// The plan's acceptance criteria require a 1-hour-old result to score at most
+/// 70% of an otherwise identical fresh result. A rate of 0.006 gives
+/// e^(-0.006 * 60) ~= 0.698.
+pub const DEFAULT_CONTEXT_DECAY_RATE: f64 = 0.006;
+
+/// Cap source events consumed per summarization promotion pass.
+pub const MAX_SUMMARIZER_EVENTS: i64 = 10;
+
+/// Prompt templates for summary hierarchy promotion:
+/// index 0 => raw events to L1, index 1 => L1 to L2, index 2 => L2 to L3.
+pub const SUMMARY_PROMPTS: [&str; 3] = [
+    "\
+You are a precise technical summarizer. Extract information from conversation messages \
+into these exact sections. Include only what is explicitly stated. \
+Output nothing else — no preamble, no explanation.
+
+DECISIONS:
+(one decision per line, or the word \"none\")
+OPEN_QUESTIONS:
+(one question per line, or the word \"none\")
+FAILED_APPROACHES:
+(one failed approach per line, or the word \"none\")
+KEY_FACTS:
+(one key fact per line, or the word \"none\")
+
+Messages:
+{messages}",
+    "\
+You are consolidating event-level engineering summaries into a session-level summary. \
+Keep recurring decisions, unresolved questions, failed approaches, and facts that would \
+help resume the work later. Output only the consolidated summary.
+
+Event summaries:
+{messages}",
+    "\
+You are producing an executive engineering memory summary from session-level summaries. \
+Keep durable architecture decisions, recurring risks, known failed approaches, and the \
+current project state. Output only concise durable memory.
+
+Session summaries:
+{messages}",
+];
 
 /// Cached context pack with timestamp.
 #[derive(Clone, Debug)]
@@ -57,6 +102,24 @@ impl ContextCache {
         let mut entries = self.entries.write().unwrap();
         entries.retain(|k, _| !k.starts_with(&format!("{repo}:")));
     }
+
+    pub fn stats(&self) -> CacheStats {
+        let entries = self.entries.read().unwrap();
+        CacheStats {
+            entries: entries.len(),
+            ttl_ms: self.ttl_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheStats {
+    pub entries: usize,
+    pub ttl_ms: u64,
+}
+
+pub fn context_cache_key(repo: &str, task: &str, event_count: i64) -> String {
+    format!("{repo}:{task}:{event_count}")
 }
 
 // ── Task categories for retrieval depth ────────────────────────
@@ -162,6 +225,8 @@ pub struct AppState {
     pub http_stream: reqwest::Client,
     /// Context cache — keys by "repo:task:version"
     pub cache: ContextCache,
+    /// Exponential decay rate used by hybrid search scoring.
+    pub context_decay_rate: f64,
 }
 
 // ── Request types ──────────────────────────────────────────────
@@ -249,4 +314,51 @@ pub struct SearchHit {
     pub event_id: String,
     pub event_type: String,
     pub summary: String,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_cache_key_includes_repo_task_and_event_count() {
+        assert_eq!(
+            context_cache_key("repo", "task", 42),
+            "repo:task:42".to_string()
+        );
+    }
+
+    #[test]
+    fn context_cache_key_separates_repos() {
+        let a = context_cache_key("repo-a", "task", 1);
+        let b = context_cache_key("repo-b", "task", 1);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn context_cache_invalidate_removes_repo_entries() {
+        let cache = ContextCache::new(CONTEXT_CACHE_TTL_MS);
+        cache.put(
+            context_cache_key("repo-a", "task", 1),
+            CachedContext {
+                context: "a".to_string(),
+                memories: vec![],
+                cached_at: Instant::now(),
+            },
+        );
+        cache.put(
+            context_cache_key("repo-b", "task", 1),
+            CachedContext {
+                context: "b".to_string(),
+                memories: vec![],
+                cached_at: Instant::now(),
+            },
+        );
+
+        cache.invalidate("repo-a", "task");
+
+        assert!(cache.get(&context_cache_key("repo-a", "task", 1)).is_none());
+        assert!(cache.get(&context_cache_key("repo-b", "task", 1)).is_some());
+    }
 }

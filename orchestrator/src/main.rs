@@ -45,7 +45,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let cache_ttl_ms = env::var("CONTEXT_CACHE_TTL_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(300_000);
+        .unwrap_or(state::CONTEXT_CACHE_TTL_MS);
+    let context_decay_rate = env::var("CONTEXT_DECAY_RATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(state::DEFAULT_CONTEXT_DECAY_RATE);
     let embedding_url =
         env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://embedding:80".to_string());
 
@@ -80,6 +84,7 @@ async fn main() -> Result<(), anyhow::Error> {
         http,
         http_stream,
         cache: state::ContextCache::new(cache_ttl_ms),
+        context_decay_rate,
     });
 
     tokio::spawn(crate::summarizer::run(Arc::clone(&state)));
@@ -95,6 +100,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/context/pack", post(handlers::context_pack))
+        .route("/cache/stats", get(handlers::cache_stats))
         .route("/summaries/checkpoint", post(handlers::checkpoint))
         .route("/search", post(handlers::search))
         .layer(TraceLayer::new_for_http())
