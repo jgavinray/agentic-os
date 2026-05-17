@@ -36,7 +36,7 @@ services:
 
   embedding:
     image: ghcr.io/huggingface/text-embeddings-inference:turing-1.9
-    command: ["--model-id", "BAAI/bge-small-en-v1.5", "--port", "80"]
+    command: ["--model-id", "Snowflake/snowflake-arctic-embed-l-v2.0", "--port", "80"]
     container_name: agent-embedding
     restart: unless-stopped
     deploy:
