@@ -179,10 +179,54 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_type
     ON agent_events(event_type, repo);
 CREATE INDEX IF NOT EXISTS idx_agent_events_summary_level
     ON agent_events(repo, summary_level, summarized, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    requested_model TEXT NOT NULL,
+    actual_model TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    processed_tokens BIGINT NOT NULL DEFAULT 0,
+    cached_tokens BIGINT NOT NULL DEFAULT 0,
+    generated_tokens BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_usage_model
+    ON token_usage(requested_model, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_namespace
+    ON token_usage(namespace, created_at DESC);
         "#,
     )
     .await?;
 
+    Ok(())
+}
+
+pub async fn record_token_usage(
+    pool: &Pool,
+    requested_model: &str,
+    actual_model: &str,
+    namespace: &str,
+    repo: &str,
+    usage: &crate::state::TokenUsage,
+) -> Result<(), anyhow::Error> {
+    let conn = pool.get().await?;
+    conn.execute(
+        "INSERT INTO token_usage \
+         (requested_model, actual_model, namespace, repo, processed_tokens, cached_tokens, generated_tokens) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        &[
+            &requested_model,
+            &actual_model,
+            &namespace,
+            &repo,
+            &(usage.processed_tokens as i64),
+            &(usage.cached_tokens as i64),
+            &(usage.generated_tokens as i64),
+        ],
+    )
+    .await?;
     Ok(())
 }
 

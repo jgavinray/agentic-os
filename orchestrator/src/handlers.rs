@@ -710,7 +710,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    let Some((_caller_token, _caller_ns)) = authenticate(&state, &headers) else {
+    let Some((_caller_token, namespace)) = authenticate(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({"error": "unauthorized"})),
@@ -729,7 +729,7 @@ pub async fn chat_completions(
         .get("x-agent-repo")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .unwrap_or_else(|| _caller_ns.clone());
+        .unwrap_or_else(|| namespace.clone());
     let task = headers
         .get("x-agent-task")
         .and_then(|v| v.to_str().ok())
@@ -738,6 +738,12 @@ pub async fn chat_completions(
 
     tracing::info!(repo = %repo, task = %task, "routing request");
 
+    let requested_model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&state.default_model)
+        .to_string();
+
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
     req["model"] = Value::String(state.default_model.clone());
@@ -745,15 +751,29 @@ pub async fn chat_completions(
     pack_context_into_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
-        return handle_streaming(&state, req, repo, task).await;
+        return handle_streaming(&state, req, repo, task, requested_model, namespace).await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &req).await {
         Ok(val) => {
-            state
-                .metrics
-                .record_tokens(&TokenUsage::from_openai_value(&val));
+            let usage = TokenUsage::from_openai_value(&val);
+            state.metrics.record_tokens(&usage);
+            if !usage.is_empty() {
+                let pool = state.pool.clone();
+                let actual = state.default_model.clone();
+                let rm = requested_model.clone();
+                let ns = namespace.clone();
+                let r = repo.clone();
+                let u = usage.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await
+                    {
+                        tracing::warn!("failed to record token usage: {e}");
+                    }
+                });
+            }
 
             let user_content: String = req["messages"]
                 .as_array()
@@ -789,7 +809,14 @@ pub async fn chat_completions(
     }
 }
 
-async fn handle_streaming(state: &AppState, req: Value, repo: String, task: String) -> Response {
+async fn handle_streaming(
+    state: &AppState,
+    req: Value,
+    repo: String,
+    task: String,
+    requested_model: String,
+    namespace: String,
+) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
     let upstream =
@@ -849,9 +876,22 @@ async fn handle_streaming(state: &AppState, req: Value, repo: String, task: Stri
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
-            state_bg
-                .metrics
-                .record_tokens(&extract_token_usage_from_sse(&raw));
+            let usage = extract_token_usage_from_sse(&raw);
+            state_bg.metrics.record_tokens(&usage);
+            if !usage.is_empty() {
+                if let Err(e) = db::record_token_usage(
+                    &state_bg.pool,
+                    &requested_model,
+                    &state_bg.default_model,
+                    &namespace,
+                    &repo,
+                    &usage,
+                )
+                .await
+                {
+                    tracing::warn!("failed to record token usage: {e}");
+                }
+            }
             let assistant_content = extract_assistant_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
@@ -881,7 +921,7 @@ pub async fn messages(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    let Some((_caller_token, _caller_ns)) = authenticate(&state, &headers) else {
+    let Some((_caller_token, namespace)) = authenticate(&state, &headers) else {
         return anthropic_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
@@ -898,7 +938,7 @@ pub async fn messages(
         .get("x-agent-repo")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .unwrap_or_else(|| _caller_ns.clone());
+        .unwrap_or_else(|| namespace.clone());
     let task = headers
         .get("x-agent-task")
         .and_then(|v| v.to_str().ok())
@@ -937,16 +977,32 @@ pub async fn messages(
     pack_context_into_req(&state, &mut openai_req, &repo, &task).await;
 
     if is_stream {
-        return handle_streaming_anthropic(&state, openai_req, user_content, repo, task, model)
-            .await;
+        return handle_streaming_anthropic(
+            &state, openai_req, user_content, repo, task, model, namespace,
+        )
+        .await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &openai_req).await {
         Ok(val) => {
-            state
-                .metrics
-                .record_tokens(&TokenUsage::from_openai_value(&val));
+            let usage = TokenUsage::from_openai_value(&val);
+            state.metrics.record_tokens(&usage);
+            if !usage.is_empty() {
+                let pool = state.pool.clone();
+                let actual = state.default_model.clone();
+                let rm = model.clone();
+                let ns = namespace.clone();
+                let r = repo.clone();
+                let u = usage.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await
+                    {
+                        tracing::warn!("failed to record token usage: {e}");
+                    }
+                });
+            }
 
             let assistant_content: String = val["choices"][0]["message"]["content"]
                 .as_str()
@@ -980,6 +1036,7 @@ async fn handle_streaming_anthropic(
     repo: String,
     task: String,
     model: String,
+    namespace: String,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
@@ -1014,7 +1071,7 @@ async fn handle_streaming_anthropic(
     let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let acc_clone = accumulated.clone();
 
-    let mut sse_state = anthropic::SseTranslationState::new(model);
+    let mut sse_state = anthropic::SseTranslationState::new(model.clone());
 
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
@@ -1057,9 +1114,22 @@ async fn handle_streaming_anthropic(
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
-            state_bg
-                .metrics
-                .record_tokens(&extract_token_usage_from_sse(&raw));
+            let usage = extract_token_usage_from_sse(&raw);
+            state_bg.metrics.record_tokens(&usage);
+            if !usage.is_empty() {
+                if let Err(e) = db::record_token_usage(
+                    &state_bg.pool,
+                    &model,
+                    &state_bg.default_model,
+                    &namespace,
+                    &repo,
+                    &usage,
+                )
+                .await
+                {
+                    tracing::warn!("failed to record token usage: {e}");
+                }
+            }
             let assistant_content = extract_assistant_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
