@@ -534,6 +534,24 @@ fn anthropic_error(
 /// Ensure the request asks for at least `MIN_MAX_TOKENS` output tokens.
 /// Anthropic requires `max_tokens`; OpenAI treats it as optional. We floor
 /// whatever the client sent so reasoning models don't get starved mid-response.
+/// Normalise Responses API content types in message history before forwarding to LiteLLM.
+/// LiteLLM may return `"type": "output_text"` in assistant turns; if the client replays
+/// those turns in a subsequent request, some LiteLLM routing paths reject them. Convert
+/// to `"text"` defensively so the round-trip is always valid regardless of LiteLLM version.
+fn normalize_response_content_types(req: &mut Value) {
+    if let Some(messages) = req.get_mut("messages").and_then(|v| v.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            if let Some(content) = msg.get_mut("content").and_then(|v| v.as_array_mut()) {
+                for block in content.iter_mut() {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                        block["type"] = Value::String("text".to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn enforce_min_max_tokens(req: &mut Value) {
     let current = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     if current < MIN_MAX_TOKENS {
@@ -1089,6 +1107,7 @@ pub async fn messages(
     let mut req = payload;
     req["model"] = Value::String(state.default_model.clone());
     enforce_min_max_tokens(&mut req);
+    normalize_response_content_types(&mut req);
     pack_context_into_anthropic_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {

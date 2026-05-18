@@ -11,6 +11,15 @@ model_list:
 general_settings:
   master_key: sk-local-agentstack
 
+litellm_settings:
+  # Local OpenAI-compatible models don't support the Responses API (/v1/responses).
+  # This forces /v1/messages calls to route through chat/completions instead,
+  # preventing LiteLLM ≥1.84 from breaking multi-turn conversations.
+  use_chat_completions_url_for_anthropic_messages: true
+  # Claude Code sends Anthropic-specific params (reasoning_effort, context_management)
+  # that OpenAI-compatible local models don't support. Drop them silently.
+  drop_params: true
+
 router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
