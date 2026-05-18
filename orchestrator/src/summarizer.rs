@@ -177,7 +177,7 @@ async fn do_summarize(
     let request_body = serde_json::json!({
         "model": "qwen36-35b-heretic",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": crate::state::MIN_MAX_TOKENS,
+        "max_tokens": crate::state::SUMMARIZER_MAX_TOKENS,
         "temperature": 0.1,
     });
 
@@ -251,8 +251,7 @@ async fn do_summarize(
     };
 
     if let Err(e) = crate::qdrant::store_event(
-        &state.http,
-        &state.embedding_url,
+        &state.embedder,
         &state.qdrant_url,
         &summary_event,
     )

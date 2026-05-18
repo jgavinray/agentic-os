@@ -1,9 +1,11 @@
 mod anthropic;
 mod db;
+mod embedder;
 mod handlers;
 mod hybrid;
 mod logging;
 mod qdrant;
+mod sentiment;
 mod state;
 mod summarizer;
 
@@ -50,12 +52,30 @@ async fn main() -> Result<(), anyhow::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(state::DEFAULT_CONTEXT_DECAY_RATE);
-    let embedding_url =
-        env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://embedding:80".to_string());
+    let embed_model_path =
+        env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
+    let embedder = Arc::new(
+        embedder::Embedder::load(&embed_model_path)
+            .expect("failed to load embedding model — run setup-models.sh first"),
+    );
 
     let pool = db::create_pool(&db_url)?;
     db::init_schema(&pool).await?;
     qdrant::init(&qdrant_url).await?;
+
+    let sentiment_classifier = std::env::var("SENTIMENT_MODEL_PATH").ok().and_then(|path| {
+        let threshold = std::env::var("SENTIMENT_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.70_f32);
+        match sentiment::SentimentClassifier::load(&path, threshold) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                tracing::warn!("sentiment classifier unavailable, negative feedback detection disabled: {e}");
+                None
+            }
+        }
+    });
 
     // BUG-6: Explicit HTTP client timeouts. Two clients: one for normal requests
     // (full timeout budget), one for streaming (no overall timeout since completions
@@ -74,13 +94,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let state = Arc::new(AppState {
         pool,
+        sentiment: sentiment_classifier,
         qdrant_url: qdrant_url.clone(),
         litellm_url,
         litellm_key,
         api_keys,
         default_model,
         default_task,
-        embedding_url,
+        embedder,
         http,
         http_stream,
         cache: state::ContextCache::new(cache_ttl_ms),

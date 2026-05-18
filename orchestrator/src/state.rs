@@ -6,10 +6,11 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-/// Minimum max_tokens for any upstream LiteLLM completion request.
-/// vLLM backend exposes 262144 (256K) total context; 16K output leaves ~245K
-/// for input and provides enough output budget for a complete LLM response.
-pub const MIN_MAX_TOKENS: u64 = 16384;
+/// Minimum max_tokens for proxied completion requests.
+pub const MIN_MAX_TOKENS: u64 = 8192;
+
+/// max_tokens used by the internal summarizer — summaries are short.
+pub const SUMMARIZER_MAX_TOKENS: u64 = 2048;
 
 /// Default TTL for cached context packs: 5 minutes.
 pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
@@ -175,10 +176,10 @@ impl TaskContextConfig {
     pub fn for_category(cat: TaskCategory) -> Self {
         use TaskCategory::*;
         let (max_events, semantic_limit, char_budget) = match cat {
-            Narrow => (3i64, 3usize, 5000usize),
-            Moderate => (8i64, 5usize, 8000usize),
-            Broad => (15i64, 10usize, 12000usize),
-            Architecture => (20i64, 12usize, 16000usize),
+            Narrow => (3i64, 3usize, 3000usize),
+            Moderate => (8i64, 5usize, 5000usize),
+            Broad => (15i64, 10usize, 7000usize),
+            Architecture => (20i64, 12usize, 10000usize),
         };
         Self {
             max_events,
@@ -495,6 +496,8 @@ impl Default for AppMetrics {
 pub struct AppState {
     /// Postgres connection pool
     pub pool: Pool,
+    /// Optional CPU sentiment classifier for detecting negative user feedback.
+    pub sentiment: Option<Arc<crate::sentiment::SentimentClassifier>>,
     /// Qdrant base URL
     pub qdrant_url: String,
     /// LiteLLM base URL (must include /v1 suffix)
@@ -508,8 +511,8 @@ pub struct AppState {
     pub default_model: String,
     /// Default task when x-agent-task header is absent
     pub default_task: String,
-    /// TEI embedding service base URL (e.g. http://embedding:80)
-    pub embedding_url: String,
+    /// In-process ONNX embedding model (snowflake-arctic-embed-l-v2.0).
+    pub embedder: Arc<crate::embedder::Embedder>,
     /// Shared HTTP client for non-streaming upstream requests (has full timeouts)
     pub http: reqwest::Client,
     /// HTTP client for streaming upstream requests (no overall request timeout)

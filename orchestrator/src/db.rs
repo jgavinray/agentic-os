@@ -658,8 +658,7 @@ pub async fn start_session_from_request(
 /// unavailable the event is still stored and `qdrant_indexed` is false.
 pub async fn append_event_from_request(
     pool: &Pool,
-    http: &reqwest::Client,
-    embedding_url: &str,
+    embedder: &crate::embedder::Embedder,
     qdrant_url: &str,
     req: &crate::state::AppendEventRequest,
 ) -> Result<(String, bool), anyhow::Error> {
@@ -685,7 +684,7 @@ pub async fn append_event_from_request(
     };
 
     insert_event(pool, &event).await?;
-    let qdrant_indexed = match crate::qdrant::store_event(http, embedding_url, qdrant_url, &event)
+    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event)
         .await
     {
         Ok(_) => true,
@@ -1018,8 +1017,10 @@ fn append_open_questions(
     recent: &[AgentEvent],
     seen: &mut std::collections::HashSet<String>,
 ) {
+    const BUDGET: usize = 500;
     let mut body = String::new();
-    for event in recent {
+    let mut used = 0usize;
+    'outer: for event in recent {
         if event.event_type != "checkpoint" {
             continue;
         }
@@ -1030,8 +1031,13 @@ fn append_open_questions(
         {
             for q in arr {
                 if let Some(text) = q.as_str() {
+                    let line = format!("- {text}\n");
+                    if used + line.len() > BUDGET {
+                        break 'outer;
+                    }
                     if seen.insert(text.to_string()) {
-                        body.push_str(&format!("- {text}\n"));
+                        body.push_str(&line);
+                        used += line.len();
                     }
                 }
             }

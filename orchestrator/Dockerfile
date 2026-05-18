@@ -1,15 +1,26 @@
-FROM cgr.dev/chainguard/rust:latest-dev AS builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release && \
+    mkdir -p /app/libs && \
+    find /app/target/release -maxdepth 1 -name 'libonnxruntime*' -exec cp {} /app/libs/ \;
 
-# Use same image as builder since binary is dynamically linked against glibc
-FROM cgr.dev/chainguard/rust:latest-dev
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -s /bin/false orchestrator
 
 WORKDIR /app
 COPY --from=builder /app/target/release/orchestrator /usr/local/bin/orchestrator
+COPY --from=builder /app/libs/ /usr/local/lib/
 
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+USER orchestrator
 EXPOSE 8088
 ENTRYPOINT ["/usr/local/bin/orchestrator"]

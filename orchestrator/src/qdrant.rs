@@ -3,40 +3,6 @@ use serde_json::Value;
 const VECTOR_SIZE: usize = 1024;
 const EVENT_COLLECTION: &str = "agent_events";
 
-// Calls TEI /embed directly — bypasses LiteLLM to avoid format translation issues.
-// TEI native response is [[f32, ...]] (one inner array per input).
-async fn embed_text(
-    http: &reqwest::Client,
-    embedding_url: &str,
-    text: &str,
-) -> Result<Vec<f32>, anyhow::Error> {
-    let url = format!("{}/embed", embedding_url);
-    let body = serde_json::json!({"inputs": text});
-
-    let resp: Value = http.post(&url).json(&body).send().await?.json().await?;
-
-    let vector: Vec<f32> = resp
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow::anyhow!("unexpected TEI /embed response — expected [[f32, ...]]"))?
-        .iter()
-        .filter_map(|v| v.as_f64().map(|f| f as f32))
-        .collect();
-
-    anyhow::ensure!(
-        !vector.is_empty(),
-        "empty embedding vector returned from TEI"
-    );
-    anyhow::ensure!(
-        vector.len() == VECTOR_SIZE,
-        "TEI returned {} dims but Qdrant collection expects {VECTOR_SIZE}",
-        vector.len()
-    );
-
-    Ok(vector)
-}
-
 pub async fn init(qdrant_url: &str) -> Result<(), anyhow::Error> {
     let url = format!("{qdrant_url}/collections/{EVENT_COLLECTION}");
     let body = serde_json::json!({
@@ -53,12 +19,12 @@ pub async fn init(qdrant_url: &str) -> Result<(), anyhow::Error> {
 }
 
 pub async fn store_event(
-    http: &reqwest::Client,
-    embedding_url: &str,
+    embedder: &crate::embedder::Embedder,
     qdrant_url: &str,
     event: &crate::db::AgentEvent,
 ) -> Result<(), anyhow::Error> {
-    let vector = embed_text(http, embedding_url, &event.vector_text()).await?;
+    let vector = embedder.embed(&event.vector_text()).await?;
+    let http = reqwest::Client::new();
     let url = format!("{qdrant_url}/collections/{EVENT_COLLECTION}/points?wait=true");
 
     let body = serde_json::json!({
@@ -75,13 +41,13 @@ pub async fn store_event(
 }
 
 pub async fn search(
-    http: &reqwest::Client,
-    embedding_url: &str,
+    embedder: &crate::embedder::Embedder,
     qdrant_url: &str,
     query: &str,
     limit: usize,
 ) -> Result<Vec<Value>, anyhow::Error> {
-    let vector = embed_text(http, embedding_url, query).await?;
+    let vector = embedder.embed(query).await?;
+    let http = reqwest::Client::new();
     let url = format!("{qdrant_url}/collections/{EVENT_COLLECTION}/points/search");
 
     let body = serde_json::json!({

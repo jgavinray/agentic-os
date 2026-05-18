@@ -4,7 +4,8 @@ model_list:
       model: openai/qwen36-35b-heretic
       api_base: http://192.168.0.33:8000/v1
       api_key: local-key
-      timeout: 120
+      timeout: 300
+      stream_timeout: 300
 
 
 general_settings:
@@ -13,4 +14,4 @@ general_settings:
 router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
-  timeout: 120
+  timeout: 300

@@ -212,8 +212,7 @@ pub async fn append_event(
 
     let (event_id, qdrant_indexed) = match db::append_event_from_request(
         &state.pool,
-        &state.http,
-        &state.embedding_url,
+        &state.embedder,
         &state.qdrant_url,
         &req,
     )
@@ -274,8 +273,7 @@ async fn semantic_search(
     limit: usize,
 ) -> Vec<crate::state::SearchHit> {
     qdrant::search(
-        &state.http,
-        &state.embedding_url,
+        &state.embedder,
         &state.qdrant_url,
         query,
         limit,
@@ -486,8 +484,7 @@ pub async fn checkpoint(
 
     let (event_id, qdrant_indexed) = match db::append_event_from_request(
         &state.pool,
-        &state.http,
-        &state.embedding_url,
+        &state.embedder,
         &state.qdrant_url,
         &event,
     )
@@ -557,6 +554,119 @@ fn inject_system_context(payload: &mut Value, context: &str) {
     }
 }
 
+/// Inject context into an Anthropic-format request's system field.
+fn inject_system_context_anthropic(payload: &mut Value, context: &str) {
+    let existing = match payload.get("system") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|b| {
+                if b["type"].as_str() == Some("text") {
+                    b["text"].as_str()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    };
+    let combined = if existing.is_empty() {
+        context.to_string()
+    } else {
+        format!("{existing}\n\n---\n{context}")
+    };
+    payload["system"] = Value::String(combined);
+}
+
+/// Pack orchestrator context into an Anthropic-format request's system field.
+async fn pack_context_into_anthropic_req(
+    state: &AppState,
+    req: &mut Value,
+    repo: &str,
+    task: &str,
+) {
+    let task_category = crate::state::TaskCategory::from_task(task);
+    let task_config = crate::state::TaskContextConfig::for_category(task_category);
+    match get_or_build_cached_context(state, repo, task, None, &task_config).await {
+        Ok(cached) => inject_system_context_anthropic(req, &cached.context),
+        Err(e) => {
+            tracing::warn!(repo, task, "failed to build cached context: {e}");
+            let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
+            inject_system_context_anthropic(req, &context);
+        }
+    }
+}
+
+/// Extract assistant text from an Anthropic-format response for persistence.
+fn extract_assistant_from_anthropic_response(resp: &Value) -> String {
+    resp.get("content")
+        .and_then(|v| v.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| {
+                    if b["type"].as_str() == Some("text") {
+                        b["text"].as_str()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(500)
+        .collect()
+}
+
+/// Extract token usage from an Anthropic-format SSE stream.
+fn extract_token_usage_from_anthropic_sse(raw: &str) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        match v["type"].as_str() {
+            Some("message_start") => {
+                let u = &v["message"]["usage"];
+                usage.processed_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                usage.cached_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            }
+            Some("message_delta") => {
+                let u = &v["usage"];
+                usage.generated_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+    usage
+}
+
+/// Extract assistant text content from an Anthropic-format SSE stream for persistence.
+fn extract_assistant_from_anthropic_sse(raw: &str) -> String {
+    let mut content = String::new();
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if v["type"].as_str() == Some("content_block_delta")
+            && v["delta"]["type"].as_str() == Some("text_delta")
+        {
+            if let Some(text) = v["delta"]["text"].as_str() {
+                content.push_str(text);
+            }
+        }
+    }
+    content.chars().take(500).collect()
+}
+
 fn extract_assistant_from_sse(raw: &str) -> String {
     let mut content = String::new();
     for line in raw.lines() {
@@ -614,6 +724,28 @@ async fn persist_exchange(
         error_description: None,
     };
 
+    if let Some(classifier) = &state.sentiment {
+        if classifier.is_negative(user_content) {
+            tracing::info!(
+                target: "sentiment",
+                session_id,
+                repo,
+                "negative feedback detected — storing failed_attempt event"
+            );
+            let req = make_req("failed_attempt", "user", user_content);
+            if let Err(e) = db::append_event_from_request(
+                &state.pool,
+                &state.embedder,
+                &state.qdrant_url,
+                &req,
+            )
+            .await
+            {
+                tracing::warn!(target: "sentiment", "failed to store failed_attempt event: {e}");
+            }
+        }
+    }
+
     for (event_type, actor, content) in [
         ("user_message", "user", user_content),
         ("assistant_message", "assistant", assistant_content),
@@ -622,8 +754,7 @@ async fn persist_exchange(
         for attempt in 0u32..3 {
             match db::append_event_from_request(
                 &state.pool,
-                &state.http,
-                &state.embedding_url,
+                &state.embedder,
                 &state.qdrant_url,
                 &req,
             )
@@ -947,104 +1078,104 @@ pub async fn messages(
 
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
 
-    // Extract user content from the original Anthropic request for persistence.
     let user_content = anthropic::extract_user_content_from_anthropic(&payload);
-
-    // Remember model from original request for response translation.
     let model = payload
         .get("model")
         .and_then(|v| v.as_str())
         .unwrap_or(&state.default_model)
         .to_string();
 
-    // Translate Anthropic → OpenAI.
-    let mut openai_req = match anthropic::anthropic_to_openai(payload) {
-        Ok(r) => r,
-        Err(e) => {
-            return anthropic_error(
-                StatusCode::from_u16(e.http_status).unwrap_or(StatusCode::BAD_REQUEST),
-                e.error_type,
-                e.message,
-            );
-        }
-    };
-
-    // Always route to the configured backend model regardless of what the client sent.
-    openai_req["model"] = Value::String(state.default_model.clone());
-    enforce_min_max_tokens(&mut openai_req);
-
-    // Inject orchestrator memory context.
-    pack_context_into_req(&state, &mut openai_req, &repo, &task).await;
+    // Stay in Anthropic format — no translation.
+    let mut req = payload;
+    req["model"] = Value::String(state.default_model.clone());
+    enforce_min_max_tokens(&mut req);
+    pack_context_into_anthropic_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
         return handle_streaming_anthropic(
-            &state, openai_req, user_content, repo, task, model, namespace,
+            &state, req, user_content, repo, task, model, namespace,
         )
         .await;
     }
 
-    // ── Non-streaming ───────────────────────────────────────────
-    match dispatch_non_streaming_raw(&state, &openai_req).await {
-        Ok(val) => {
-            let usage = TokenUsage::from_openai_value(&val);
-            state.metrics.record_tokens(&usage);
-            if !usage.is_empty() {
-                let pool = state.pool.clone();
-                let actual = state.default_model.clone();
-                let rm = model.clone();
-                let ns = namespace.clone();
-                let r = repo.clone();
-                let u = usage.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await
-                    {
-                        tracing::warn!("failed to record token usage: {e}");
-                    }
-                });
-            }
-
-            let assistant_content: String = val["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .chars()
-                .take(500)
-                .collect();
-
-            match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-                Ok(sid) => {
-                    persist_exchange(&state, &sid, &repo, &user_content, &assistant_content).await
-                }
-                Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
-            }
-
-            let anthropic_resp = anthropic::openai_to_anthropic_response(val, &model);
-            axum::Json(anthropic_resp).into_response()
+    // ── Non-streaming: passthrough to LiteLLM /messages ────────
+    let url = format!("{}/messages", state.litellm_url);
+    let upstream_resp = match state
+        .http
+        .post(&url)
+        .bearer_auth(&state.litellm_key)
+        .json(&req)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return anthropic_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "upstream LiteLLM request failed",
+            )
         }
-        Err(_) => anthropic_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            "upstream LiteLLM request failed",
-        ),
+    };
+
+    let status = upstream_resp.status();
+    let val: Value = match upstream_resp.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return anthropic_error(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "invalid upstream response",
+            )
+        }
+    };
+
+    if !status.is_success() {
+        return (status, axum::Json(val)).into_response();
     }
+
+    let usage = TokenUsage::from_openai_value(&val);
+    state.metrics.record_tokens(&usage);
+    if !usage.is_empty() {
+        let pool = state.pool.clone();
+        let actual = state.default_model.clone();
+        let rm = model.clone();
+        let ns = namespace.clone();
+        let r = repo.clone();
+        let u = usage.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await {
+                tracing::warn!("failed to record token usage: {e}");
+            }
+        });
+    }
+
+    let assistant_content = extract_assistant_from_anthropic_response(&val);
+    match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+        Ok(sid) => persist_exchange(&state, &sid, &repo, &user_content, &assistant_content).await,
+        Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
+    }
+
+    axum::Json(val).into_response()
 }
 
+/// Proxy an Anthropic streaming request to LiteLLM /messages, passing bytes through unchanged.
 async fn handle_streaming_anthropic(
     state: &AppState,
-    openai_req: Value,
+    req: Value,
     user_content: String,
     repo: String,
     task: String,
     model: String,
     namespace: String,
 ) -> Response {
-    let url = format!("{}/chat/completions", state.litellm_url);
+    let url = format!("{}/messages", state.litellm_url);
 
     let upstream = match state
         .http_stream
         .post(&url)
         .bearer_auth(&state.litellm_key)
-        .json(&openai_req)
+        .json(&req)
         .send()
         .await
     {
@@ -1071,37 +1202,19 @@ async fn handle_streaming_anthropic(
     let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let acc_clone = accumulated.clone();
 
-    let mut sse_state = anthropic::SseTranslationState::new(model.clone());
-
+    // Proxy bytes verbatim — LiteLLM already returns Anthropic SSE format.
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
         let mut tx_opt = Some(done_tx);
-        // Buffer for incomplete lines across byte chunks.
-        let mut carry = String::new();
-
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(b) => {
                     if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
-                    carry.push_str(&String::from_utf8_lossy(&b));
-                    // Process all complete lines.
-                    while let Some(pos) = carry.find('\n') {
-                        let line = carry[..pos].trim_end_matches('\r').to_string();
-                        carry = carry[pos + 1..].to_string();
-                        for event_bytes in anthropic::translate_openai_sse_chunk(&line, &mut sse_state) {
-                            yield Ok::<Bytes, std::io::Error>(event_bytes);
-                        }
-                    }
+                    yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
                     yield Err(std::io::Error::other(e));
                 }
-            }
-        }
-        // Flush any remaining carry buffer.
-        if !carry.trim().is_empty() {
-            for event_bytes in anthropic::translate_openai_sse_chunk(carry.trim(), &mut sse_state) {
-                yield Ok::<Bytes, std::io::Error>(event_bytes);
             }
         }
         if let Some(tx) = tx_opt.take() {
@@ -1114,7 +1227,7 @@ async fn handle_streaming_anthropic(
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
-            let usage = extract_token_usage_from_sse(&raw);
+            let usage = extract_token_usage_from_anthropic_sse(&raw);
             state_bg.metrics.record_tokens(&usage);
             if !usage.is_empty() {
                 if let Err(e) = db::record_token_usage(
@@ -1130,7 +1243,7 @@ async fn handle_streaming_anthropic(
                     tracing::warn!("failed to record token usage: {e}");
                 }
             }
-            let assistant_content = extract_assistant_from_sse(&raw);
+            let assistant_content = extract_assistant_from_anthropic_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
                     persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content)
@@ -1598,6 +1711,142 @@ mod tests {
         );
     }
 
+    // ── inject_system_context_anthropic ───────────────────────────────
+
+    #[test]
+    fn anthropic_inject_sets_system_when_absent() {
+        let mut payload = json!({"messages": [{"role": "user", "content": "hi"}]});
+        inject_system_context_anthropic(&mut payload, "ctx");
+        assert_eq!(payload["system"], "ctx");
+    }
+
+    #[test]
+    fn anthropic_inject_appends_to_string_system() {
+        let mut payload = json!({"system": "base", "messages": []});
+        inject_system_context_anthropic(&mut payload, "ctx");
+        let sys = payload["system"].as_str().unwrap();
+        assert!(sys.contains("base"));
+        assert!(sys.contains("ctx"));
+    }
+
+    #[test]
+    fn anthropic_inject_flattens_array_system_and_appends() {
+        let mut payload = json!({
+            "system": [{"type": "text", "text": "part1"}, {"type": "text", "text": "part2"}],
+            "messages": []
+        });
+        inject_system_context_anthropic(&mut payload, "ctx");
+        let sys = payload["system"].as_str().unwrap();
+        assert!(sys.contains("part1"));
+        assert!(sys.contains("part2"));
+        assert!(sys.contains("ctx"));
+        // Result must be a plain string, not an array.
+        assert!(payload["system"].is_string());
+    }
+
+    #[test]
+    fn anthropic_inject_ignores_non_text_system_type() {
+        let mut payload = json!({"system": 42, "messages": []});
+        inject_system_context_anthropic(&mut payload, "ctx");
+        // Non-string/array system treated as absent — context becomes the full value.
+        assert_eq!(payload["system"], "ctx");
+    }
+
+    // ── extract_assistant_from_anthropic_response ─────────────────────
+
+    #[test]
+    fn anthropic_response_extracts_text_block() {
+        let resp = json!({"content": [{"type": "text", "text": "hello"}]});
+        assert_eq!(extract_assistant_from_anthropic_response(&resp), "hello");
+    }
+
+    #[test]
+    fn anthropic_response_skips_tool_use_blocks() {
+        let resp = json!({"content": [
+            {"type": "tool_use", "id": "c1", "name": "bash", "input": {}},
+            {"type": "text", "text": "done"}
+        ]});
+        assert_eq!(extract_assistant_from_anthropic_response(&resp), "done");
+    }
+
+    #[test]
+    fn anthropic_response_concatenates_multiple_text_blocks() {
+        let resp = json!({"content": [
+            {"type": "text", "text": "foo"},
+            {"type": "text", "text": "bar"}
+        ]});
+        assert_eq!(extract_assistant_from_anthropic_response(&resp), "foobar");
+    }
+
+    #[test]
+    fn anthropic_response_returns_empty_when_no_content() {
+        assert_eq!(extract_assistant_from_anthropic_response(&json!({})), "");
+    }
+
+    #[test]
+    fn anthropic_response_truncates_at_500_chars() {
+        let long = "x".repeat(600);
+        let resp = json!({"content": [{"type": "text", "text": long}]});
+        assert_eq!(extract_assistant_from_anthropic_response(&resp).len(), 500);
+    }
+
+    // ── extract_token_usage_from_anthropic_sse ────────────────────────
+
+    #[test]
+    fn anthropic_sse_usage_reads_message_start_and_delta() {
+        let raw = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":40}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\n",
+        );
+        let usage = extract_token_usage_from_anthropic_sse(raw);
+        assert_eq!(usage.processed_tokens, 100);
+        assert_eq!(usage.cached_tokens, 40);
+        assert_eq!(usage.generated_tokens, 25);
+    }
+
+    #[test]
+    fn anthropic_sse_usage_is_zero_for_empty_stream() {
+        let usage = extract_token_usage_from_anthropic_sse("");
+        assert_eq!(usage.processed_tokens, 0);
+        assert_eq!(usage.generated_tokens, 0);
+    }
+
+    // ── extract_assistant_from_anthropic_sse ──────────────────────────
+
+    #[test]
+    fn anthropic_sse_collects_text_deltas() {
+        let raw = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+        );
+        assert_eq!(extract_assistant_from_anthropic_sse(raw), "hello");
+    }
+
+    #[test]
+    fn anthropic_sse_skips_non_text_deltas() {
+        let raw = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+        );
+        assert_eq!(extract_assistant_from_anthropic_sse(raw), "");
+    }
+
+    #[test]
+    fn anthropic_sse_truncates_at_500_chars() {
+        let chunk_text = "x".repeat(300);
+        let make_line = |t: &str| {
+            format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{t}\"}}}}\n\n"
+            )
+        };
+        let raw = make_line(&chunk_text) + &make_line(&chunk_text);
+        assert_eq!(extract_assistant_from_anthropic_sse(&raw).len(), 500);
+    }
+
     fn test_event(event_type: &str, summary: &str, summary_level: i32) -> db::AgentEvent {
         db::AgentEvent {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1633,8 +1882,7 @@ pub async fn search(
     let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let results = match qdrant::search(
-        &state.http,
-        &state.embedding_url,
+        &state.embedder,
         &state.qdrant_url,
         query,
         limit,
