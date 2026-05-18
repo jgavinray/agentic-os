@@ -3,6 +3,7 @@ use crate::state::SearchHit;
 /// Reciprocal Rank Fusion with k=60 (industry default).
 /// Input slices are ordered best-first (index 0 = rank 1).
 /// Returns deduplicated SearchHits ordered by combined RRF score, highest first.
+#[cfg(test)]
 pub fn rrf_merge(
     semantic_hits: &[SearchHit],
     fts_hits: &[SearchHit],

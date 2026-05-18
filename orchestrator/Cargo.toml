@@ -3,6 +3,15 @@ name = "orchestrator"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+tracing-otlp = [
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+]
+
 [dependencies]
 axum = { version = "0.7.9", features = ["tower-log"] }
 axum-extra = { version = "0.9.3", features = ["typed-header"] }
@@ -10,6 +19,7 @@ tokio = { version = "1.42.0", features = ["full"] }
 tokio-postgres = { version = "0.7.12", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
 deadpool-postgres = { version = "0.13", features = ["serde"] }
 postgres = "0.19"
+refinery = { version = "0.9.1", features = ["tokio-postgres"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"
 reqwest = { version = "0.12.11", features = ["json", "rustls-tls", "stream"], default-features = false }
@@ -22,8 +32,14 @@ tower-http = { version = "0.6.2", features = ["cors", "trace"] }
 async-stream = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
 futures = "0.3"
 subtle = "2.6"
 bytes = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18.3"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
 tokenizers = "0.19"

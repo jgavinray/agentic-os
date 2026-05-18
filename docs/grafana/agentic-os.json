@@ -1,0 +1,16 @@
+{
+  "title": "agentic-os",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {"type":"timeseries","title":"Request Rate","gridPos":{"x":0,"y":0,"w":8,"h":6},"targets":[{"expr":"sum by (endpoint) (rate(http_requests_total[5m]))"}]},
+    {"type":"timeseries","title":"Latency p50/p95/p99","gridPos":{"x":8,"y":0,"w":8,"h":6},"targets":[{"expr":"histogram_quantile(0.50, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m])))","legendFormat":"p50 {{endpoint}}"},{"expr":"histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m])))","legendFormat":"p95 {{endpoint}}"},{"expr":"histogram_quantile(0.99, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m])))","legendFormat":"p99 {{endpoint}}"}]},
+    {"type":"timeseries","title":"Error Rate","gridPos":{"x":16,"y":0,"w":8,"h":6},"targets":[{"expr":"sum by (endpoint, status) (rate(http_requests_total{status=~\"5..|429\"}[5m]))"}]},
+    {"type":"timeseries","title":"LiteLLM Latency","gridPos":{"x":0,"y":6,"w":8,"h":6},"targets":[{"expr":"histogram_quantile(0.95, sum by (le, path) (rate(upstream_litellm_duration_seconds_bucket[5m])))"}]},
+    {"type":"timeseries","title":"DB Pool Saturation","gridPos":{"x":8,"y":6,"w":8,"h":6},"targets":[{"expr":"1 - (db_pool_available / db_pool_size)","legendFormat":"used ratio"},{"expr":"db_pool_waiters","legendFormat":"waiters"}]},
+    {"type":"timeseries","title":"Context Cache Hit Rate","gridPos":{"x":16,"y":6,"w":8,"h":6},"targets":[{"expr":"rate(context_pack_cache_hits_total[5m]) / clamp_min(rate(context_pack_requests_total[5m]), 1)"}]},
+    {"type":"timeseries","title":"Token Throughput","gridPos":{"x":0,"y":12,"w":12,"h":6},"targets":[{"expr":"sum by (kind, model) (rate(inference_tokens_total[5m]))"}]},
+    {"type":"timeseries","title":"Summarizer Activity","gridPos":{"x":12,"y":12,"w":12,"h":6},"targets":[{"expr":"sum by (target_level) (rate(summarizer_candidates_found_total[5m]))","legendFormat":"candidates L{{target_level}}"},{"expr":"sum by (target_level, result) (rate(summarizer_summaries_written_total[5m]))","legendFormat":"writes L{{target_level}} {{result}}"}]}
+  ]
+}

@@ -3,6 +3,8 @@ use deadpool_postgres::{Config, Pool, PoolConfig};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+const SINGLE_WRITER_LOCK_KEY: i64 = 0x4167_656e_7469_634f;
+
 // ── Reusable event type ──────────────────────────────────────
 
 pub struct AgentEvent {
@@ -111,96 +113,52 @@ pub fn create_pool(database_url: &str) -> Result<Pool, anyhow::Error> {
     Ok(pool)
 }
 
-pub async fn init_schema(pool: &Pool) -> Result<(), anyhow::Error> {
+pub struct SingleWriterGuard {
+    conn: deadpool_postgres::Object,
+}
+
+pub async fn acquire_single_writer_lock(pool: &Pool) -> Result<SingleWriterGuard, anyhow::Error> {
     let conn = pool.get().await?;
-    conn.batch_execute(
-        r#"
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS agent_sessions (
-    id TEXT PRIMARY KEY,
-    repo TEXT NOT NULL,
-    task TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS agent_events (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    evidence TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT fk_session
-        FOREIGN KEY (session_id)
-        REFERENCES agent_sessions(id)
-        ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS error_index (
-    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    repo TEXT NOT NULL,
-    task TEXT NOT NULL,
-    error_type TEXT NOT NULL,
-    description TEXT NOT NULL,
-    severity TEXT NOT NULL DEFAULT 'medium',
-    frequency BIGINT NOT NULL DEFAULT 1,
-    last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_error_index UNIQUE (repo, task, error_type, description)
-);
-
-CREATE INDEX IF NOT EXISTS idx_agent_events_repo_created
-    ON agent_events(repo, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_agent_events_session
-    ON agent_events(session_id);
-
-CREATE INDEX IF NOT EXISTS idx_error_index_repo
-    ON error_index(repo);
-CREATE INDEX IF NOT EXISTS idx_error_index_type
-    ON error_index(error_type);
-CREATE INDEX IF NOT EXISTS idx_error_index_freq
-    ON error_index(frequency DESC);
-
-CREATE INDEX IF NOT EXISTS idx_agent_events_fts
-    ON agent_events USING gin(
-        to_tsvector('english',
-            coalesce(summary, '') || ' ' || coalesce(evidence, ''))
+    let acquired: bool = conn
+        .query_one(
+            "SELECT pg_try_advisory_lock($1)",
+            &[&SINGLE_WRITER_LOCK_KEY],
+        )
+        .await?
+        .get(0);
+    if !acquired {
+        anyhow::bail!(
+            "another orchestrator process already owns this Postgres database; \
+             single-writer advisory lock {SINGLE_WRITER_LOCK_KEY} is held"
+        );
+    }
+    tracing::info!(
+        target: "db",
+        lock_key = SINGLE_WRITER_LOCK_KEY,
+        "acquired single-writer advisory lock"
     );
+    Ok(SingleWriterGuard { conn })
+}
 
-ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS summarized BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS summary_level INT NOT NULL DEFAULT 0;
-
-CREATE INDEX IF NOT EXISTS idx_agent_events_type
-    ON agent_events(event_type, repo);
-CREATE INDEX IF NOT EXISTS idx_agent_events_summary_level
-    ON agent_events(repo, summary_level, summarized, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS token_usage (
-    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-    requested_model TEXT NOT NULL,
-    actual_model TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    processed_tokens BIGINT NOT NULL DEFAULT 0,
-    cached_tokens BIGINT NOT NULL DEFAULT 0,
-    generated_tokens BIGINT NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_token_usage_model
-    ON token_usage(requested_model, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_token_usage_namespace
-    ON token_usage(namespace, created_at DESC);
-        "#,
-    )
-    .await?;
-
-    Ok(())
+impl SingleWriterGuard {
+    pub async fn release(self) {
+        match self
+            .conn
+            .execute("SELECT pg_advisory_unlock($1)", &[&SINGLE_WRITER_LOCK_KEY])
+            .await
+        {
+            Ok(_) => tracing::info!(
+                target: "db",
+                lock_key = SINGLE_WRITER_LOCK_KEY,
+                "released single-writer advisory lock"
+            ),
+            Err(e) => tracing::warn!(
+                target: "db",
+                lock_key = SINGLE_WRITER_LOCK_KEY,
+                "failed to release single-writer advisory lock: {e}"
+            ),
+        }
+    }
 }
 
 pub async fn record_token_usage(
@@ -211,23 +169,29 @@ pub async fn record_token_usage(
     repo: &str,
     usage: &crate::state::TokenUsage,
 ) -> Result<(), anyhow::Error> {
-    let conn = pool.get().await?;
-    conn.execute(
-        "INSERT INTO token_usage \
-         (requested_model, actual_model, namespace, repo, processed_tokens, cached_tokens, generated_tokens) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        &[
-            &requested_model,
-            &actual_model,
-            &namespace,
-            &repo,
-            &(usage.processed_tokens as i64),
-            &(usage.cached_tokens as i64),
-            &(usage.generated_tokens as i64),
-        ],
-    )
-    .await?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result: Result<(), anyhow::Error> = async {
+        let conn = pool.get().await?;
+        conn.execute(
+            "INSERT INTO token_usage \
+             (requested_model, actual_model, namespace, repo, processed_tokens, cached_tokens, generated_tokens) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &requested_model,
+                &actual_model,
+                &namespace,
+                &repo,
+                &(usage.processed_tokens as i64),
+                &(usage.cached_tokens as i64),
+                &(usage.generated_tokens as i64),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query("record_token_usage", started.elapsed(), result.is_ok());
+    result
 }
 
 // ── DB query functions ────────────────────────────────────────
@@ -239,13 +203,19 @@ pub async fn create_session(
     task: &str,
     actor: &str,
 ) -> Result<(), anyhow::Error> {
-    let conn = pool.get().await?;
-    conn.execute(
-        "INSERT INTO agent_sessions (id, repo, task, actor) VALUES ($1, $2, $3, $4)",
-        &[&session_id, &repo, &task, &actor],
-    )
-    .await?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result: Result<(), anyhow::Error> = async {
+        let conn = pool.get().await?;
+        conn.execute(
+            "INSERT INTO agent_sessions (id, repo, task, actor) VALUES ($1, $2, $3, $4)",
+            &[&session_id, &repo, &task, &actor],
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query("create_session", started.elapsed(), result.is_ok());
+    result
 }
 
 /// BUG-2: Find an existing session for (repo, task) from the last 4 hours, or create one.
@@ -256,50 +226,62 @@ pub async fn find_or_create_session(
     task: &str,
     actor: &str,
 ) -> Result<String, anyhow::Error> {
-    let conn = pool.get().await?;
-    let row = conn
-        .query_opt(
-            "SELECT id FROM agent_sessions
-             WHERE repo = $1 AND task = $2
-               AND created_at > now() - interval '4 hours'
-             ORDER BY created_at DESC LIMIT 1",
-            &[&repo, &task],
+    let started = std::time::Instant::now();
+    let result: Result<String, anyhow::Error> = async {
+        let conn = pool.get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id FROM agent_sessions
+                 WHERE repo = $1 AND task = $2
+                   AND created_at > now() - interval '4 hours'
+                 ORDER BY created_at DESC LIMIT 1",
+                &[&repo, &task],
+            )
+            .await?;
+
+        if let Some(r) = row {
+            return Ok(r.get("id"));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO agent_sessions (id, repo, task, actor) VALUES ($1, $2, $3, $4)",
+            &[&id, &repo, &task, &actor],
         )
         .await?;
-
-    if let Some(r) = row {
-        return Ok(r.get("id"));
+        Ok(id)
     }
-
-    let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO agent_sessions (id, repo, task, actor) VALUES ($1, $2, $3, $4)",
-        &[&id, &repo, &task, &actor],
-    )
-    .await?;
-    Ok(id)
+    .await;
+    crate::telemetry::record_db_query("find_or_create_session", started.elapsed(), result.is_ok());
+    result
 }
 
 pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow::Error> {
-    let conn = pool.get().await?;
-    conn.execute(
-        "INSERT INTO agent_events
-         (id, session_id, repo, actor, event_type, summary, evidence, metadata, summary_level)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        &[
-            &event.id,
-            &event.session_id,
-            &event.repo,
-            &event.actor,
-            &event.event_type,
-            &event.summary,
-            &event.evidence,
-            &event.metadata,
-            &event.summary_level,
-        ],
-    )
-    .await?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        conn.execute(
+            "INSERT INTO agent_events
+             (id, session_id, repo, actor, event_type, summary, evidence, metadata, summary_level)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &event.id,
+                &event.session_id,
+                &event.repo,
+                &event.actor,
+                &event.event_type,
+                &event.summary,
+                &event.evidence,
+                &event.metadata,
+                &event.summary_level,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query("insert_event", started.elapsed(), result.is_ok());
+    result
 }
 
 #[allow(dead_code)]
@@ -342,14 +324,20 @@ pub async fn get_events_for_repo(
 }
 
 pub async fn count_events_for_repo(pool: &Pool, repo: &str) -> Result<i64, anyhow::Error> {
-    let conn = pool.get().await?;
-    let row = conn
-        .query_one(
-            "SELECT count(*)::BIGINT AS count FROM agent_events WHERE repo = $1",
-            &[&repo],
-        )
-        .await?;
-    Ok(row.get("count"))
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT AS count FROM agent_events WHERE repo = $1",
+                &[&repo],
+            )
+            .await?;
+        Ok(row.get("count"))
+    }
+    .await;
+    crate::telemetry::record_db_query("count_events_for_repo", started.elapsed(), result.is_ok());
+    result
 }
 
 pub fn preferred_summary_levels(event_count: i64) -> Vec<i32> {
@@ -389,6 +377,7 @@ pub async fn get_context_evidence_for_policy(
     repo: &str,
     policy: &crate::state::ContextPolicy,
 ) -> Result<ContextEvidence, anyhow::Error> {
+    let started = std::time::Instant::now();
     let (l0_recent, l1_matching, l2_repo, l3_project, failures) = tokio::join!(
         get_events_for_repo_by_level(
             pool,
@@ -402,13 +391,15 @@ pub async fn get_context_evidence_for_policy(
         get_failure_events_for_repo(pool, repo, policy.failure_limit),
     );
 
-    Ok(ContextEvidence {
+    let result: Result<ContextEvidence, anyhow::Error> = Ok(ContextEvidence {
         l0_recent: l0_recent?,
         l1_matching: l1_matching?,
         l2_repo: l2_repo?,
         l3_project: l3_project?,
         failures: failures?,
-    })
+    });
+    crate::telemetry::record_db_query("get_context_evidence", started.elapsed(), result.is_ok());
+    result
 }
 
 async fn get_events_for_repo_by_level(
@@ -513,34 +504,40 @@ pub async fn search_events_fts(
     query: &str,
     limit: i64,
 ) -> Result<Vec<crate::state::SearchHit>, anyhow::Error> {
-    let conn = pool.get().await?;
-    let rows = conn
-        .query(
-            "WITH docs AS (
-                 SELECT id, event_type, summary, created_at,
-                        to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(evidence, '')) AS tsv
-                 FROM agent_events
-                 WHERE repo = $1
-                   AND summarized = false
-             )
-             SELECT id, event_type, summary, created_at
-             FROM docs
-             WHERE tsv @@ plainto_tsquery('english', $2)
-             ORDER BY ts_rank(tsv, plainto_tsquery('english', $2)) DESC
-             LIMIT $3",
-            &[&repo, &query, &limit],
-        )
-        .await?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "WITH docs AS (
+                     SELECT id, event_type, summary, created_at,
+                            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(evidence, '')) AS tsv
+                     FROM agent_events
+                     WHERE repo = $1
+                       AND summarized = false
+                 )
+                 SELECT id, event_type, summary, created_at
+                 FROM docs
+                 WHERE tsv @@ plainto_tsquery('english', $2)
+                 ORDER BY ts_rank(tsv, plainto_tsquery('english', $2)) DESC
+                 LIMIT $3",
+                &[&repo, &query, &limit],
+            )
+            .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| crate::state::SearchHit {
-            event_id: row.get("id"),
-            event_type: row.get("event_type"),
-            summary: row.get("summary"),
-            created_at: Some(row.get("created_at")),
-        })
-        .collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::state::SearchHit {
+                event_id: row.get("id"),
+                event_type: row.get("event_type"),
+                summary: row.get("summary"),
+                created_at: Some(row.get("created_at")),
+            })
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query("search_events_fts", started.elapsed(), result.is_ok());
+    result
 }
 
 pub async fn hydrate_active_search_hits(
@@ -552,39 +549,49 @@ pub async fn hydrate_active_search_hits(
         return Ok(hits);
     }
 
-    let ids: Vec<String> = hits.iter().map(|h| h.event_id.clone()).collect();
-    let conn = pool.get().await?;
-    let rows = conn
-        .query(
-            "SELECT id, event_type, summary, created_at
-             FROM agent_events
-             WHERE repo = $1
-               AND summarized = false
-               AND id = ANY($2)",
-            &[&repo, &ids],
-        )
-        .await?;
-
-    let by_id: std::collections::HashMap<String, crate::state::SearchHit> = rows
-        .into_iter()
-        .map(|row| {
-            let id: String = row.get("id");
-            (
-                id.clone(),
-                crate::state::SearchHit {
-                    event_id: id,
-                    event_type: row.get("event_type"),
-                    summary: row.get("summary"),
-                    created_at: Some(row.get("created_at")),
-                },
+    let started = std::time::Instant::now();
+    let result = async {
+        let ids: Vec<String> = hits.iter().map(|h| h.event_id.clone()).collect();
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, event_type, summary, created_at
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND summarized = false
+                   AND id = ANY($2)",
+                &[&repo, &ids],
             )
-        })
-        .collect();
+            .await?;
 
-    Ok(hits
-        .into_iter()
-        .filter_map(|hit| by_id.get(&hit.event_id).cloned())
-        .collect())
+        let by_id: std::collections::HashMap<String, crate::state::SearchHit> = rows
+            .into_iter()
+            .map(|row| {
+                let id: String = row.get("id");
+                (
+                    id.clone(),
+                    crate::state::SearchHit {
+                        event_id: id,
+                        event_type: row.get("event_type"),
+                        summary: row.get("summary"),
+                        created_at: Some(row.get("created_at")),
+                    },
+                )
+            })
+            .collect();
+
+        Ok(hits
+            .into_iter()
+            .filter_map(|hit| by_id.get(&hit.event_id).cloned())
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "hydrate_active_search_hits",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
 }
 
 pub async fn insert_error_record(
@@ -595,18 +602,24 @@ pub async fn insert_error_record(
     description: &str,
     severity: &str,
 ) -> Result<(), anyhow::Error> {
-    let conn = pool.get().await?;
-    conn.execute(
-        "INSERT INTO error_index (repo, task, error_type, description, severity)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (repo, task, error_type, description)
-         DO UPDATE SET
-            frequency = error_index.frequency + 1,
-            last_seen = now()",
-        &[&repo, &task, &error_type, &description, &severity],
-    )
-    .await?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        conn.execute(
+            "INSERT INTO error_index (repo, task, error_type, description, severity)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (repo, task, error_type, description)
+             DO UPDATE SET
+                frequency = error_index.frequency + 1,
+                last_seen = now()",
+            &[&repo, &task, &error_type, &description, &severity],
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query("insert_error_record", started.elapsed(), result.is_ok());
+    result
 }
 
 pub async fn get_active_errors(
@@ -614,31 +627,37 @@ pub async fn get_active_errors(
     repo: &str,
     limit: i64,
 ) -> Result<Vec<ErrorRecord>, anyhow::Error> {
-    let conn = pool.get().await?;
-    let rows = conn
-        .query(
-            "SELECT id, repo, task, error_type, description, severity, frequency, last_seen
-         FROM error_index
-         WHERE repo = $1
-         ORDER BY frequency DESC, last_seen DESC
-         LIMIT $2",
-            &[&repo, &limit],
-        )
-        .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(ErrorRecord {
-                id: row.get("id"),
-                repo: row.get("repo"),
-                task: row.get("task"),
-                error_type: row.get("error_type"),
-                description: row.get("description"),
-                severity: row.get("severity"),
-                frequency: row.get("frequency"),
-                last_seen: row.get("last_seen"),
+    let started = std::time::Instant::now();
+    let result: Result<Vec<ErrorRecord>, anyhow::Error> = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, repo, task, error_type, description, severity, frequency, last_seen
+             FROM error_index
+             WHERE repo = $1
+             ORDER BY frequency DESC, last_seen DESC
+             LIMIT $2",
+                &[&repo, &limit],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ErrorRecord {
+                    id: row.get("id"),
+                    repo: row.get("repo"),
+                    task: row.get("task"),
+                    error_type: row.get("error_type"),
+                    description: row.get("description"),
+                    severity: row.get("severity"),
+                    frequency: row.get("frequency"),
+                    last_seen: row.get("last_seen"),
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
+    .await;
+    crate::telemetry::record_db_query("get_active_errors", started.elapsed(), result.is_ok());
+    result
 }
 
 // ── Request adapters ──────────────────────────────────────────
@@ -684,9 +703,7 @@ pub async fn append_event_from_request(
     };
 
     insert_event(pool, &event).await?;
-    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event)
-        .await
-    {
+    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event).await {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(event_id = %id, "qdrant embedding failed, event stored in postgres only: {e}");
@@ -700,9 +717,15 @@ pub async fn append_event_from_request(
 // ── Context pack builder ──────────────────────────────────────
 
 pub async fn check_ready(pool: &deadpool_postgres::Pool) -> Result<(), anyhow::Error> {
-    let conn = pool.get().await?;
-    let _ = conn.query_one("SELECT 1", &[]).await?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let _ = conn.query_one("SELECT 1", &[]).await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query("check_ready", started.elapsed(), result.is_ok());
+    result
 }
 
 /// BUG-4: Context is reference material only — no directive language that overrides the harness.

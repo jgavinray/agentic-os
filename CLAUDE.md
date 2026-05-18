@@ -1,0 +1,52 @@
+# Project: agentic-os
+
+A local-first agent operating environment — a Rust orchestrator that sits between coding agents (Claude Code, opencode) and local LLM inference backends. Provides persistent memory, semantic recall, and automated context packing.
+
+## Architecture
+
+```
+Clients → Orchestrator → [PGSQL state, Qdrant memory, LiteLLM router] → local GPU
+```
+
+The orchestrator is the "brain stem." Models are interchangeable compute units.
+
+## Code Layout
+
+`orchestrator/src/` — All Rust source in a flat module tree:
+
+| Module | Responsibility |
+|--------|---------------|
+| `main.rs` | Entry point, routes, graceful shutdown |
+| `handlers.rs` | HTTP endpoints — auth, streaming, persistence (largest file) |
+| `anthropic.rs` | Anthropic↔OpenAI protocol translation, SSE streaming |
+| `db.rs` | Postgres schema, queries, context pack builder |
+| `qdrant.rs` | Qdrant vector store/search via TEI embeddings |
+| `hybrid.rs` | RRF merge for semantic + FTS search |
+| `summarizer.rs` | Background session summarizer |
+| `state.rs` | AppState, request types, task categorization |
+| `logging.rs` | Structured JSON logging init |
+
+## Running
+
+```bash
+./setup-models.sh        # Download embedding model (one-time)
+docker compose up -d     # Start full stack (postgres, qdrant, embedding, litellm, orchestrator)
+cargo test               # Run tests
+```
+
+## Key Patterns
+
+- **Auth**: Constant-time Bearer token comparison via `subtle` crate. `API_KEYS=token,ns;token2,ns2` format.
+- **Two HTTP clients**: `http` (5-min timeout for normal) and `http_stream` (no timeout for SSE streaming)
+- **Memory namespaces**: Key-derived, fully isolated per namespace
+- **Context injection**: Appended to existing system message (never duplicates), floor `max_tokens` at 65536
+- **Persistence**: Events stored to Postgres + Qdrant (best-effort, embedding failure doesn't break the event)
+- **Summarizer**: Background loop that summarizes sessions after 20+ messages via LLM
+
+## Conventions
+
+- **Naming**: snake_case
+- **Errors**: `anyhow::Error` for opaque, `Result` for propagation
+- **Tests**: Inline `#[cfg(test)]` modules with unit tests
+- **Commits**: conventional (`feat:`, `fix:`, `chore:`)
+- **Docker**: `cgr.dev/chainguard/rust:latest-dev`, multi-stage, glibc

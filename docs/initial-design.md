@@ -77,7 +77,7 @@ The MVP must:
 5. support orchestration
 6. support coding workflows
 7. support OpenAI-compatible APIs
-8. support OpenHands/opencode
+8. support opencode and compatible coding clients
 9. survive restarts
 10. be simple enough to understand and debug
 
@@ -112,7 +112,6 @@ The system should:
 - reduce repeated prompting
 
 The user should interact primarily with:
-- OpenHands
 - opencode
 - Claude Code
 - OpenAI-compatible clients
@@ -131,13 +130,13 @@ The orchestrator should coordinate:
 
 ## High-level Architecture
 
-text                 ┌────────────────────┐                 │ OpenHands          │                 │ opencode           │                 │ Claude Code        │                 └─────────┬──────────┘                           │                           ▼                 ┌────────────────────┐                 │ Rust Orchestrator  │                 │ "brain stem"       │                 └─────────┬──────────┘                           │        ┌──────────────────┼──────────────────┐        │                  │                  │        ▼                  ▼                  ▼ ┌─────────────┐   ┌─────────────┐   ┌─────────────┐ │ Postgres    │   │ Qdrant      │   │ LiteLLM     │ │ state       │   │ memory      │   │ router      │ └─────────────┘   └─────────────┘   └──────┬──────┘                                             │                                             ▼                              ┌─────────────────────────┐                              │ vLLM / Ollama / Spark   │                              │ local inference         │                              └─────────────────────────┘ 
+text                 ┌────────────────────┐                 │ opencode           │                 │ Claude Code        │                 │ curl / SDK clients │                 └─────────┬──────────┘                           │                           ▼                 ┌────────────────────┐                 │ Rust Orchestrator  │                 │ "brain stem"       │                 └─────────┬──────────┘                           │        ┌──────────────────┼──────────────────┐        │                  │                  │        ▼                  ▼                  ▼ ┌─────────────┐   ┌─────────────┐   ┌─────────────┐ │ Postgres    │   │ Qdrant      │   │ LiteLLM     │ │ state       │   │ memory      │   │ router      │ └─────────────┘   └─────────────┘   └──────┬──────┘                                             │                                             ▼                              ┌─────────────────────────┐                              │ vLLM / Ollama / Spark   │                              │ local inference         │                              └─────────────────────────┘ 
 
 ---
 
 # Component Responsibilities
 
-## OpenHands / opencode / Claude Code
+## opencode / Claude Code
 
 These are:
 - interfaces
@@ -300,7 +299,7 @@ The MVP MUST:
 - support OpenAI-compatible chat completions
 - support persistent memory
 - support context pack injection
-- support OpenHands
+- support compatible coding clients
 - support local inference
 - support a single-node deployment
 
@@ -350,7 +349,6 @@ The orchestrator MUST:
 - support model listing
 
 This is required for:
-- OpenHands
 - opencode
 - Claude Code compatibility
 
@@ -458,8 +456,8 @@ These should be improved.
 The MVP is successful if:
 
 1. docker compose up works
-2. OpenHands launches
-3. OpenHands connects successfully
+2. A coding client launches
+3. The coding client connects successfully
 4. orchestrator proxies requests successfully
 5. LiteLLM routes requests successfully
 6. local models respond successfully
@@ -487,3 +485,6 @@ DO NOT:
 The objective is:
 - practical engineering cognition infrastructure
 - for local-first software development workflows
+# Historical Design Note
+
+This is the initial design document for agentic-os; it is preserved for context and may not reflect the current implemented system.

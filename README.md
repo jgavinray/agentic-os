@@ -1,141 +1,114 @@
 # agentic-os
 
-A local-first agent operating environment that coordinates LLM inference, memory, orchestration, retrieval, and tool execution into a unified cognitive architecture. It treats LLMs as interchangeable compute units inside a brain stem orchestrator — responsible for context construction, routing, persistence, and state management — so developers get persistent engineering memory, semantic recall, and automated context packing in a single Docker Compose stack.
+A local-first agent memory orchestrator for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, summarization, and Anthropic tool-use passthrough through LiteLLM.
 
 ```
-    Claude Code / OpenHands / opencode
-                │
-                ▼
-        ┌────────────────┐
-        │  Rust          │
-        │  Orchestrator  │
-        │  (brain stem)  │
-        └────────┬───────┘
-                 │
-    ┌────────────┼─────────────┐
-    ▼            ▼             ▼
- ┌──────┐   ┌────────┐   ┌─────────┐
- │PGSQL │   │Qdrant  │   │LiteLLM  │
- │state │   │memory  │   │router   │
- └──────┘   └────────┘   └────┬────┘
-                               │
-                       ┌───────▼──────┐
-                       │ local GPU    │
-                       │ inference    │
-                       └──────────────┘
+Claude Code / opencode / curl
+             |
+             v
+      Rust orchestrator
+       |       |       |
+       v       v       v
+   Postgres  Qdrant  LiteLLM
 ```
 
 ## Quick Start
 
 ```bash
 cp .env.example .env
-# Edit .env: set LITELLM_SALT_KEY and add your API keys to API_KEYS
+# Edit .env: set LITELLM_SALT_KEY and API_KEYS.
 
-# First-time only: download the embedding model (~125MB).
-# This runs via Docker so no Python install is needed.
 ./setup-models.sh
-
 docker compose up -d
-```
-
-```bash
-# Verify health
 curl localhost:8088/health/ready
-# {"status":"ready","services":["postgres","qdrant","litellm"]}
 ```
-
-> **Why `setup-models.sh`?** The TEI embedding container uses `hf-hub 0.3.x` which cannot follow relative URL redirects returned by the HuggingFace CDN. Pre-downloading via Python's `huggingface_hub` (which handles redirects correctly) sidesteps the crash. Run it once; the model is cached in `./models/` and reused on every subsequent `docker compose up`.
-
-## Memory namespaces via API key
-
-The orchestrator derives a memory namespace from the API key — no custom headers needed.
-
-Format: `API_KEYS=token,namespace;token2,namespace2`
-
-Example:
-
-```
-API_KEYS=agent-os,project-alpha;agent-os,project-beta;sk-work,work
-```
-
-This means:
-- `Bearer agent-os` → routes to `project-alpha` or `project-beta` (multiple namespaces per token)
-- `Bearer sk-work` → routes to `work`
-
-Each namespace is fully isolated. Past sessions, context packs, and semantic recall are scoped to that namespace. Different clients using different keys get completely separate memory.
-
-Clients need only two settings — base URL and API key:
-
-```bash
-# Work context
-opencode --api-url http://localhost:8088/v1 --api-key sk-work
-
-# Project context
-opencode --api-url http://localhost:8088/v1 --api-key agent-os
-```
-
-Memory is automatically separated. No headers, no configuration beyond the key.
-
-### Explicit routing (optional)
-
-For finer-grained control, override the namespace per-request with headers:
-
-```bash
-curl -H "Authorization: Bearer sk-work" \
-     -H "x-agent-repo: payments-service" \
-     -H "x-agent-task: fix auth bug" \
-     -d '{"model":"qwen36-35b-heretic","messages":[...]}' \
-     localhost:8088/v1/chat/completions
-```
-
-`x-agent-repo` overrides the key-derived namespace; `x-agent-task` overrides `DEFAULT_TASK`. Headers are optional — absent headers fall back to key derivation.
 
 ## Architecture
 
+The orchestrator is a single-node control plane. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+
 | Component | Role | Port |
-|-----------|------|------|
-| **Rust Orchestrator** | Control plane, memory coordinator, context compiler, OpenAI-compatible frontend | 8088 |
-| **PostgreSQL** | Structured memory — sessions, events, workflow state | 5432 |
-| **Qdrant** | Semantic recall — vector memory | 6333-6334 |
-| **TEI (embedding)** | Text embeddings for semantic search (`BAAI/bge-small-en-v1.5`) | 8001 |
-| **LiteLLM** | Model routing and inference abstraction | 4000 |
-
-### How it works
-
-1. Clients send requests to the orchestrator using a standard OpenAI-compatible API
-2. The orchestrator derives a memory namespace from the API key and injects relevant context into the system prompt
-3. Inference is forwarded to LiteLLM which routes to a local GPU
-4. Every exchange is persisted to Postgres and indexed in Qdrant for future semantic recall
+| --- | --- | --- |
+| Rust Orchestrator | Authenticated API frontend, context compiler, memory coordinator, LiteLLM proxy | 8088 |
+| PostgreSQL | Durable sessions, events, summaries, errors, token usage, migration history | 5432 |
+| Qdrant | Vector memory for semantic recall | 6333-6334 |
+| LiteLLM | Model routing and OpenAI/Anthropic-compatible upstream API | 4000 |
+| Local ONNX Embedder | In-process embeddings for Qdrant indexing and search | n/a |
 
 ## API Endpoints
 
-All endpoints use Bearer token auth (`Authorization: Bearer <key>`).
+All endpoints except health checks require `Authorization: Bearer <key>`.
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/health/ready` | GET | Readiness (postgres, qdrant, litellm) |
-| `/v1/models` | GET | Model listing |
-| `/v1/chat/completions` | POST | Chat completions (streaming + non-streaming) |
-| `/sessions/start` | POST | Create a named session |
-| `/events/append` | POST | Append an event to memory |
-| `/context/pack` | POST | Fetch and format context for a namespace |
-| `/summaries/checkpoint` | POST | Write a checkpoint summary |
-| `/search` | POST | Semantic search over memory |
+| --- | --- | --- |
+| `/health`, `/health/live` | GET | Process liveness. |
+| `/health/ready` | GET | Readiness for Postgres, Qdrant, and LiteLLM. |
+| `/v1/models` | GET | Model list proxied from LiteLLM. |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat completions, streaming or non-streaming, with injected memory context. |
+| `/v1/messages` | POST | Anthropic-compatible messages passthrough with memory context. |
+| `/sessions/start` | POST | Create an explicit memory session. |
+| `/events/append` | POST | Store a memory event and best-effort vector index it. |
+| `/context/pack` | POST | Return a layered context pack for a repo/task. |
+| `/cache/stats` | GET | Return context cache size and TTL. |
+| `/metrics` | GET | Prometheus exposition format. |
+| `/metrics/json` | GET | Legacy JSON metrics snapshot. |
+| `/summaries/checkpoint` | POST | Store a checkpoint event with next actions/open questions. |
+| `/search` | POST | Semantic Qdrant search over memory. |
+
+## Memory Namespaces
+
+`API_KEYS` is semicolon-delimited:
+
+```bash
+API_KEYS=sk-work,work;sk-project,project-alpha
+```
+
+`Bearer sk-work` routes to the `work` namespace. `x-agent-repo` and `x-agent-task` can override the repo/task per request.
+
+## Operations
+
+Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlights:
+
+- Exactly one orchestrator process may own a Postgres database.
+- Schema migrations are embedded in `orchestrator/migrations/`.
+- Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
+- Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
+
+### Adding A Migration
+
+Create a new file named `orchestrator/migrations/V<N>__short_name.sql`, where `N` is the next integer version. Write forward-only SQL, never edit an already-applied migration, then run:
+
+```bash
+cd orchestrator
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
+
+## Security Model
+
+agentic-os assumes a single-user local node, typically bound to localhost or reachable through a private network such as Tailscale. By default, CORS allows any origin to preserve local-tool compatibility. Set `ALLOWED_ORIGINS` to a comma-separated origin list before exposing the API to a LAN, tunnel, or browser-accessible shared network.
+
+Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. Health, metrics, and memory endpoints are not rate limited.
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | Postgres connection string | required |
-| `QDRANT_URL` | Qdrant base URL | required |
-| `LITELLM_URL` | LiteLLM base URL including `/v1` | required |
-| `LITELLM_KEY` | LiteLLM API key | required |
-| `LITELLM_SALT_KEY` | LiteLLM salt key | required |
-| `EMBEDDING_URL` | TEI embedding service base URL | `http://embedding:80` |
-| `API_KEYS` | Comma-separated orchestrator API keys | `sk-local-orchestrator` |
-| `DEFAULT_MODEL` | Default model for completions | `qwen36-35b-heretic` |
-| `DEFAULT_TASK` | Default task label when header absent | `engineering` |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | required | Postgres connection string. |
+| `QDRANT_URL` | required | Qdrant base URL. |
+| `LITELLM_URL` | required | LiteLLM base URL including `/v1`. |
+| `LITELLM_KEY` | required | LiteLLM API key. |
+| `LITELLM_SALT_KEY` | required | LiteLLM salt key. |
+| `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
+| `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
+| `DEFAULT_TASK` | `engineering` | Task label when no header is present. |
+| `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
+| `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
+| `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference refill rate. |
+| `RATE_LIMIT_BURST` | `30` | Per-key inference burst. |
+| `ALLOWED_ORIGINS` | `*` | CORS origin policy. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Enables OTLP tracing when built with `tracing-otlp`. |
 
 ## License
 

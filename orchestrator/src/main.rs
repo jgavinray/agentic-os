@@ -4,24 +4,30 @@ mod embedder;
 mod handlers;
 mod hybrid;
 mod logging;
+mod migrations;
 mod qdrant;
+mod rate_limit;
 mod sentiment;
 mod state;
 mod summarizer;
+mod telemetry;
 
+use axum::http::HeaderValue;
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    logging::init_logging();
+    let logging_guard = logging::init_logging()?;
+    let prometheus = telemetry::install_recorder()?;
 
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let qdrant_url = env::var("QDRANT_URL").expect("QDRANT_URL must be set");
@@ -52,16 +58,25 @@ async fn main() -> Result<(), anyhow::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(state::DEFAULT_CONTEXT_DECAY_RATE);
-    let embed_model_path =
-        env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
+    let rate_limit_per_minute = env::var("RATE_LIMIT_PER_MINUTE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let rate_limit_burst = env::var("RATE_LIMIT_BURST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
+
+    let pool = db::create_pool(&db_url)?;
+    let single_writer = db::acquire_single_writer_lock(&pool).await?;
+    migrations::run(&pool).await?;
+    qdrant::init(&qdrant_url).await?;
+
     let embedder = Arc::new(
         embedder::Embedder::load(&embed_model_path)
             .expect("failed to load embedding model — run setup-models.sh first"),
     );
-
-    let pool = db::create_pool(&db_url)?;
-    db::init_schema(&pool).await?;
-    qdrant::init(&qdrant_url).await?;
 
     let sentiment_classifier = std::env::var("SENTIMENT_MODEL_PATH").ok().and_then(|path| {
         let threshold = std::env::var("SENTIMENT_THRESHOLD")
@@ -71,7 +86,9 @@ async fn main() -> Result<(), anyhow::Error> {
         match sentiment::SentimentClassifier::load(&path, threshold) {
             Ok(c) => Some(Arc::new(c)),
             Err(e) => {
-                tracing::warn!("sentiment classifier unavailable, negative feedback detection disabled: {e}");
+                tracing::warn!(
+                    "sentiment classifier unavailable, negative feedback detection disabled: {e}"
+                );
                 None
             }
         }
@@ -92,6 +109,9 @@ async fn main() -> Result<(), anyhow::Error> {
         // No overall timeout — streaming responses are long-lived.
         .build()?;
 
+    let metrics = telemetry::MetricsRegistry::new();
+    telemetry::prime_metrics(&metrics, &default_model, sentiment_classifier.is_some());
+
     let state = Arc::new(AppState {
         pool,
         sentiment: sentiment_classifier,
@@ -106,12 +126,16 @@ async fn main() -> Result<(), anyhow::Error> {
         http_stream,
         cache: state::ContextCache::new(cache_ttl_ms),
         context_decay_rate,
-        metrics: state::AppMetrics::new(),
+        rate_limiter: rate_limit::RateLimiter::new(rate_limit_per_minute, rate_limit_burst),
+        prometheus,
+        metrics,
     });
 
     tokio::spawn(crate::summarizer::run(Arc::clone(&state)));
 
     // ADD-5: TraceLayer emits structured per-request logs (method, path, status, latency).
+    let cors = cors_layer_from_env()?;
+
     let app = Router::new()
         .route("/health", get(handlers::health))
         .route("/health/live", get(handlers::health_live))
@@ -124,10 +148,12 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/context/pack", post(handlers::context_pack))
         .route("/cache/stats", get(handlers::cache_stats))
         .route("/metrics", get(handlers::metrics))
+        .route("/metrics/json", get(handlers::metrics_json))
         .route("/summaries/checkpoint", post(handlers::checkpoint))
         .route("/search", post(handlers::search))
+        .route_layer(middleware::from_fn(telemetry::http_metrics_middleware))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
     let addr: std::net::SocketAddr = "0.0.0.0:8088".parse().unwrap();
@@ -137,11 +163,45 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // BUG-7: Graceful shutdown on SIGTERM or Ctrl+C so in-flight requests and
     // background persistence tasks complete before the process exits.
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+
+    single_writer.release().await;
+    logging_guard.shutdown();
+    server_result?;
 
     Ok(())
+}
+
+fn cors_layer_from_env() -> Result<CorsLayer, anyhow::Error> {
+    let allowed = env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "*".to_string());
+    if allowed.trim() == "*" {
+        tracing::warn!(
+            target: "security",
+            "ALLOWED_ORIGINS=* permits any browser origin; restrict it before exposing the orchestrator beyond a single-user local node"
+        );
+        return Ok(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any));
+    }
+
+    let origins: Vec<HeaderValue> = allowed
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(HeaderValue::from_str)
+        .collect::<Result<_, _>>()?;
+
+    if origins.is_empty() {
+        anyhow::bail!("ALLOWED_ORIGINS must be '*' or a comma-separated origin list");
+    }
+
+    Ok(CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(Any)
+        .allow_headers(Any))
 }
 
 async fn shutdown_signal() {

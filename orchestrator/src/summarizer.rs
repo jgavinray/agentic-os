@@ -1,5 +1,6 @@
 use crate::db::AgentEvent;
 use crate::state::AppState;
+use crate::telemetry;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -8,6 +9,7 @@ pub async fn run(state: Arc<AppState>) {
     let mut tick = interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
+        telemetry::record_summarizer_tick();
         if let Err(e) = check_sessions(Arc::clone(&state)).await {
             tracing::warn!(target: "summarizer", "check_sessions error: {e}");
         }
@@ -53,6 +55,14 @@ async fn check_sessions(state: Arc<AppState>) -> Result<(), anyhow::Error> {
         .collect();
     drop(conn);
 
+    for target_level in [1, 2, 3] {
+        let count = candidates
+            .iter()
+            .filter(|(_, level)| *level == target_level)
+            .count();
+        telemetry::record_summarizer_candidate(target_level, count);
+    }
+
     for (session_id, target_level) in candidates {
         tokio::spawn(summarize_session(
             Arc::clone(&state),
@@ -97,6 +107,7 @@ async fn summarize_session(state: Arc<AppState>, session_id: String, target_leve
     }
 
     if let Err(e) = do_summarize(&state, &conn, &session_id, target_level).await {
+        telemetry::record_summarizer_written(target_level, false);
         tracing::warn!(target: "summarizer", session_id = %session_id, "summarization failed: {e}");
     }
 
@@ -111,6 +122,7 @@ async fn do_summarize(
     session_id: &str,
     target_level: i32,
 ) -> Result<(), anyhow::Error> {
+    let started = std::time::Instant::now();
     let source_level = source_level_for_target(target_level)?;
     let prompt_template = summary_prompt_for_level(target_level)?;
 
@@ -143,9 +155,7 @@ async fn do_summarize(
         let accepted =
             should_promote_to_level(target_level, &event_type, &summary, &metadata, source_count);
         if target_level > 1 {
-            state
-                .metrics
-                .record_promotion(accepted, has_source_ids(&metadata));
+            telemetry::record_promotion(&state.metrics, accepted, has_source_ids(&metadata));
         }
         if accepted {
             promotable_rows.push(row);
@@ -175,25 +185,41 @@ async fn do_summarize(
     let prompt = prompt_template.replace("{messages}", &messages_text);
 
     let request_body = serde_json::json!({
-        "model": "qwen36-35b-heretic",
+        "model": state.default_model.clone(),
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": crate::state::SUMMARIZER_MAX_TOKENS,
         "temperature": 0.1,
     });
 
     let url = format!("{}/chat/completions", state.litellm_url);
-    let val: serde_json::Value = state
+    let upstream_started = std::time::Instant::now();
+    let resp = state
         .http
         .post(&url)
         .bearer_auth(&state.litellm_key)
         .json(&request_body)
         .send()
-        .await?
-        .json()
         .await?;
-    state
-        .metrics
-        .record_tokens(&crate::state::TokenUsage::from_openai_value(&val));
+    let status = resp.status();
+    telemetry::record_upstream_litellm(
+        "summarizer_chat_completions",
+        upstream_started.elapsed(),
+        &status.as_u16().to_string(),
+    );
+    if !status.is_success() {
+        telemetry::record_upstream_litellm_error(
+            "summarizer_chat_completions",
+            telemetry::upstream_error_kind(status),
+        );
+    }
+    let val: serde_json::Value = resp.json().await.inspect_err(|_| {
+        telemetry::record_upstream_litellm_error("summarizer_chat_completions", "parse");
+    })?;
+    telemetry::record_tokens(
+        &state.metrics,
+        &crate::state::TokenUsage::from_openai_value(&val),
+        &state.default_model,
+    );
 
     let content_val = &val["choices"][0]["message"]["content"];
     let summary_text = match content_val {
@@ -250,12 +276,8 @@ async fn do_summarize(
         summary_level: target_level,
     };
 
-    if let Err(e) = crate::qdrant::store_event(
-        &state.embedder,
-        &state.qdrant_url,
-        &summary_event,
-    )
-    .await
+    if let Err(e) =
+        crate::qdrant::store_event(&state.embedder, &state.qdrant_url, &summary_event).await
     {
         tracing::warn!(
             target: "summarizer",
@@ -269,6 +291,8 @@ async fn do_summarize(
         &[&event_ids],
     )
     .await?;
+    telemetry::record_summarizer_written(target_level, true);
+    telemetry::record_summarizer_duration(target_level, started.elapsed());
 
     tracing::info!(
         target: "summarizer",
@@ -280,7 +304,7 @@ async fn do_summarize(
     );
 
     state.cache.invalidate(&repo, "");
-    state.metrics.record_cache_invalidation();
+    telemetry::record_cache_invalidation(&state.metrics);
 
     Ok(())
 }

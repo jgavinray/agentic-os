@@ -13,23 +13,29 @@ pub struct SentimentClassifier {
 
 impl SentimentClassifier {
     pub fn load(model_dir: &str, threshold: f32) -> Result<Self> {
-        let session = Mutex::new(
-            Session::builder()?.commit_from_file(format!("{model_dir}/model.onnx"))?,
-        );
+        let session =
+            Mutex::new(Session::builder()?.commit_from_file(format!("{model_dir}/model.onnx"))?);
 
         let tokenizer = Tokenizer::from_file(format!("{model_dir}/tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer load failed: {e}"))?;
 
         tracing::info!(target: "sentiment", model_dir, threshold, "sentiment classifier loaded");
-        Ok(Self { session, tokenizer, threshold })
+        Ok(Self {
+            session,
+            tokenizer,
+            threshold,
+        })
     }
 
     /// Returns true when the text carries a negative sentiment score at or above the threshold.
     pub fn is_negative(&self, text: &str) -> bool {
+        let started = std::time::Instant::now();
         match self.negative_score(text) {
             Ok(score) => {
                 tracing::debug!(target: "sentiment", score, threshold = self.threshold);
-                score_exceeds_threshold(score, self.threshold)
+                let negative = score_exceeds_threshold(score, self.threshold);
+                crate::telemetry::record_sentiment(negative, started.elapsed());
+                negative
             }
             Err(e) => {
                 tracing::warn!(target: "sentiment", "inference error: {e}");
@@ -57,7 +63,10 @@ impl SentimentClassifier {
         let input_ids_t = Tensor::<i64>::from_array(([1usize, len], ids))?;
         let attn_mask_t = Tensor::<i64>::from_array(([1usize, len], mask))?;
 
-        let mut session = self.session.lock().map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
         let outputs = session.run(inputs![
             "input_ids" => input_ids_t,
             "attention_mask" => attn_mask_t,
@@ -116,7 +125,10 @@ mod tests {
     fn probability_is_bounded_zero_to_one() {
         for (neg, pos) in [(-100.0f32, 100.0), (100.0, -100.0), (0.0, 0.0), (1.5, 0.3)] {
             let p = softmax_negative_prob(neg, pos);
-            assert!(p >= 0.0 && p <= 1.0, "p={p} out of [0,1] for neg={neg}, pos={pos}");
+            assert!(
+                p >= 0.0 && p <= 1.0,
+                "p={p} out of [0,1] for neg={neg}, pos={pos}"
+            );
         }
     }
 

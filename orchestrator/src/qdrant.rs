@@ -9,8 +9,15 @@ pub async fn init(qdrant_url: &str) -> Result<(), anyhow::Error> {
         "vectors": {"size": VECTOR_SIZE, "distance": "Cosine"}
     });
     let http = reqwest::Client::new();
+    let started = std::time::Instant::now();
     let resp = http.put(&url).json(&body).send().await?;
-    if resp.status().is_success() || resp.status() == 409 {
+    let status = resp.status();
+    crate::telemetry::record_qdrant_request(
+        "create_collection",
+        started.elapsed(),
+        &status.as_u16().to_string(),
+    );
+    if status.is_success() || status == 409 {
         Ok(())
     } else {
         resp.error_for_status()?;
@@ -31,8 +38,15 @@ pub async fn store_event(
         "points": [{"id": event.id, "vector": vector, "payload": event.payload()}]
     });
 
+    let started = std::time::Instant::now();
     let resp = http.put(&url).json(&body).send().await?;
-    if resp.status().is_success() || resp.status() == 409 {
+    let status = resp.status();
+    crate::telemetry::record_qdrant_request(
+        "upsert",
+        started.elapsed(),
+        &status.as_u16().to_string(),
+    );
+    if status.is_success() || status == 409 {
         Ok(())
     } else {
         resp.error_for_status()?;
@@ -57,7 +71,15 @@ pub async fn search(
         "score_threshold": 0.4
     });
 
-    let resp: Value = http.post(&url).json(&body).send().await?.json().await?;
+    let started = std::time::Instant::now();
+    let response = http.post(&url).json(&body).send().await?;
+    let status = response.status();
+    crate::telemetry::record_qdrant_request(
+        "search",
+        started.elapsed(),
+        &status.as_u16().to_string(),
+    );
+    let resp: Value = response.json().await?;
 
     Ok(resp["result"].as_array().cloned().unwrap_or_default())
 }

@@ -1,6 +1,6 @@
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use bytes::Bytes;
@@ -12,7 +12,9 @@ use subtle::ConstantTimeEq;
 use crate::anthropic;
 use crate::db;
 use crate::qdrant;
+use crate::rate_limit;
 use crate::state::*;
+use crate::telemetry;
 
 // ── Auth helpers ───────────────────────────────────────────────
 
@@ -31,9 +33,11 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String
     for (token, namespace) in &state.api_keys {
         let expected = token.as_bytes();
         if expected.len() == provided.len() && expected.ct_eq(provided).into() {
+            telemetry::record_auth_attempt(true);
             return Some((token.clone(), namespace.clone()));
         }
     }
+    telemetry::record_auth_attempt(false);
     None
 }
 
@@ -41,16 +45,40 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     authenticate(state, headers).is_some()
 }
 
+fn check_rate_limit(state: &AppState, token: &str) -> Option<Response> {
+    match state.rate_limiter.check(token) {
+        Ok(()) => None,
+        Err(retry_after) => Some(rate_limited_response(token, retry_after)),
+    }
+}
+
+fn rate_limited_response(token: &str, retry_after: u64) -> Response {
+    let key_hash = rate_limit::key_hash(token);
+    telemetry::record_rate_limited(&key_hash);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after.to_string())],
+        axum::Json(serde_json::json!({
+            "error": "rate_limited",
+            "retry_after": retry_after
+        })),
+    )
+        .into_response()
+}
+
 // ── Health checks (no auth) ─────────────────────────────────────
 
+#[tracing::instrument(name = "handler.health")]
 pub async fn health() -> axum::Json<Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
+#[tracing::instrument(name = "handler.health_live")]
 pub async fn health_live() -> axum::Json<Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
 }
 
+#[tracing::instrument(name = "handler.health_ready", skip(state))]
 pub async fn health_ready(
     State(state): State<Arc<AppState>>,
 ) -> Result<axum::Json<Value>, (StatusCode, axum::Json<Value>)> {
@@ -64,11 +92,20 @@ pub async fn health_ready(
         unhealthy.push("postgres");
     }
 
+    let qdrant_started = std::time::Instant::now();
     if http
         .get(format!("{}/collections", state.qdrant_url))
         .send()
         .await
-        .map(|r| r.status().is_success())
+        .map(|r| {
+            let status = r.status();
+            telemetry::record_qdrant_request(
+                "health",
+                qdrant_started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            status.is_success()
+        })
         .unwrap_or(false)
     {
         healthy.push("qdrant");
@@ -108,6 +145,7 @@ pub async fn health_ready(
 
 // ── Model listing — BUG-10: proxy to LiteLLM ───────────────────
 
+#[tracing::instrument(name = "handler.list_models", skip(state, headers))]
 pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !check_auth(&state, &headers) {
         return (
@@ -118,6 +156,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
     }
 
     let url = format!("{}/models", state.litellm_url);
+    let started = std::time::Instant::now();
     match state
         .http
         .get(&url)
@@ -127,12 +166,30 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
     {
         Ok(r) => {
             let status = r.status();
+            telemetry::record_upstream_litellm(
+                "models",
+                started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            if !status.is_success() {
+                telemetry::record_upstream_litellm_error(
+                    "models",
+                    telemetry::upstream_error_kind(status),
+                );
+            }
             match r.json::<Value>().await {
                 Ok(v) => (status, axum::Json(v)).into_response(),
-                Err(_) => fallback_model_list(&state).into_response(),
+                Err(_) => {
+                    telemetry::record_upstream_litellm_error("models", "parse");
+                    fallback_model_list(&state).into_response()
+                }
             }
         }
-        Err(_) => fallback_model_list(&state).into_response(),
+        Err(e) => {
+            telemetry::record_upstream_litellm("models", started.elapsed(), "error");
+            telemetry::record_upstream_litellm_error("models", telemetry::reqwest_error_kind(&e));
+            fallback_model_list(&state).into_response()
+        }
     }
 }
 
@@ -143,6 +200,7 @@ fn fallback_model_list(state: &AppState) -> axum::Json<Value> {
     }))
 }
 
+#[tracing::instrument(name = "handler.cache_stats", skip(state, headers))]
 pub async fn cache_stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !check_auth(&state, &headers) {
         return (
@@ -155,7 +213,27 @@ pub async fn cache_stats(State(state): State<Arc<AppState>>, headers: HeaderMap)
     axum::Json(state.cache.stats()).into_response()
 }
 
+#[tracing::instrument(name = "handler.metrics", skip(state, headers))]
 pub async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !check_auth(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    telemetry::record_pool_gauges(&state.pool);
+    telemetry::record_process_metrics();
+    (
+        telemetry::prometheus_content_type(),
+        state.prometheus.render(),
+    )
+        .into_response()
+}
+
+#[tracing::instrument(name = "handler.metrics_json", skip(state, headers))]
+pub async fn metrics_json(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if !check_auth(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -169,6 +247,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 
 // ── Session management ──────────────────────────────────────────
 
+#[tracing::instrument(name = "handler.start_session", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
 pub async fn start_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -197,6 +276,7 @@ pub async fn start_session(
 
 // ── Event management ────────────────────────────────────────────
 
+#[tracing::instrument(name = "handler.append_event", skip(state, headers, req), fields(repo = %req.repo, event_type = %req.event_type))]
 pub async fn append_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -210,25 +290,21 @@ pub async fn append_event(
             .into_response();
     }
 
-    let (event_id, qdrant_indexed) = match db::append_event_from_request(
-        &state.pool,
-        &state.embedder,
-        &state.qdrant_url,
-        &req,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            return (
+    let (event_id, qdrant_indexed) =
+        match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(
                     serde_json::json!({"error": "failed_to_append_event", "detail": e.to_string()}),
                 ),
             )
                 .into_response();
-        }
-    };
+            }
+        };
 
     // Detect and record errors from the event.
     if let Some(error_type) = &req.error_type {
@@ -252,7 +328,7 @@ pub async fn append_event(
     state
         .cache
         .invalidate(&req.repo, req.task.as_deref().unwrap_or(""));
-    state.metrics.record_cache_invalidation();
+    telemetry::record_cache_invalidation(&state.metrics);
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
@@ -272,30 +348,25 @@ async fn semantic_search(
     query: &str,
     limit: usize,
 ) -> Vec<crate::state::SearchHit> {
-    qdrant::search(
-        &state.embedder,
-        &state.qdrant_url,
-        query,
-        limit,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|item| {
-        let payload = item.get("payload")?;
-        let created_at = payload
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-        Some(crate::state::SearchHit {
-            event_id: payload.get("event_id")?.as_str()?.to_string(),
-            event_type: payload.get("event_type")?.as_str()?.to_string(),
-            summary: payload.get("summary")?.as_str()?.to_string(),
-            created_at,
+    qdrant::search(&state.embedder, &state.qdrant_url, query, limit)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let payload = item.get("payload")?;
+            let created_at = payload
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            Some(crate::state::SearchHit {
+                event_id: payload.get("event_id")?.as_str()?.to_string(),
+                event_type: payload.get("event_type")?.as_str()?.to_string(),
+                summary: payload.get("summary")?.as_str()?.to_string(),
+                created_at,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 async fn hybrid_search(
@@ -356,7 +427,7 @@ async fn get_or_build_cached_context(
     if let Some(cached) = state.cache.get(&cache_key) {
         let mut cached = cached;
         cached.stats.cache_hit = true;
-        state.metrics.record_context_pack(&cached.stats);
+        telemetry::record_context_pack(&state.metrics, &cached.stats);
         return Ok(cached);
     }
 
@@ -399,10 +470,11 @@ async fn get_or_build_cached_context(
     };
 
     state.cache.put(cache_key, cached.clone());
-    state.metrics.record_context_pack(&cached.stats);
+    telemetry::record_context_pack(&state.metrics, &cached.stats);
     Ok(cached)
 }
 
+#[tracing::instrument(name = "handler.context_pack", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
 pub async fn context_pack(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -448,6 +520,7 @@ pub async fn context_pack(
 
 // ── Checkpoint ──────────────────────────────────────────────────
 
+#[tracing::instrument(name = "handler.checkpoint", skip(state, headers, req), fields(repo = %req.repo))]
 pub async fn checkpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -505,7 +578,7 @@ pub async fn checkpoint(
     state
         .cache
         .invalidate(&event.repo, event.task.as_deref().unwrap_or(""));
-    state.metrics.record_cache_invalidation();
+    telemetry::record_cache_invalidation(&state.metrics);
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
@@ -751,13 +824,9 @@ async fn persist_exchange(
                 "negative feedback detected — storing failed_attempt event"
             );
             let req = make_req("failed_attempt", "user", user_content);
-            if let Err(e) = db::append_event_from_request(
-                &state.pool,
-                &state.embedder,
-                &state.qdrant_url,
-                &req,
-            )
-            .await
+            if let Err(e) =
+                db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req)
+                    .await
             {
                 tracing::warn!(target: "sentiment", "failed to store failed_attempt event: {e}");
             }
@@ -800,7 +869,7 @@ async fn persist_exchange(
     }
 
     state.cache.invalidate(repo, "");
-    state.metrics.record_cache_invalidation();
+    telemetry::record_cache_invalidation(&state.metrics);
 }
 
 /// Pack orchestrator context into an OpenAI-shaped request.
@@ -829,6 +898,7 @@ async fn dispatch_non_streaming_raw(
     openai_req: &Value,
 ) -> Result<Value, Response> {
     let url = format!("{}/chat/completions", state.litellm_url);
+    let started = std::time::Instant::now();
     match state
         .http
         .post(&url)
@@ -837,35 +907,61 @@ async fn dispatch_non_streaming_raw(
         .send()
         .await
     {
-        Ok(r) => r.json::<Value>().await.map_err(|_| {
-            (
+        Ok(r) => {
+            let status = r.status();
+            telemetry::record_upstream_litellm(
+                "chat_completions",
+                started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            if !status.is_success() {
+                telemetry::record_upstream_litellm_error(
+                    "chat_completions",
+                    telemetry::upstream_error_kind(status),
+                );
+            }
+            r.json::<Value>().await.map_err(|_| {
+                telemetry::record_upstream_litellm_error("chat_completions", "parse");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+                )
+                    .into_response()
+            })
+        }
+        Err(e) => {
+            telemetry::record_upstream_litellm("chat_completions", started.elapsed(), "error");
+            telemetry::record_upstream_litellm_error(
+                "chat_completions",
+                telemetry::reqwest_error_kind(&e),
+            );
+            Err((
                 StatusCode::BAD_GATEWAY,
-                axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+                axum::Json(
+                    serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
+                ),
             )
-                .into_response()
-        }),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            axum::Json(
-                serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
-            ),
-        )
-            .into_response()),
+                .into_response())
+        }
     }
 }
 
+#[tracing::instrument(name = "handler.chat_completions", skip(state, headers, payload))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    let Some((_caller_token, namespace)) = authenticate(&state, &headers) else {
+    let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({"error": "unauthorized"})),
         )
             .into_response();
     };
+    if let Some(response) = check_rate_limit(&state, &caller_token) {
+        return response;
+    }
 
     let is_stream = payload
         .get("stream")
@@ -873,7 +969,7 @@ pub async fn chat_completions(
         .unwrap_or(false);
 
     // Explicit headers take precedence; fall back to token-bound namespace so
-    // standard clients (OpenCode, OpenHands, curl) get memory without custom headers.
+    // standard clients (OpenCode, curl) get memory without custom headers.
     let repo = headers
         .get("x-agent-repo")
         .and_then(|v| v.to_str().ok())
@@ -907,7 +1003,7 @@ pub async fn chat_completions(
     match dispatch_non_streaming_raw(&state, &req).await {
         Ok(val) => {
             let usage = TokenUsage::from_openai_value(&val);
-            state.metrics.record_tokens(&usage);
+            telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
             if !usage.is_empty() {
                 let pool = state.pool.clone();
                 let actual = state.default_model.clone();
@@ -916,9 +1012,7 @@ pub async fn chat_completions(
                 let r = repo.clone();
                 let u = usage.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await
-                    {
+                    if let Err(e) = db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await {
                         tracing::warn!("failed to record token usage: {e}");
                     }
                 });
@@ -968,24 +1062,45 @@ async fn handle_streaming(
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
-    let upstream =
-        match state
-            .http_stream
-            .post(&url)
-            .bearer_auth(&state.litellm_key)
-            .json(&req)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return (
+    let started = std::time::Instant::now();
+    let upstream = match state
+        .http_stream
+        .post(&url)
+        .bearer_auth(&state.litellm_key)
+        .json(&req)
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let status = r.status();
+            telemetry::record_upstream_litellm(
+                "chat_completions",
+                started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            if !status.is_success() {
+                telemetry::record_upstream_litellm_error(
+                    "chat_completions",
+                    telemetry::upstream_error_kind(status),
+                );
+            }
+            r
+        }
+        Err(e) => {
+            telemetry::record_upstream_litellm("chat_completions", started.elapsed(), "error");
+            telemetry::record_upstream_litellm_error(
+                "chat_completions",
+                telemetry::reqwest_error_kind(&e),
+            );
+            return (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(
                     serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
                 ),
             )
-                .into_response(),
-        };
+                .into_response();
+        }
+    };
 
     let bytes_stream = upstream.bytes_stream();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
@@ -994,18 +1109,23 @@ async fn handle_streaming(
 
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
+        let mut stream_metrics = telemetry::StreamTracker::new("chat_completions", started);
         let mut tx_opt = Some(done_tx);
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(b) => {
+                    stream_metrics.first_token();
                     if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
+                    stream_metrics.fail("upstream_error");
                     yield Err(std::io::Error::other(e));
+                    return;
                 }
             }
         }
+        stream_metrics.finish();
         if let Some(tx) = tx_opt.take() {
             let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
             let _ = tx.send(data);
@@ -1026,7 +1146,7 @@ async fn handle_streaming(
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_sse(&raw);
-            state_bg.metrics.record_tokens(&usage);
+            telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
             if !usage.is_empty() {
                 if let Err(e) = db::record_token_usage(
                     &state_bg.pool,
@@ -1065,18 +1185,22 @@ async fn handle_streaming(
 
 // ── Anthropic /v1/messages ──────────────────────────────────────
 
+#[tracing::instrument(name = "handler.messages", skip(state, headers, payload))]
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
-    let Some((_caller_token, namespace)) = authenticate(&state, &headers) else {
+    let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
         return anthropic_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             "invalid or missing API key",
         );
     };
+    if let Some(response) = check_rate_limit(&state, &caller_token) {
+        return response;
+    }
 
     let is_stream = payload
         .get("stream")
@@ -1111,14 +1235,13 @@ pub async fn messages(
     pack_context_into_anthropic_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
-        return handle_streaming_anthropic(
-            &state, req, user_content, repo, task, model, namespace,
-        )
-        .await;
+        return handle_streaming_anthropic(&state, req, user_content, repo, task, model, namespace)
+            .await;
     }
 
     // ── Non-streaming: passthrough to LiteLLM /messages ────────
     let url = format!("{}/messages", state.litellm_url);
+    let started = std::time::Instant::now();
     let upstream_resp = match state
         .http
         .post(&url)
@@ -1127,13 +1250,29 @@ pub async fn messages(
         .send()
         .await
     {
-        Ok(r) => r,
-        Err(_) => {
+        Ok(r) => {
+            let status = r.status();
+            telemetry::record_upstream_litellm(
+                "messages",
+                started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            if !status.is_success() {
+                telemetry::record_upstream_litellm_error(
+                    "messages",
+                    telemetry::upstream_error_kind(status),
+                );
+            }
+            r
+        }
+        Err(e) => {
+            telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
+            telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 "upstream LiteLLM request failed",
-            )
+            );
         }
     };
 
@@ -1141,11 +1280,12 @@ pub async fn messages(
     let val: Value = match upstream_resp.json().await {
         Ok(v) => v,
         Err(_) => {
+            telemetry::record_upstream_litellm_error("messages", "parse");
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 "invalid upstream response",
-            )
+            );
         }
     };
 
@@ -1154,7 +1294,7 @@ pub async fn messages(
     }
 
     let usage = TokenUsage::from_openai_value(&val);
-    state.metrics.record_tokens(&usage);
+    telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
     if !usage.is_empty() {
         let pool = state.pool.clone();
         let actual = state.default_model.clone();
@@ -1190,6 +1330,7 @@ async fn handle_streaming_anthropic(
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
 
+    let started = std::time::Instant::now();
     let upstream = match state
         .http_stream
         .post(&url)
@@ -1198,13 +1339,29 @@ async fn handle_streaming_anthropic(
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            let status = r.status();
+            telemetry::record_upstream_litellm(
+                "messages",
+                started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            if !status.is_success() {
+                telemetry::record_upstream_litellm_error(
+                    "messages",
+                    telemetry::upstream_error_kind(status),
+                );
+            }
+            r
+        }
         Err(e) => {
+            telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
+            telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 format!("upstream unreachable: {e}"),
-            )
+            );
         }
     };
 
@@ -1224,18 +1381,23 @@ async fn handle_streaming_anthropic(
     // Proxy bytes verbatim — LiteLLM already returns Anthropic SSE format.
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
+        let mut stream_metrics = telemetry::StreamTracker::new("messages", started);
         let mut tx_opt = Some(done_tx);
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(b) => {
+                    stream_metrics.first_token();
                     if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
+                    stream_metrics.fail("upstream_error");
                     yield Err(std::io::Error::other(e));
+                    return;
                 }
             }
         }
+        stream_metrics.finish();
         if let Some(tx) = tx_opt.take() {
             let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
             let _ = tx.send(data);
@@ -1247,7 +1409,7 @@ async fn handle_streaming_anthropic(
         if let Ok(raw_bytes) = done_rx.await {
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_anthropic_sse(&raw);
-            state_bg.metrics.record_tokens(&usage);
+            telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
             if !usage.is_empty() {
                 if let Err(e) = db::record_token_usage(
                     &state_bg.pool,
@@ -1405,6 +1567,19 @@ mod tests {
         assert_eq!(delays, vec![200, 400]);
     }
 
+    #[test]
+    fn rate_limited_response_sets_429_and_retry_after() {
+        let response = rate_limited_response("secret-token", 3);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3")
+        );
+    }
+
     // ── API_KEYS parsing: semicolon-delimited token,namespace entries ──
 
     #[test]
@@ -1532,29 +1707,36 @@ mod tests {
 
     #[test]
     fn metrics_include_context_pack_counts() {
-        let metrics = AppMetrics::new();
-        metrics.record_context_pack(&ContextPackStats {
-            context_chars: 400,
-            context_tokens_estimate: 100,
-            l0_items_injected: 1,
-            l1_items_injected: 2,
-            l2_items_injected: 3,
-            l3_items_injected: 4,
-            failed_attempts_injected: 1,
-            remediations_injected: 1,
-            retrieval_semantic_hits: 5,
-            retrieval_fts_hits: 6,
-            retrieval_deduped_hits: 7,
-            cache_hit: false,
-            ..Default::default()
-        });
-        metrics.record_tokens(&TokenUsage {
-            processed_tokens: 120,
-            cached_tokens: 80,
-            generated_tokens: 40,
-        });
-        metrics.record_promotion(false, false);
-        metrics.record_promotion(true, true);
+        let metrics = telemetry::MetricsRegistry::new();
+        telemetry::record_context_pack(
+            &metrics,
+            &ContextPackStats {
+                context_chars: 400,
+                context_tokens_estimate: 100,
+                l0_items_injected: 1,
+                l1_items_injected: 2,
+                l2_items_injected: 3,
+                l3_items_injected: 4,
+                failed_attempts_injected: 1,
+                remediations_injected: 1,
+                retrieval_semantic_hits: 5,
+                retrieval_fts_hits: 6,
+                retrieval_deduped_hits: 7,
+                cache_hit: false,
+                ..Default::default()
+            },
+        );
+        telemetry::record_tokens(
+            &metrics,
+            &TokenUsage {
+                processed_tokens: 120,
+                cached_tokens: 80,
+                generated_tokens: 40,
+            },
+            "test-model",
+        );
+        telemetry::record_promotion(&metrics, false, false);
+        telemetry::record_promotion(&metrics, true, true);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.context_pack_requests, 1);
@@ -1625,15 +1807,21 @@ mod tests {
 
     #[test]
     fn cache_hit_rate_updates() {
-        let metrics = AppMetrics::new();
-        metrics.record_context_pack(&ContextPackStats {
-            cache_hit: false,
-            ..Default::default()
-        });
-        metrics.record_context_pack(&ContextPackStats {
-            cache_hit: true,
-            ..Default::default()
-        });
+        let metrics = telemetry::MetricsRegistry::new();
+        telemetry::record_context_pack(
+            &metrics,
+            &ContextPackStats {
+                cache_hit: false,
+                ..Default::default()
+            },
+        );
+        telemetry::record_context_pack(
+            &metrics,
+            &ContextPackStats {
+                cache_hit: true,
+                ..Default::default()
+            },
+        );
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.context_pack_requests, 2);
@@ -1884,6 +2072,7 @@ mod tests {
 
 // ── Semantic search ─────────────────────────────────────────────
 
+#[tracing::instrument(name = "handler.search", skip(state, headers, req))]
 pub async fn search(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1900,14 +2089,7 @@ pub async fn search(
     let query = req.get("q").and_then(|v| v.as_str()).unwrap_or("");
     let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    let results = match qdrant::search(
-        &state.embedder,
-        &state.qdrant_url,
-        query,
-        limit,
-    )
-    .await
-    {
+    let results = match qdrant::search(&state.embedder, &state.qdrant_url, query, limit).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("qdrant search failed: {e}");

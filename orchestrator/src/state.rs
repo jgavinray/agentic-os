@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Minimum max_tokens for proxied completion requests.
@@ -386,111 +386,6 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct MetricsSnapshot {
-    pub context_pack_requests: u64,
-    pub context_cache_hits: u64,
-    pub context_cache_misses: u64,
-    pub context_pack_build_ms_total: u64,
-    pub context_pack_chars_total: u64,
-    pub context_pack_tokens_estimate_total: u64,
-    pub l0_items_injected: u64,
-    pub l1_items_injected: u64,
-    pub l2_items_injected: u64,
-    pub l3_items_injected: u64,
-    pub failed_attempts_injected: u64,
-    pub remediations_injected: u64,
-    pub retrieval_semantic_hits: u64,
-    pub retrieval_fts_hits: u64,
-    pub retrieval_deduped_hits: u64,
-    pub processed_tokens: u64,
-    pub cached_tokens: u64,
-    pub generated_tokens: u64,
-    pub promotion_attempts: u64,
-    pub promotion_accepted: u64,
-    pub promotion_rejected: u64,
-    pub memory_source_items: u64,
-    pub memory_source_items_with_sources: u64,
-    pub memory_source_coverage: f64,
-    pub stale_cache_invalidations: u64,
-}
-
-#[derive(Clone)]
-pub struct AppMetrics {
-    inner: Arc<RwLock<MetricsSnapshot>>,
-}
-
-impl AppMetrics {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(MetricsSnapshot::default())),
-        }
-    }
-
-    pub fn snapshot(&self) -> MetricsSnapshot {
-        self.inner.read().unwrap().clone()
-    }
-
-    pub fn record_context_pack(&self, stats: &ContextPackStats) {
-        let mut metrics = self.inner.write().unwrap();
-        metrics.context_pack_requests += 1;
-        if stats.cache_hit {
-            metrics.context_cache_hits += 1;
-        } else {
-            metrics.context_cache_misses += 1;
-        }
-        metrics.context_pack_build_ms_total += stats.build_ms;
-        metrics.context_pack_chars_total += stats.context_chars as u64;
-        metrics.context_pack_tokens_estimate_total += stats.context_tokens_estimate as u64;
-        metrics.l0_items_injected += stats.l0_items_injected as u64;
-        metrics.l1_items_injected += stats.l1_items_injected as u64;
-        metrics.l2_items_injected += stats.l2_items_injected as u64;
-        metrics.l3_items_injected += stats.l3_items_injected as u64;
-        metrics.failed_attempts_injected += stats.failed_attempts_injected as u64;
-        metrics.remediations_injected += stats.remediations_injected as u64;
-        metrics.retrieval_semantic_hits += stats.retrieval_semantic_hits as u64;
-        metrics.retrieval_fts_hits += stats.retrieval_fts_hits as u64;
-        metrics.retrieval_deduped_hits += stats.retrieval_deduped_hits as u64;
-    }
-
-    pub fn record_tokens(&self, usage: &TokenUsage) {
-        if usage.is_empty() {
-            return;
-        }
-        let mut metrics = self.inner.write().unwrap();
-        metrics.processed_tokens += usage.processed_tokens;
-        metrics.cached_tokens += usage.cached_tokens;
-        metrics.generated_tokens += usage.generated_tokens;
-    }
-
-    pub fn record_cache_invalidation(&self) {
-        let mut metrics = self.inner.write().unwrap();
-        metrics.stale_cache_invalidations += 1;
-    }
-
-    pub fn record_promotion(&self, accepted: bool, has_sources: bool) {
-        let mut metrics = self.inner.write().unwrap();
-        metrics.promotion_attempts += 1;
-        if accepted {
-            metrics.promotion_accepted += 1;
-        } else {
-            metrics.promotion_rejected += 1;
-        }
-        metrics.memory_source_items += 1;
-        if has_sources {
-            metrics.memory_source_items_with_sources += 1;
-        }
-        metrics.memory_source_coverage =
-            metrics.memory_source_items_with_sources as f64 / metrics.memory_source_items as f64;
-    }
-}
-
-impl Default for AppMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Shared application state (cloned per request via Arc)
 #[derive(Clone)]
 pub struct AppState {
@@ -521,8 +416,12 @@ pub struct AppState {
     pub cache: ContextCache,
     /// Exponential decay rate used by hybrid search scoring.
     pub context_decay_rate: f64,
-    /// Runtime metrics for context assembly and token usage.
-    pub metrics: AppMetrics,
+    /// Per-API-key limiter for expensive inference routes.
+    pub rate_limiter: crate::rate_limit::RateLimiter,
+    /// Prometheus scrape handle.
+    pub prometheus: metrics_exporter_prometheus::PrometheusHandle,
+    /// JSON compatibility snapshot for legacy metrics callers.
+    pub metrics: crate::telemetry::MetricsRegistry,
 }
 
 // ── Request types ──────────────────────────────────────────────

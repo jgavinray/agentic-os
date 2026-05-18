@@ -27,9 +27,12 @@ impl Embedder {
         let session = Arc::clone(&self.session);
         let tokenizer = Arc::clone(&self.tokenizer);
         let text = text.to_string();
-        tokio::task::spawn_blocking(move || embed_sync(session, &tokenizer, &text))
+        let started = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || embed_sync(session, &tokenizer, &text))
             .await
-            .map_err(|e| anyhow::anyhow!("embed task panicked: {e}"))?
+            .map_err(|e| anyhow::anyhow!("embed task panicked: {e}"))?;
+        crate::telemetry::record_embedder_inference(started.elapsed(), result.is_ok());
+        result
     }
 }
 
@@ -39,7 +42,11 @@ fn embed_sync(session: Arc<Mutex<Session>>, tokenizer: &Tokenizer, text: &str) -
         .map_err(|e| anyhow::anyhow!("tokenize failed: {e}"))?;
 
     let len = encoding.get_ids().len().min(MAX_LEN);
-    let ids: Vec<i64> = encoding.get_ids()[..len].iter().map(|&x| x as i64).collect();
+    crate::telemetry::record_embedder_input_tokens(len);
+    let ids: Vec<i64> = encoding.get_ids()[..len]
+        .iter()
+        .map(|&x| x as i64)
+        .collect();
     let mask: Vec<i64> = encoding.get_attention_mask()[..len]
         .iter()
         .map(|&x| x as i64)
@@ -48,7 +55,9 @@ fn embed_sync(session: Arc<Mutex<Session>>, tokenizer: &Tokenizer, text: &str) -
     let input_ids_t = Tensor::<i64>::from_array(([1usize, len], ids))?;
     let attn_mask_t = Tensor::<i64>::from_array(([1usize, len], mask.clone()))?;
 
-    let mut session = session.lock().map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
+    let mut session = session
+        .lock()
+        .map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
     let outputs = session.run(inputs![
         "input_ids" => input_ids_t,
         "attention_mask" => attn_mask_t,
@@ -118,7 +127,10 @@ mod tests {
         let mask = vec![1i64, 1];
         let result = mean_pool_and_normalize(2, 2, &flat, &mask);
         assert_eq!(result.len(), 2);
-        assert!(approx_eq(result[0], result[1]), "dims should be equal after symmetric pool");
+        assert!(
+            approx_eq(result[0], result[1]),
+            "dims should be equal after symmetric pool"
+        );
         assert!(approx_eq(l2_norm(&result), 1.0));
     }
 

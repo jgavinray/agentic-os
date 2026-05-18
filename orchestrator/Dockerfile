@@ -3,6 +3,7 @@ FROM rust:latest AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
 RUN cargo build --release && \
     mkdir -p /app/libs && \
     find /app/target/release -maxdepth 1 -name 'libonnxruntime*' -exec cp {} /app/libs/ \;

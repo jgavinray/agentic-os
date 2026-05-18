@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:16
+    # Pinned from postgres:16 on 2026-05-18.
+    image: postgres@sha256:b6ccf02e9b47eac0d67b5eaa0ef56fd59163bffa5506f64e96ceb5053130ec86
     container_name: agent-postgres
     restart: unless-stopped
     environment:
@@ -19,7 +20,8 @@ services:
       start_period: 5s
 
   qdrant:
-    image: qdrant/qdrant
+    # Pinned from qdrant/qdrant:latest on 2026-05-18.
+    image: qdrant/qdrant@sha256:b3063c673f3973877c038eeecc392bad5011f072ee7892b56c9a8e204a3bdea9
     container_name: agent-qdrant
     restart: unless-stopped
     volumes:
@@ -36,7 +38,8 @@ services:
 
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable
+    # Pinned from docker.litellm.ai/berriai/litellm:main-stable on 2026-05-18.
+    image: docker.litellm.ai/berriai/litellm@sha256:2e8517e2bed423c50ab7e40fb1ac0a9cbe62a764e9d65161d871fb6a9bf75a2d
     container_name: agent-litellm
     restart: unless-stopped
     depends_on:
@@ -82,6 +85,10 @@ services:
       DEFAULT_TASK: engineering
       CONTEXT_CACHE_TTL_MS: "${CONTEXT_CACHE_TTL_MS:-300000}"
       CONTEXT_DECAY_RATE: "${CONTEXT_DECAY_RATE:-0.006}"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
+      RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-30}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
 
       EMBED_MODEL_PATH: /data/models/embed
       SENTIMENT_MODEL_PATH: /data/models/sentiment

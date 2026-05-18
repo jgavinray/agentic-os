@@ -127,6 +127,20 @@ CONTENT=$(echo "$CHAT" | jq -r '.choices[0].message.content // empty')
   && pass "chat ($CONTENT)" \
   || fail "chat — got: $CHAT"
 
+echo "13. POST /v1/chat/completions stream"
+STREAM=$(curl -s -N -X POST "$ORCH/v1/chat/completions" \
+  "${auth[@]}" "${json[@]}" \
+  -d "{\"model\":\"$MODEL\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"reply exactly: ok\"}]}")
+echo "$STREAM" | grep -q '^data:' \
+  && pass "chat stream" \
+  || fail "chat stream — got: $STREAM"
+
+echo "14. GET /metrics"
+METRICS=$(curl -s "${auth[@]}" "$ORCH/metrics")
+echo "$METRICS" | grep -q '^# HELP http_requests_total' \
+  && pass "metrics" \
+  || fail "metrics — prometheus HELP missing"
+
 # ── Results ─────────────────────────────────────────────────────
 
 echo ""
