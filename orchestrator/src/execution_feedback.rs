@@ -1,3 +1,10 @@
+//! Deterministic execution feedback capture.
+//!
+//! This module deliberately avoids LLM calls. It turns observed tool output and
+//! explicit validation reports into structured `agent_events` payloads using
+//! regexes, fixed rule ordering, and small parser helpers. The resulting events
+//! can then flow through the existing Postgres, Qdrant, FTS, and metrics paths.
+
 use crate::db::AgentEvent;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -8,6 +15,8 @@ use uuid::Uuid;
 
 pub const FINGERPRINT_VERSION: u32 = 1;
 
+// Keep the public event vocabulary centralized so storage, metrics, docs, and
+// tests do not drift into subtly different names for the same artifact.
 pub const EVENT_TYPE_TOOL_RESULT: &str = "tool_result";
 pub const EVENT_TYPE_COMPILE_RESULT: &str = "compile_result";
 pub const EVENT_TYPE_TEST_RESULT: &str = "test_result";
@@ -80,6 +89,8 @@ pub struct ExecutionEventContext {
 }
 
 impl ExecutionEventContext {
+    /// Reuse the same correlation ID while advancing the parent pointer.
+    /// This is the chain model: the patch is reconstructed from linked events.
     pub fn child_of(&self, parent_event_id: Uuid) -> Self {
         Self {
             parent_event_id: Some(parent_event_id),
@@ -103,6 +114,8 @@ struct FingerprintRule {
     apply: fn(&str) -> Option<String>,
 }
 
+// Regex compilation is cached because this code runs on request-adjacent paths.
+// The rules are deterministic, so the first successful match wins every time.
 fn regex_cell(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("fingerprint regex must compile"))
 }
@@ -153,6 +166,9 @@ fn generic_non_zero_exit(text: &str) -> Option<String> {
 }
 
 fn fingerprint_rules() -> Vec<FingerprintRule> {
+    // Specific language errors come before the generic non-zero exit fallback.
+    // Adding a new failure class should only require appending or reordering a
+    // rule here, plus tests for the expected canonical signature.
     vec![
         FingerprintRule {
             name: "rust_borrow_checker",
@@ -212,6 +228,10 @@ pub fn fingerprint(raw_error_text: &str) -> FailureFingerprint {
 
 pub fn extract_failure_signatures(text: &str) -> Vec<String> {
     let mut signatures = BTreeSet::new();
+
+    // First treat the incoming text as raw error output. This lets a task like
+    // "fix error[E0308]" retrieve prior remediations even if the user never
+    // mentions the canonical signature string.
     let fp = fingerprint(text);
     if fp.signature != "unknown" {
         signatures.insert(fp.signature);
@@ -222,6 +242,7 @@ pub fn extract_failure_signatures(text: &str) -> Vec<String> {
         &SIG_RE,
         r"\b(?:rust|python|typescript|json|process|unknown):[A-Za-z0-9:_-]+\b|\bunknown\b",
     );
+    // Also accept already-canonical signatures in prompts or context snippets.
     for caps in sig_re.captures_iter(text) {
         if let Some(sig) = caps.get(0) {
             signatures.insert(sig.as_str().trim_matches('.').to_string());
@@ -256,6 +277,8 @@ pub struct ValidatorSpec {
 }
 
 pub fn classify_validator(tool_name: &str, content: &str) -> Option<ValidatorSpec> {
+    // Validator names are intentionally bounded for metrics cardinality. Match
+    // by substring because tool names often arrive as full shell commands.
     let name = tool_name.to_ascii_lowercase();
     let body = content.to_ascii_lowercase();
     if name.contains("pytest") {
@@ -392,6 +415,9 @@ pub fn tool_results_from_value(value: &Value) -> Vec<CapturedToolResult> {
 fn collect_tool_results(value: &Value, out: &mut Vec<CapturedToolResult>) {
     match value {
         Value::Object(map) => {
+            // OpenAI-style tool responses are usually `role=tool`; Anthropic
+            // content blocks usually use `type=tool_result`. Recursing below
+            // lets us handle either shape nested inside provider envelopes.
             let role_tool = map.get("role").and_then(Value::as_str) == Some("tool");
             let typed_tool_result = map.get("type").and_then(Value::as_str) == Some("tool_result");
             if role_tool || typed_tool_result {
@@ -409,6 +435,9 @@ fn collect_tool_results(value: &Value, out: &mut Vec<CapturedToolResult>) {
                     .map(|v| v as i32)
                     .or_else(|| exit_code_from_text(&content))
                     .unwrap_or_else(|| {
+                        // Some clients do not report exit_code. Keep a weak,
+                        // deterministic fallback so obvious tool errors are not
+                        // silently recorded as successful.
                         if content.to_ascii_lowercase().contains("error") {
                             1
                         } else {
@@ -502,6 +531,9 @@ pub fn build_execution_event(
 ) -> AgentEvent {
     let event_id = Uuid::new_v4();
     let event_type = kind.as_str();
+    // The structured envelope is duplicated into metadata while the chain IDs
+    // are also real columns. That keeps old retrieval/indexing behavior intact
+    // and gives SQL exact-match queries fast access to chain fields.
     let mut metadata = json!({
         "event_type": event_type,
         "success": success,
@@ -532,6 +564,8 @@ pub fn build_execution_event(
 }
 
 fn event_summary(event_type: &str, success: bool, payload: &Value) -> String {
+    // Summaries stay compact because they are indexed for retrieval and shown
+    // in context packs; full structured details live in metadata.payload.
     match event_type {
         EVENT_TYPE_TOOL_RESULT => format!(
             "{} tool `{}` exit_code={}",
@@ -614,6 +648,8 @@ pub fn compile_result_payload(
 }
 
 pub fn test_result_payload(framework: &str, content: &str) -> Value {
+    // Test runners report counts in many formats. These counters are best-effort
+    // summaries, not a replacement for the raw excerpt kept in related events.
     let passed = first_number_before("passed", content).unwrap_or(0);
     let failed = first_number_before("failed", content).unwrap_or(0);
     let skipped = first_number_before("skipped", content)
@@ -717,6 +753,8 @@ pub fn events_for_tool_result(
     let mut events = vec![tool_event.clone()];
 
     if let Some(spec) = classify_validator(&result.tool_name, &result.content) {
+        // A validator tool produces two linked memories: the observed tool run
+        // and the normalized compile/test/lint/validation result derived from it.
         let validation_ctx = ctx.child_of(Uuid::parse_str(&tool_event.id).unwrap());
         let (kind, payload, success) = match spec.kind {
             ValidationKind::Compile => {
@@ -762,6 +800,8 @@ pub fn events_for_tool_result(
         let validation_id = Uuid::parse_str(&validation_event.id).unwrap();
         events.push(validation_event);
         if !success {
+            // Failed deterministic validators also get a canonical signature so
+            // future context packs can retrieve exact prior remediations.
             let fp = fingerprint(&result.content);
             let failure_event = build_execution_event(
                 &ctx.child_of(validation_id),
@@ -807,6 +847,8 @@ pub fn events_for_validation_report(
     let content = report.content.as_deref().unwrap_or("");
     if let Some(event_type) = report.event_type.as_deref() {
         if let Some(kind) = ExecutionEventKind::from_str(event_type) {
+            // Advanced clients can submit an already-normalized artifact event.
+            // We still wrap it with the standard event envelope for consistency.
             let payload = report
                 .payload
                 .clone()
@@ -856,6 +898,8 @@ pub fn events_for_validation_report(
         })
         .or_else(|| classify_validator(&report.validator_name, content));
 
+    // If the validator maps to a known tool, reuse the stream parser path so
+    // Path A and Path B produce equivalent event chains.
     let mut events = if spec.is_some() {
         events_for_tool_result(ctx, &tool_result)
     } else {
@@ -878,6 +922,8 @@ pub fn events_for_validation_report(
     };
 
     if let Some(success) = report.success {
+        // Explicit reports are allowed to override parser-derived success when
+        // the client has stronger knowledge than our generic text parser.
         for event in &mut events {
             if event.event_type != EVENT_TYPE_FAILURE_SIGNATURE {
                 event.metadata["success"] = json!(success);

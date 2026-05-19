@@ -545,6 +545,8 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
         return;
     }
 
+    // Only persisted execution events reach here. Keep labels bounded to the
+    // canonical event taxonomy and validator/signature normalizers.
     let success = event
         .metadata
         .get("success")
@@ -569,6 +571,9 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
                 "category" => crate::execution_feedback::bounded_failure_category_label(category)
             )
             .increment(1);
+            // This is a coarse process-local gauge for outstanding failure
+            // chains. It is intentionally bounded by event writes/remediations,
+            // not by task names, to avoid user-controlled labels.
             gauge!("task_retries").increment(1.0);
         }
         crate::execution_feedback::EVENT_TYPE_PATCH_RESULT => {
@@ -584,6 +589,8 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
         | crate::execution_feedback::EVENT_TYPE_LINT_RESULT
         | crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT => {
             let payload = &event.metadata["payload"];
+            // Different artifact types name the validator differently. Collapse
+            // them into the bounded validator label set before recording.
             let validator = payload["validator_name"]
                 .as_str()
                 .or_else(|| payload["framework"].as_str())

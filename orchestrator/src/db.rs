@@ -320,6 +320,8 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     result
 }
 
+/// Store an execution artifact through the same event log and best-effort
+/// vector indexing path used by ordinary memory events.
 pub async fn append_execution_event(
     pool: &Pool,
     embedder: &crate::embedder::Embedder,
@@ -346,6 +348,8 @@ pub async fn insert_execution_artifact_event(
     event: &AgentEvent,
 ) -> Result<String, anyhow::Error> {
     insert_event(pool, event).await?;
+    // Metrics are updated only after the DB write succeeds so counters describe
+    // persisted outcome memory, not attempted capture.
     crate::telemetry::record_execution_artifact(event);
     Ok(event.id.clone())
 }
@@ -819,6 +823,8 @@ pub async fn get_event_chain_by_event_id(
     let result = async {
         let seed = get_event_by_id(pool, event_id).await?;
         let Some(correlation_id) = seed.correlation_id else {
+            // Historical rows and non-chain events remain valid. With no chain
+            // ID there is nothing to reconstruct, so return the seed by itself.
             return Ok(vec![seed]);
         };
         let conn = pool.get().await?;
@@ -863,6 +869,8 @@ pub fn order_event_chain(events: Vec<AgentEvent>, seed_id: &str) -> Vec<AgentEve
         return events;
     };
 
+    // Walk parent pointers upward to find the root visible in this correlation
+    // group. The guard prevents malformed cycles from trapping reconstruction.
     let mut root = seed.clone();
     let mut guard = std::collections::HashSet::new();
     while let Some(parent_id) = root.parent_event_id {
@@ -878,6 +886,8 @@ pub fn order_event_chain(events: Vec<AgentEvent>, seed_id: &str) -> Vec<AgentEve
 
     let grouped = crate::execution_feedback::group_by_parent(&events);
     let mut ordered = Vec::new();
+    // Then emit a stable depth-first tree so callers see request -> response ->
+    // tools -> validation -> patch/remediation in human-readable order.
     append_chain_tree(&root, &grouped, &mut ordered);
     ordered
 }
@@ -929,6 +939,8 @@ pub async fn get_failure_history_for_signatures(
         for failure in failures {
             let signature = event_payload_str(&failure, "signature").unwrap_or("unknown");
             let category = event_payload_str(&failure, "category").unwrap_or("unknown");
+            // The lookup is exact on canonical signature. Any semantic recall for
+            // execution events continues to use the existing hybrid pipeline.
             let remediation = remediation_for_failure(pool, &failure, signature).await?;
             items.push(FailureHistoryItem {
                 signature: signature.to_string(),
@@ -949,6 +961,8 @@ async fn remediation_for_failure(
     failure: &AgentEvent,
     signature: &str,
 ) -> Result<Option<AgentEvent>, anyhow::Error> {
+    // Prefer a remediation in the same correlation chain: that is the strongest
+    // signal that a specific failure was resolved by a specific action.
     let chain = get_event_chain_by_event_id(pool, &failure.id).await?;
     if let Some(remediation) = chain.into_iter().find(|event| {
         event.event_type == crate::execution_feedback::EVENT_TYPE_REMEDIATION
@@ -958,6 +972,8 @@ async fn remediation_for_failure(
         return Ok(Some(remediation));
     }
 
+    // Some clients may submit remediation events later without a parent pointer.
+    // Fall back to the latest same-repo remediation with the same signature.
     let conn = pool.get().await?;
     let row = conn
         .query_opt(
@@ -1335,6 +1351,8 @@ fn append_failure_history_section(
         if !seen.insert(key) {
             continue;
         }
+        // This section is deterministic outcome history, separate from the
+        // conversational "Failed Attempts and Remediations" memory above it.
         let mut line = format!(
             "- [failure_signature:{}] {}\n  Category: {}\n",
             item.signature, item.failure.summary, item.category
@@ -1354,6 +1372,9 @@ fn append_failure_history_section(
         }
         if let Some(remediation) = &item.remediation {
             line.push_str(&format!("  Remediation: {}\n", remediation.summary));
+            // The metrics layer increments remediation_reuse_total for surfaced
+            // remediations, which gives operators a signal that prior fixes are
+            // actually helping context assembly.
             reused_signatures.push(item.signature.clone());
         }
         if used + line.len() > budget {

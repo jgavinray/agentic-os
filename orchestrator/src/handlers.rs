@@ -533,6 +533,8 @@ async fn get_or_build_cached_context(
         policy.l0_recent_limit = policy.l0_recent_limit.min(task_config.max_events);
     }
     let failure_signatures = if state.execution_feedback_enabled {
+        // Failure History uses exact signature lookup. Fingerprint raw error
+        // text in the task first so "error[E0308]" can find "rust:type-mismatch".
         crate::execution_feedback::extract_failure_signatures(task)
     } else {
         vec![]
@@ -545,6 +547,8 @@ async fn get_or_build_cached_context(
         db::get_active_errors(&state.pool, repo, 5),
         async {
             if state.execution_feedback_enabled && !failure_signatures.is_empty() {
+                // This is the only new exact lookup path. Other artifact events
+                // continue through the existing semantic/FTS hybrid retrieval.
                 db::get_failure_history_for_signatures(
                     &state.pool,
                     repo,
@@ -924,6 +928,9 @@ async fn persist_exchange_with_correlation(
     assistant_content: &str,
     correlation_id: Option<uuid::Uuid>,
 ) -> Option<uuid::Uuid> {
+    // With execution feedback disabled, correlation_id is None and this writes
+    // the same ordinary conversation events as before the feedback layer. With
+    // it enabled, these user/assistant events become the root of the chain.
     let make_req = |event_type: &str,
                     actor: &str,
                     content: &str,
@@ -1014,6 +1021,8 @@ async fn persist_exchange_with_correlation(
 
     state.cache.invalidate(repo, "");
     telemetry::record_cache_invalidation(&state.metrics);
+    // Tool and validation events use the assistant message as parent when it is
+    // known. If persistence failed, correlation_id alone can still link events.
     assistant_event_id
 }
 
@@ -1030,6 +1039,8 @@ fn capture_tool_results_background(
         return;
     }
 
+    // This capture is deliberately best-effort and off the response path:
+    // telemetry write failures must never change what the user receives.
     tokio::spawn(async move {
         let ctx = crate::execution_feedback::ExecutionEventContext {
             session_id,
@@ -1040,6 +1051,8 @@ fn capture_tool_results_background(
             parent_event_id,
         };
         for result in tool_results {
+            // One observed tool result can fan out into tool_result, normalized
+            // validator result, and failure_signature events.
             for event in crate::execution_feedback::events_for_tool_result(&ctx, &result) {
                 if let Err(e) = db::append_execution_event(
                     &state.pool,
@@ -1171,6 +1184,8 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
+    // Generate the chain ID at user-message ingestion. With the feature flag
+    // off, keep this None so ordinary chat persistence is unchanged.
     let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
 
     tracing::info!(repo = %repo, task = %task, "routing request");
@@ -1233,6 +1248,8 @@ pub async fn chat_completions(
                 .chars()
                 .take(500)
                 .collect();
+            // Non-streaming responses may contain provider/tool envelopes. We
+            // inspect them after normal exchange persistence has an event parent.
             let tool_results = crate::execution_feedback::tool_results_from_value(&val);
 
             match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
@@ -1377,6 +1394,8 @@ async fn handle_streaming(
                 }
             }
             let assistant_content = extract_assistant_from_sse(&raw);
+            // Stream capture reuses the accumulated bytes already needed for
+            // token accounting, so no extra read is introduced.
             let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
@@ -1451,6 +1470,8 @@ pub async fn messages(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
+    // Anthropic messages use the same optional event-chain model as OpenAI
+    // completions so downstream trajectory tooling can handle both endpoints.
     let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
 
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
@@ -1554,6 +1575,8 @@ pub async fn messages(
     }
 
     let assistant_content = extract_assistant_from_anthropic_response(&val);
+    // LiteLLM may surface Anthropic tool results inside the response content.
+    // Feed them through the same deterministic parser used for OpenAI results.
     let tool_results = crate::execution_feedback::tool_results_from_value(&val);
     match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
         Ok(sid) => {
@@ -1693,6 +1716,8 @@ async fn handle_streaming_anthropic(
                 }
             }
             let assistant_content = extract_assistant_from_anthropic_sse(&raw);
+            // Anthropic streaming tool_result blocks are parsed from the final
+            // accumulated SSE transcript after the upstream stream completes.
             let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
