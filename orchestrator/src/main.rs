@@ -1,29 +1,18 @@
-mod anthropic;
-mod db;
-mod embedder;
-mod execution_feedback;
-mod handlers;
-mod hybrid;
-mod logging;
-mod migrations;
-mod qdrant;
-mod rate_limit;
-mod sentiment;
-mod state;
-mod summarizer;
-mod telemetry;
-
 use axum::http::HeaderValue;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
+use orchestrator::{
+    db, embedder, handlers, logging, migrations, qdrant, rate_limit, sentiment, state, summarizer,
+    telemetry,
+};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::state::AppState;
+use orchestrator::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -84,6 +73,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let pool = db::create_pool(&db_url)?;
     let single_writer = db::acquire_single_writer_lock(&pool).await?;
     migrations::run(&pool).await?;
+    if execution_feedback_enabled {
+        db::warn_if_legacy_signature_backfill_pending(&pool).await?;
+    }
     qdrant::init(&qdrant_url).await?;
 
     let embedder = Arc::new(
@@ -146,7 +138,7 @@ async fn main() -> Result<(), anyhow::Error> {
         metrics,
     });
 
-    tokio::spawn(crate::summarizer::run(Arc::clone(&state)));
+    tokio::spawn(summarizer::run(Arc::clone(&state)));
 
     // ADD-5: TraceLayer emits structured per-request logs (method, path, status, latency).
     let cors = cors_layer_from_env()?;

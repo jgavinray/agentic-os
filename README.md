@@ -25,7 +25,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and recurring failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -72,6 +72,7 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 
 - Exactly one orchestrator process may own a Postgres database.
 - Schema migrations are embedded in `orchestrator/migrations/`.
+- Signature backfill runs with `orchestrator-maint backfill-signatures`.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 

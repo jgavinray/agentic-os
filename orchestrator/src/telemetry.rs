@@ -276,6 +276,10 @@ fn describe_metrics() {
         "remediation_reuse_total",
         "Prior remediations surfaced in context packs."
     );
+    describe_counter!(
+        "task_retries_total",
+        "Historical retry behavior by task type, outcome, and trigger category."
+    );
     describe_gauge!(
         "task_retries",
         "Currently active retry chains across tasks."
@@ -440,6 +444,26 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         }
     }
     gauge!("task_retries").set(0.0);
+    for task_type in ["coding", "infra", "recall", "general"] {
+        for outcome in ["succeeded", "abandoned", "still_active"] {
+            for trigger_category in [
+                "borrow_checker",
+                "import_error",
+                "type_error",
+                "parse_error",
+                "unknown",
+                "none",
+            ] {
+                counter!(
+                    "task_retries_total",
+                    "task_type" => task_type,
+                    "outcome" => outcome,
+                    "trigger_category" => trigger_category
+                )
+                .increment(0);
+            }
+        }
+    }
     gauge!("memory_source_coverage").set(registry.snapshot().memory_source_coverage);
 }
 
@@ -560,22 +584,39 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
     )
     .increment(1);
 
-    match event.event_type.as_str() {
-        crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE => {
-            let payload = &event.metadata["payload"];
-            let signature = payload["signature"].as_str().unwrap_or("unknown");
-            let category = payload["category"].as_str().unwrap_or("unknown");
+    let payload = &event.metadata["payload"];
+    if !success && crate::execution_feedback::is_failure_outcome_event_type(&event.event_type) {
+        let signature = payload["signature"].as_str().unwrap_or("unknown");
+        let category = crate::execution_feedback::retry_trigger_category_from_payload(payload);
+        counter!(
+            "failure_signatures_total",
+            "signature" => crate::execution_feedback::bounded_failure_signature_label(signature),
+            "category" => category
+        )
+        .increment(1);
+
+        if event.event_type != crate::execution_feedback::EVENT_TYPE_TOOL_RESULT {
+            let task = event
+                .metadata
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let task_type = crate::execution_feedback::task_retry_type(task);
+            // This is a coarse process-local gauge for outstanding failure
+            // chains. It is intentionally bounded by normalized outcome writes
+            // and remediations, not by task names, to avoid user-controlled labels.
+            gauge!("task_retries").increment(1.0);
             counter!(
-                "failure_signatures_total",
-                "signature" => crate::execution_feedback::bounded_failure_signature_label(signature),
-                "category" => crate::execution_feedback::bounded_failure_category_label(category)
+                "task_retries_total",
+                "task_type" => task_type,
+                "outcome" => "still_active",
+                "trigger_category" => category
             )
             .increment(1);
-            // This is a coarse process-local gauge for outstanding failure
-            // chains. It is intentionally bounded by event writes/remediations,
-            // not by task names, to avoid user-controlled labels.
-            gauge!("task_retries").increment(1.0);
         }
+    }
+
+    match event.event_type.as_str() {
         crate::execution_feedback::EVENT_TYPE_PATCH_RESULT => {
             let outcome = match event.metadata["payload"]["outcome"].as_str() {
                 Some("applied") => "applied",
@@ -588,7 +629,6 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
         | crate::execution_feedback::EVENT_TYPE_TEST_RESULT
         | crate::execution_feedback::EVENT_TYPE_LINT_RESULT
         | crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT => {
-            let payload = &event.metadata["payload"];
             // Different artifact types name the validator differently. Collapse
             // them into the bounded validator label set before recording.
             let validator = payload["validator_name"]
@@ -606,7 +646,20 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
             .increment(1);
         }
         crate::execution_feedback::EVENT_TYPE_REMEDIATION => {
+            let task = event
+                .metadata
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let signature = payload["signature"].as_str();
             gauge!("task_retries").decrement(1.0);
+            counter!(
+                "task_retries_total",
+                "task_type" => crate::execution_feedback::task_retry_type(task),
+                "outcome" => "succeeded",
+                "trigger_category" => crate::execution_feedback::retry_trigger_category_from_signature(signature)
+            )
+            .increment(1);
         }
         _ => {}
     }

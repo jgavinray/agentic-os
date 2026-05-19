@@ -24,9 +24,8 @@ pub const EVENT_TYPE_LINT_RESULT: &str = "lint_result";
 pub const EVENT_TYPE_VALIDATION_RESULT: &str = "validation_result";
 pub const EVENT_TYPE_PATCH_RESULT: &str = "patch_result";
 pub const EVENT_TYPE_REMEDIATION: &str = "remediation";
-pub const EVENT_TYPE_FAILURE_SIGNATURE: &str = "failure_signature";
 
-pub const EXECUTION_EVENT_TYPES: [&str; 8] = [
+pub const EXECUTION_EVENT_TYPES: [&str; 7] = [
     EVENT_TYPE_TOOL_RESULT,
     EVENT_TYPE_COMPILE_RESULT,
     EVENT_TYPE_TEST_RESULT,
@@ -34,7 +33,14 @@ pub const EXECUTION_EVENT_TYPES: [&str; 8] = [
     EVENT_TYPE_VALIDATION_RESULT,
     EVENT_TYPE_PATCH_RESULT,
     EVENT_TYPE_REMEDIATION,
-    EVENT_TYPE_FAILURE_SIGNATURE,
+];
+
+pub const FAILURE_OUTCOME_EVENT_TYPES: [&str; 5] = [
+    EVENT_TYPE_TOOL_RESULT,
+    EVENT_TYPE_COMPILE_RESULT,
+    EVENT_TYPE_TEST_RESULT,
+    EVENT_TYPE_LINT_RESULT,
+    EVENT_TYPE_VALIDATION_RESULT,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +52,6 @@ pub enum ExecutionEventKind {
     ValidationResult,
     PatchResult,
     Remediation,
-    FailureSignature,
 }
 
 impl ExecutionEventKind {
@@ -59,7 +64,6 @@ impl ExecutionEventKind {
             Self::ValidationResult => EVENT_TYPE_VALIDATION_RESULT,
             Self::PatchResult => EVENT_TYPE_PATCH_RESULT,
             Self::Remediation => EVENT_TYPE_REMEDIATION,
-            Self::FailureSignature => EVENT_TYPE_FAILURE_SIGNATURE,
         }
     }
 
@@ -72,7 +76,6 @@ impl ExecutionEventKind {
             EVENT_TYPE_VALIDATION_RESULT => Self::ValidationResult,
             EVENT_TYPE_PATCH_RESULT => Self::PatchResult,
             EVENT_TYPE_REMEDIATION => Self::Remediation,
-            EVENT_TYPE_FAILURE_SIGNATURE => Self::FailureSignature,
             _ => return None,
         })
     }
@@ -224,6 +227,120 @@ pub fn fingerprint(raw_error_text: &str) -> FailureFingerprint {
         raw_excerpt,
         version: FINGERPRINT_VERSION,
     }
+}
+
+pub fn signature_category(fp: &FailureFingerprint) -> &'static str {
+    match fp.rule.as_str() {
+        "rust_borrow_checker" => "borrow_checker",
+        "python_import_error" => "import_error",
+        "rust_type_mismatch" | "typescript_type_error" => "type_error",
+        "json_parse_error" => "parse_error",
+        "generic_non_zero_exit" | "unknown" => "unknown",
+        _ => "unknown",
+    }
+}
+
+pub fn signature_category_from_signature(signature: &str) -> &'static str {
+    if signature == "unknown" {
+        return "unknown";
+    }
+    if signature == "rust:borrow-checker" {
+        return "borrow_checker";
+    }
+    if signature == "rust:type-mismatch" || signature.starts_with("typescript:TS") {
+        return "type_error";
+    }
+    if signature == "python:import-error" {
+        return "import_error";
+    }
+    if signature == "json:parse-error" {
+        return "parse_error";
+    }
+    "unknown"
+}
+
+pub fn is_failure_outcome_event_type(event_type: &str) -> bool {
+    FAILURE_OUTCOME_EVENT_TYPES.contains(&event_type)
+}
+
+fn inline_signature_payload_from_fingerprint(
+    mut payload: Value,
+    success: bool,
+    fingerprint: Option<&FailureFingerprint>,
+) -> Value {
+    let Some(obj) = payload.as_object_mut() else {
+        return payload;
+    };
+
+    if success {
+        obj.insert("signature".to_string(), Value::Null);
+        obj.insert("signature_category".to_string(), Value::Null);
+        obj.insert("fingerprint_version".to_string(), Value::Null);
+        return payload;
+    }
+
+    let fp = fingerprint.expect("failed outcome payloads require a fingerprint");
+    obj.insert("signature".to_string(), json!(fp.signature));
+    obj.insert(
+        "signature_category".to_string(),
+        json!(signature_category(fp)),
+    );
+    obj.insert("fingerprint_version".to_string(), json!(fp.version));
+    payload
+}
+
+pub fn inline_signature_payload(payload: Value, success: bool, raw_error_text: &str) -> Value {
+    if success {
+        return inline_signature_payload_from_fingerprint(payload, true, None);
+    }
+
+    let fp = fingerprint(raw_error_text);
+    inline_signature_payload_from_fingerprint(payload, false, Some(&fp))
+}
+
+pub fn outcome_raw_text_from_payload(
+    payload: &Value,
+    fallback_raw_excerpt: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(raw) = fallback_raw_excerpt.filter(|raw| !raw.trim().is_empty()) {
+        parts.push(raw.to_string());
+    }
+    if let Some(reason) = payload.get("failure_reason").and_then(Value::as_str) {
+        parts.push(reason.to_string());
+    }
+    if let Some(stderr) = payload.get("stderr_summary").and_then(Value::as_str) {
+        parts.push(stderr.to_string());
+    }
+    if let Some(stdout) = payload.get("stdout_summary").and_then(Value::as_str) {
+        parts.push(stdout.to_string());
+    }
+    for key in ["failure_summaries", "findings"] {
+        if let Some(values) = payload.get(key).and_then(Value::as_array) {
+            for value in values {
+                if let Some(text) = value.as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    if parts.iter().any(|part| !part.trim().is_empty()) {
+        parts.join("\n")
+    } else {
+        payload.to_string()
+    }
+}
+
+pub fn backfill_inline_signature_metadata(
+    metadata: &Value,
+    fallback_raw_excerpt: Option<&str>,
+) -> Option<Value> {
+    let payload = metadata.get("payload")?;
+    let raw = outcome_raw_text_from_payload(payload, fallback_raw_excerpt);
+    let mut updated = metadata.clone();
+    updated["payload"] = inline_signature_payload(payload.clone(), false, &raw);
+    Some(updated)
 }
 
 pub fn extract_failure_signatures(text: &str) -> Vec<String> {
@@ -527,14 +644,23 @@ pub fn build_execution_event(
     ctx: &ExecutionEventContext,
     kind: ExecutionEventKind,
     success: bool,
-    payload: Value,
+    mut payload: Value,
 ) -> AgentEvent {
     let event_id = Uuid::new_v4();
     let event_type = kind.as_str();
+    if is_failure_outcome_event_type(event_type) {
+        let has_signature_shape = ["signature", "signature_category", "fingerprint_version"]
+            .iter()
+            .all(|key| payload.get(*key).is_some());
+        if !has_signature_shape {
+            let raw = outcome_raw_text_from_payload(&payload, None);
+            payload = inline_signature_payload(payload, success, &raw);
+        }
+    }
     // The structured envelope is duplicated into metadata while the chain IDs
     // are also real columns. That keeps old retrieval/indexing behavior intact
     // and gives SQL exact-match queries fast access to chain fields.
-    let mut metadata = json!({
+    let metadata = json!({
         "event_type": event_type,
         "success": success,
         "correlation_id": ctx.correlation_id,
@@ -543,9 +669,6 @@ pub fn build_execution_event(
         "task": ctx.task,
         "payload": payload,
     });
-    if kind == ExecutionEventKind::FailureSignature {
-        metadata["fingerprint_version"] = json!(FINGERPRINT_VERSION);
-    }
 
     AgentEvent {
         id: event_id.to_string(),
@@ -613,23 +736,32 @@ fn event_summary(event_type: &str, success: bool, payload: &Value) -> String {
             "remediation for {}",
             payload["signature"].as_str().unwrap_or("unknown")
         ),
-        EVENT_TYPE_FAILURE_SIGNATURE => format!(
-            "failure signature {} ({})",
-            payload["signature"].as_str().unwrap_or("unknown"),
-            payload["category"].as_str().unwrap_or("unknown")
-        ),
         _ => format!("{event_type} success={success}"),
     }
 }
 
 pub fn tool_result_payload(result: &CapturedToolResult) -> Value {
-    json!({
+    let success = infer_success(result.exit_code, &result.content);
+    let fp = (!success).then(|| fingerprint(&result.content));
+    tool_result_payload_with_fingerprint(result, success, fp.as_ref())
+}
+
+fn tool_result_payload_with_fingerprint(
+    result: &CapturedToolResult,
+    success: bool,
+    fp: Option<&FailureFingerprint>,
+) -> Value {
+    inline_signature_payload_from_fingerprint(
+        json!({
         "tool_name": result.tool_name,
         "exit_code": result.exit_code,
         "stdout_summary": result.stdout_summary,
         "stderr_summary": result.stderr_summary,
         "duration_ms": result.duration_ms,
-    })
+        }),
+        success,
+        fp,
+    )
 }
 
 pub fn compile_result_payload(
@@ -638,13 +770,41 @@ pub fn compile_result_payload(
     exit_code: i32,
     content: &str,
 ) -> Value {
-    json!({
+    let error_count = compile_error_count(content);
+    let warning_count = warning_count(content);
+    let success = exit_code == 0 && error_count == 0;
+    let fp = (!success).then(|| fingerprint(content));
+    compile_result_payload_with_fingerprint(
+        language,
+        target,
+        exit_code,
+        error_count,
+        warning_count,
+        success,
+        fp.as_ref(),
+    )
+}
+
+fn compile_result_payload_with_fingerprint(
+    language: &str,
+    target: &str,
+    exit_code: i32,
+    error_count: usize,
+    warning_count: usize,
+    success: bool,
+    fp: Option<&FailureFingerprint>,
+) -> Value {
+    inline_signature_payload_from_fingerprint(
+        json!({
         "language": language,
         "target": target,
         "exit_code": exit_code,
-        "error_count": compile_error_count(content),
-        "warning_count": warning_count(content),
-    })
+        "error_count": error_count,
+        "warning_count": warning_count,
+        }),
+        success,
+        fp,
+    )
 }
 
 pub fn test_result_payload(framework: &str, content: &str) -> Value {
@@ -656,14 +816,43 @@ pub fn test_result_payload(framework: &str, content: &str) -> Value {
         .or_else(|| first_number_before("ignored", content))
         .unwrap_or(0);
     let total = first_number_before("total", content).unwrap_or(passed + failed + skipped);
-    json!({
+    let success = failed == 0;
+    let fp = (!success).then(|| fingerprint(content));
+    test_result_payload_with_fingerprint(
+        framework,
+        total,
+        passed,
+        failed,
+        skipped,
+        success,
+        fp.as_ref(),
+        content,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_result_payload_with_fingerprint(
+    framework: &str,
+    total: u64,
+    passed: u64,
+    failed: u64,
+    skipped: u64,
+    success: bool,
+    fp: Option<&FailureFingerprint>,
+    content: &str,
+) -> Value {
+    inline_signature_payload_from_fingerprint(
+        json!({
         "framework": framework,
         "total": total,
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
         "failure_summaries": failure_summaries(content),
-    })
+        }),
+        success,
+        fp,
+    )
 }
 
 pub fn lint_result_payload(tool_name: &str, content: &str) -> Value {
@@ -673,20 +862,48 @@ pub fn lint_result_payload(tool_name: &str, content: &str) -> Value {
     let warning_count = first_number_before("warning", content)
         .or_else(|| first_number_before("warnings", content))
         .unwrap_or_else(|| warning_count(content) as u64);
-    json!({
+    let success = error_count == 0;
+    let fp = (!success).then(|| fingerprint(content));
+    lint_result_payload_with_fingerprint(
+        tool_name,
+        error_count,
+        warning_count,
+        success,
+        fp.as_ref(),
+        content,
+    )
+}
+
+fn lint_result_payload_with_fingerprint(
+    tool_name: &str,
+    error_count: u64,
+    warning_count: u64,
+    success: bool,
+    fp: Option<&FailureFingerprint>,
+    content: &str,
+) -> Value {
+    inline_signature_payload_from_fingerprint(
+        json!({
         "tool_name": tool_name,
         "error_count": error_count,
         "warning_count": warning_count,
         "findings": failure_summaries(content),
-    })
+        }),
+        success,
+        fp,
+    )
 }
 
 pub fn validation_result_payload(validator_name: &str, pass: bool, failure_reason: &str) -> Value {
-    json!({
+    inline_signature_payload(
+        json!({
         "validator_name": validator_name,
         "pass": pass,
         "failure_reason": failure_reason,
-    })
+        }),
+        pass,
+        failure_reason,
+    )
 }
 
 #[allow(dead_code)]
@@ -715,16 +932,6 @@ pub fn remediation_payload(
     })
 }
 
-pub fn failure_signature_payload(fp: &FailureFingerprint) -> Value {
-    json!({
-        "signature": fp.signature,
-        "category": fp.category,
-        "raw_excerpt": fp.raw_excerpt,
-        "rule": fp.rule,
-        "fingerprint_version": fp.version,
-    })
-}
-
 fn compile_error_count(content: &str) -> usize {
     static RE: OnceLock<Regex> = OnceLock::new();
     regex_cell(&RE, r"(?m)^\s*error(?:\[[A-Za-z0-9]+\])?:")
@@ -744,11 +951,12 @@ pub fn events_for_tool_result(
     result: &CapturedToolResult,
 ) -> Vec<AgentEvent> {
     let tool_success = infer_success(result.exit_code, &result.content);
+    let tool_fp = (!tool_success).then(|| fingerprint(&result.content));
     let tool_event = build_execution_event(
         ctx,
         ExecutionEventKind::ToolResult,
         tool_success,
-        tool_result_payload(result),
+        tool_result_payload_with_fingerprint(result, tool_success, tool_fp.as_ref()),
     );
     let mut events = vec![tool_event.clone()];
 
@@ -763,26 +971,57 @@ pub fn events_for_tool_result(
                 } else {
                     "rust"
                 };
-                let payload = compile_result_payload(
+                let error_count = compile_error_count(&result.content);
+                let warning_count = warning_count(&result.content);
+                let success = result.exit_code == 0 && error_count == 0;
+                let payload = compile_result_payload_with_fingerprint(
                     language,
                     spec.validator,
                     result.exit_code,
-                    &result.content,
+                    error_count,
+                    warning_count,
+                    success,
+                    tool_fp.as_ref(),
                 );
-                let success = result.exit_code == 0
-                    && payload["error_count"].as_u64().unwrap_or_default() == 0;
                 (ExecutionEventKind::CompileResult, payload, success)
             }
             ValidationKind::Test => {
-                let payload = test_result_payload(spec.validator, &result.content);
-                let success =
-                    result.exit_code == 0 && payload["failed"].as_u64().unwrap_or_default() == 0;
+                let passed = first_number_before("passed", &result.content).unwrap_or(0);
+                let failed = first_number_before("failed", &result.content).unwrap_or(0);
+                let skipped = first_number_before("skipped", &result.content)
+                    .or_else(|| first_number_before("ignored", &result.content))
+                    .unwrap_or(0);
+                let total = first_number_before("total", &result.content)
+                    .unwrap_or(passed + failed + skipped);
+                let success = result.exit_code == 0 && failed == 0;
+                let payload = test_result_payload_with_fingerprint(
+                    spec.validator,
+                    total,
+                    passed,
+                    failed,
+                    skipped,
+                    success,
+                    tool_fp.as_ref(),
+                    &result.content,
+                );
                 (ExecutionEventKind::TestResult, payload, success)
             }
             ValidationKind::Lint => {
-                let payload = lint_result_payload(spec.validator, &result.content);
-                let success = result.exit_code == 0
-                    && payload["error_count"].as_u64().unwrap_or_default() == 0;
+                let error_count = first_number_before("error", &result.content)
+                    .or_else(|| first_number_before("errors", &result.content))
+                    .unwrap_or_else(|| compile_error_count(&result.content) as u64);
+                let warning_count = first_number_before("warning", &result.content)
+                    .or_else(|| first_number_before("warnings", &result.content))
+                    .unwrap_or_else(|| warning_count(&result.content) as u64);
+                let success = result.exit_code == 0 && error_count == 0;
+                let payload = lint_result_payload_with_fingerprint(
+                    spec.validator,
+                    error_count,
+                    warning_count,
+                    success,
+                    tool_fp.as_ref(),
+                    &result.content,
+                );
                 (ExecutionEventKind::LintResult, payload, success)
             }
             ValidationKind::Validation => {
@@ -792,25 +1031,20 @@ pub fn events_for_tool_result(
                 } else {
                     summarize_text(&result.content, 500)
                 };
-                let payload = validation_result_payload(spec.validator, success, &failure_reason);
+                let payload = inline_signature_payload_from_fingerprint(
+                    json!({
+                        "validator_name": spec.validator,
+                        "pass": success,
+                        "failure_reason": failure_reason,
+                    }),
+                    success,
+                    tool_fp.as_ref(),
+                );
                 (ExecutionEventKind::ValidationResult, payload, success)
             }
         };
         let validation_event = build_execution_event(&validation_ctx, kind, success, payload);
-        let validation_id = Uuid::parse_str(&validation_event.id).unwrap();
         events.push(validation_event);
-        if !success {
-            // Failed deterministic validators also get a canonical signature so
-            // future context packs can retrieve exact prior remediations.
-            let fp = fingerprint(&result.content);
-            let failure_event = build_execution_event(
-                &ctx.child_of(validation_id),
-                ExecutionEventKind::FailureSignature,
-                false,
-                failure_signature_payload(&fp),
-            );
-            events.push(failure_event);
-        }
     }
 
     events
@@ -849,7 +1083,7 @@ pub fn events_for_validation_report(
         if let Some(kind) = ExecutionEventKind::from_str(event_type) {
             // Advanced clients can submit an already-normalized artifact event.
             // We still wrap it with the standard event envelope for consistency.
-            let payload = report
+            let mut payload = report
                 .payload
                 .clone()
                 .unwrap_or_else(|| validation_result_payload(&report.validator_name, true, ""));
@@ -859,6 +1093,9 @@ pub fn events_for_validation_report(
                     .and_then(Value::as_bool)
                     .unwrap_or(true)
             });
+            if is_failure_outcome_event_type(kind.as_str()) {
+                payload = inline_signature_payload(payload, success, content);
+            }
             return vec![build_execution_event(ctx, kind, success, payload)];
         }
     }
@@ -924,9 +1161,19 @@ pub fn events_for_validation_report(
     if let Some(success) = report.success {
         // Explicit reports are allowed to override parser-derived success when
         // the client has stronger knowledge than our generic text parser.
+        let override_fp = (!success).then(|| fingerprint(content));
         for event in &mut events {
-            if event.event_type != EVENT_TYPE_FAILURE_SIGNATURE {
-                event.metadata["success"] = json!(success);
+            event.metadata["success"] = json!(success);
+            if is_failure_outcome_event_type(&event.event_type) {
+                let payload = event.metadata["payload"].clone();
+                event.metadata["payload"] = inline_signature_payload_from_fingerprint(
+                    payload,
+                    success,
+                    override_fp.as_ref(),
+                );
+                event.summary =
+                    event_summary(&event.event_type, success, &event.metadata["payload"]);
+                event.evidence = Some(summarize_text(&event.metadata["payload"].to_string(), 1000));
             }
         }
     }
@@ -952,13 +1199,84 @@ pub fn bounded_failure_signature_label(signature: &str) -> String {
 
 pub fn bounded_failure_category_label(category: &str) -> &'static str {
     match category {
-        "rust" => "rust",
-        "python" => "python",
-        "typescript" => "typescript",
-        "json" => "json",
-        "process" => "process",
+        "borrow_checker" => "borrow_checker",
+        "import_error" => "import_error",
+        "type_error" => "type_error",
+        "parse_error" => "parse_error",
         "unknown" => "unknown",
+        "none" => "none",
         _ => "other",
+    }
+}
+
+pub fn retry_trigger_category_from_signature(signature: Option<&str>) -> &'static str {
+    signature
+        .map(signature_category_from_signature)
+        .unwrap_or("none")
+}
+
+pub fn retry_trigger_category_from_payload(payload: &Value) -> &'static str {
+    match payload.get("signature_category").and_then(Value::as_str) {
+        Some("borrow_checker") => "borrow_checker",
+        Some("import_error") => "import_error",
+        Some("type_error") => "type_error",
+        Some("parse_error") => "parse_error",
+        Some("unknown") => "unknown",
+        Some("none") => "none",
+        Some(_) => "unknown",
+        None => {
+            retry_trigger_category_from_signature(payload.get("signature").and_then(Value::as_str))
+        }
+    }
+}
+
+pub fn task_retry_type(task: &str) -> &'static str {
+    let task = task.to_ascii_lowercase();
+    const INFRA: &[&str] = &[
+        "deploy",
+        "docker",
+        "kubernetes",
+        "kubectl",
+        "terraform",
+        "infra",
+        "infrastructure",
+        "migration",
+        "postgres",
+        "database",
+        "ci",
+    ];
+    const RECALL: &[&str] = &[
+        "context",
+        "memory",
+        "retrieval",
+        "recall",
+        "summar",
+        "search",
+        "history",
+    ];
+    const CODING: &[&str] = &[
+        "code",
+        "compile",
+        "test",
+        "lint",
+        "rust",
+        "python",
+        "typescript",
+        "bug",
+        "fix",
+        "patch",
+        "refactor",
+        "implement",
+    ];
+
+    if INFRA.iter().any(|keyword| task.contains(keyword)) {
+        "infra"
+    } else if RECALL.iter().any(|keyword| task.contains(keyword)) {
+        "recall"
+    } else if CODING.iter().any(|keyword| task.contains(keyword)) {
+        "coding"
+    } else {
+        "general"
     }
 }
 
@@ -1011,9 +1329,9 @@ mod tests {
 
     #[test]
     fn event_types_are_defined_in_one_place() {
-        assert_eq!(EXECUTION_EVENT_TYPES.len(), 8);
+        assert_eq!(EXECUTION_EVENT_TYPES.len(), 7);
         assert!(EXECUTION_EVENT_TYPES.contains(&EVENT_TYPE_TOOL_RESULT));
-        assert!(EXECUTION_EVENT_TYPES.contains(&EVENT_TYPE_FAILURE_SIGNATURE));
+        assert!(!EXECUTION_EVENT_TYPES.contains(&"failure_signature"));
     }
 
     #[test]
@@ -1076,9 +1394,22 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == EVENT_TYPE_TEST_RESULT));
-        assert!(events
+        assert!(!events
             .iter()
-            .any(|event| event.event_type == EVENT_TYPE_FAILURE_SIGNATURE));
+            .any(|event| event.event_type == "failure_signature"));
+        let test_event = events
+            .iter()
+            .find(|event| event.event_type == EVENT_TYPE_TEST_RESULT)
+            .unwrap();
+        assert_eq!(test_event.metadata["payload"]["signature"], "unknown");
+        assert_eq!(
+            test_event.metadata["payload"]["signature_category"],
+            "unknown"
+        );
+        assert_eq!(
+            test_event.metadata["payload"]["fingerprint_version"],
+            FINGERPRINT_VERSION
+        );
     }
 
     #[test]
@@ -1093,7 +1424,30 @@ mod tests {
             assert_eq!(event.metadata["repo"], "repo");
             assert_eq!(event.metadata["task"], "task");
             assert!(event.metadata["payload"].is_object());
+            if is_failure_outcome_event_type(event_type) {
+                assert!(event.metadata["payload"]["signature"].is_null());
+                assert!(event.metadata["payload"]["signature_category"].is_null());
+                assert!(event.metadata["payload"]["fingerprint_version"].is_null());
+            }
         }
+    }
+
+    #[test]
+    fn failed_outcome_events_carry_inline_signatures() {
+        let payload =
+            compile_result_payload("rust", "cargo", 101, "error[E0308]: mismatched types");
+        let event =
+            build_execution_event(&ctx(), ExecutionEventKind::CompileResult, false, payload);
+
+        assert_eq!(event.metadata["payload"]["signature"], "rust:type-mismatch");
+        assert_eq!(
+            event.metadata["payload"]["signature_category"],
+            "type_error"
+        );
+        assert_eq!(
+            event.metadata["payload"]["fingerprint_version"],
+            FINGERPRINT_VERSION
+        );
     }
 
     #[test]
@@ -1141,11 +1495,6 @@ mod tests {
                 ExecutionEventKind::Remediation,
                 true,
                 remediation_payload(Uuid::new_v4(), Uuid::new_v4(), "rust:type-mismatch"),
-            ),
-            (
-                ExecutionEventKind::FailureSignature,
-                false,
-                failure_signature_payload(&fingerprint("error[E0382]: moved value")),
             ),
         ];
 
@@ -1217,9 +1566,14 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == EVENT_TYPE_TEST_RESULT));
-        assert!(events
+        assert!(!events
             .iter()
-            .any(|event| event.event_type == EVENT_TYPE_FAILURE_SIGNATURE));
+            .any(|event| event.event_type == "failure_signature"));
+        let test_event = events
+            .iter()
+            .find(|event| event.event_type == EVENT_TYPE_TEST_RESULT)
+            .unwrap();
+        assert_eq!(test_event.metadata["payload"]["signature"], "unknown");
     }
 
     #[test]

@@ -1052,7 +1052,7 @@ fn capture_tool_results_background(
         };
         for result in tool_results {
             // One observed tool result can fan out into tool_result, normalized
-            // validator result, and failure_signature events.
+            // validator result, with failed outcomes carrying inline signatures.
             for event in crate::execution_feedback::events_for_tool_result(&ctx, &result) {
                 if let Err(e) = db::append_execution_event(
                     &state.pool,

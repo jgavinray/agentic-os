@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, superseded in part by [ADR 0002](0002-inline-failure-signatures.md)
 
 ## Context
 
@@ -10,10 +10,10 @@ agentic-os already stores durable engineering memory in `agent_events`, indexes 
 
 ## Decision
 
-Engineering outcomes are captured as structured event types in the existing event log. Event chains use nullable `correlation_id` and `parent_event_id` columns added to `agent_events`. Failure fingerprints are deterministic regex/string outputs stored as `failure_signature` events and retrieved by exact signature match.
+Engineering outcomes are captured as structured event types in the existing event log. Event chains use nullable `correlation_id` and `parent_event_id` columns added to `agent_events`. The original decision stored failure fingerprints as `failure_signature` events; ADR 0002 replaces that piece with inline metadata on failed outcome events.
 
 No separate execution-feedback table, patch object store, retrieval backend, or metrics path is introduced.
 
 ## Consequences
 
-Existing migrations and storage operations continue to own persistence. Existing semantic and FTS retrieval can index execution artifacts, while Failure History uses a small exact-match query for canonical signatures. Old events remain valid with null chain columns, and no backfill is required.
+Existing migrations and storage operations continue to own persistence. Existing semantic and FTS retrieval can index execution artifacts, while Failure History uses a small exact-match query for canonical signatures. Old events remain valid with null chain columns.

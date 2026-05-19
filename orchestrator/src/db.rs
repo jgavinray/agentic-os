@@ -486,21 +486,6 @@ pub async fn insert_remediation_event(
 }
 
 #[allow(dead_code)]
-pub async fn insert_failure_signature_event(
-    pool: &Pool,
-    ctx: &crate::execution_feedback::ExecutionEventContext,
-    fingerprint: &crate::execution_feedback::FailureFingerprint,
-) -> Result<String, anyhow::Error> {
-    let event = crate::execution_feedback::build_execution_event(
-        ctx,
-        crate::execution_feedback::ExecutionEventKind::FailureSignature,
-        false,
-        crate::execution_feedback::failure_signature_payload(fingerprint),
-    );
-    insert_execution_artifact_event(pool, &event).await
-}
-
-#[allow(dead_code)]
 pub async fn get_events_for_repo(
     pool: &Pool,
     repo: &str,
@@ -920,17 +905,19 @@ pub async fn get_failure_history_for_signatures(
 
     let started = std::time::Instant::now();
     let result = async {
+        let outcome_event_types = crate::execution_feedback::FAILURE_OUTCOME_EVENT_TYPES.to_vec();
         let conn = pool.get().await?;
         let rows = conn
             .query(
                 "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
                  FROM agent_events
                  WHERE repo = $1
-                   AND event_type = 'failure_signature'
-                   AND metadata->'payload'->>'signature' = ANY($2)
+                   AND event_type = ANY($2)
+                   AND metadata->>'success' = 'false'
+                   AND metadata->'payload'->>'signature' = ANY($3)
                  ORDER BY created_at DESC
-                 LIMIT $3",
-                &[&repo, &signatures, &limit],
+                 LIMIT $4",
+                &[&repo, &outcome_event_types, &signatures, &limit],
             )
             .await?;
 
@@ -938,7 +925,7 @@ pub async fn get_failure_history_for_signatures(
         let mut items = Vec::new();
         for failure in failures {
             let signature = event_payload_str(&failure, "signature").unwrap_or("unknown");
-            let category = event_payload_str(&failure, "category").unwrap_or("unknown");
+            let category = event_payload_str(&failure, "signature_category").unwrap_or("unknown");
             // The lookup is exact on canonical signature. Any semantic recall for
             // execution events continues to use the existing hybrid pipeline.
             let remediation = remediation_for_failure(pool, &failure, signature).await?;
@@ -954,6 +941,42 @@ pub async fn get_failure_history_for_signatures(
     .await;
     crate::telemetry::record_db_query("get_failure_history", started.elapsed(), result.is_ok());
     result
+}
+
+pub async fn warn_if_legacy_signature_backfill_pending(pool: &Pool) -> Result<(), anyhow::Error> {
+    let outcome_event_types = crate::execution_feedback::FAILURE_OUTCOME_EVENT_TYPES.to_vec();
+    let conn = pool.get().await?;
+    let row = conn
+        .query_one(
+            "SELECT
+                count(*) FILTER (WHERE event_type = 'failure_signature')::BIGINT AS legacy_count,
+                count(*) FILTER (
+                    WHERE event_type = ANY($1)
+                      AND metadata->>'success' = 'false'
+                      AND (
+                          metadata->'payload'->>'signature' IS NULL
+                          OR metadata->'payload'->>'signature_category' IS NULL
+                          OR metadata->'payload'->>'fingerprint_version' IS NULL
+                      )
+                )::BIGINT AS pending_count
+             FROM agent_events
+             WHERE event_type = 'failure_signature'
+                OR event_type = ANY($1)",
+            &[&outcome_event_types],
+        )
+        .await?;
+    let legacy_count: i64 = row.get("legacy_count");
+    let pending_count: i64 = row.get("pending_count");
+    if legacy_count > 0 && pending_count > 0 {
+        tracing::warn!(
+            target: "execution_feedback",
+            legacy_signature_events = legacy_count,
+            pending_inline_signature_backfill = pending_count,
+            command = "orchestrator-maint backfill-signatures",
+            "legacy signature events exist; backfill has not completed; retrieval ignores legacy signature rows; operator should run orchestrator-maint backfill-signatures"
+        );
+    }
+    Ok(())
 }
 
 async fn remediation_for_failure(
@@ -1354,17 +1377,10 @@ fn append_failure_history_section(
         // This section is deterministic outcome history, separate from the
         // conversational "Failed Attempts and Remediations" memory above it.
         let mut line = format!(
-            "- [failure_signature:{}] {}\n  Category: {}\n",
+            "- [failure:{}] {}\n  Category: {}\n",
             item.signature, item.failure.summary, item.category
         );
-        if let Some(excerpt) = item
-            .failure
-            .metadata
-            .get("payload")
-            .and_then(|payload| payload.get("raw_excerpt"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|excerpt| !excerpt.is_empty())
-        {
+        if let Some(excerpt) = failure_history_excerpt(&item.failure) {
             line.push_str(&format!(
                 "  Excerpt: {}\n",
                 excerpt.chars().take(300).collect::<String>()
@@ -1391,6 +1407,38 @@ fn append_failure_history_section(
         out.push('\n');
     }
     reused_signatures
+}
+
+fn failure_history_excerpt(event: &AgentEvent) -> Option<String> {
+    let payload = event.metadata.get("payload")?;
+    for key in [
+        "raw_excerpt",
+        "failure_reason",
+        "stderr_summary",
+        "stdout_summary",
+    ] {
+        if let Some(text) = payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    for key in ["failure_summaries", "findings"] {
+        if let Some(values) = payload.get(key).and_then(serde_json::Value::as_array) {
+            let joined = values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+    }
+    None
 }
 
 fn append_event_section(
@@ -1891,20 +1939,21 @@ mod tests {
         )];
         evidence.failure_history = vec![FailureHistoryItem {
             signature: "rust:type-mismatch".to_string(),
-            category: "rust".to_string(),
+            category: "type_error".to_string(),
             failure: AgentEvent {
-                event_type: crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE.to_string(),
-                summary: "failure signature rust:type-mismatch".to_string(),
+                event_type: crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT.to_string(),
+                summary: "failed compile `rust` target `cargo` errors=1 warnings=0".to_string(),
                 metadata: serde_json::json!({
                     "payload": {
                         "signature": "rust:type-mismatch",
-                        "category": "rust",
-                        "raw_excerpt": "error[E0308]: mismatched types"
+                        "signature_category": "type_error",
+                        "fingerprint_version": 1,
+                        "failure_summaries": ["error[E0308]: mismatched types"]
                     }
                 }),
                 ..event_at_level(
-                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
-                    "failure signature rust:type-mismatch",
+                    crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT,
+                    "failed compile `rust` target `cargo` errors=1 warnings=0",
                     0,
                 )
             },
@@ -1970,17 +2019,18 @@ mod tests {
             signature: "unknown".to_string(),
             category: "unknown".to_string(),
             failure: AgentEvent {
-                event_type: crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE.to_string(),
+                event_type: crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT.to_string(),
                 summary: "x".repeat(200),
                 metadata: serde_json::json!({
                     "payload": {
                         "signature": "unknown",
-                        "category": "unknown",
-                        "raw_excerpt": "y".repeat(200)
+                        "signature_category": "unknown",
+                        "fingerprint_version": 1,
+                        "failure_reason": "y".repeat(200)
                     }
                 }),
                 ..event_at_level(
-                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
+                    crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT,
                     "long failure",
                     0,
                 )
@@ -2060,7 +2110,7 @@ mod tests {
                 signature: format!("typescript:TS{idx:04}"),
                 category: "typescript".to_string(),
                 failure: event_at_level(
-                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
+                    crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT,
                     &format!("failure {idx}"),
                     0,
                 ),
