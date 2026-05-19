@@ -6,6 +6,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
+use std::future::Future;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
@@ -511,7 +512,7 @@ fn spawn_feature_extraction(
     let metrics = state.metrics.clone();
     let repo = repo.to_string();
     let session_id = session_id.to_string();
-    tokio::spawn(async move {
+    spawn_bounded_background(state, "feature_extraction", async move {
         crate::feature_extraction::run_inline_extraction_best_effort(
             pool,
             metrics,
@@ -520,6 +521,39 @@ fn spawn_feature_extraction(
             trajectory_id,
         )
         .await;
+    });
+}
+
+fn spawn_qdrant_index_event(state: &AppState, event: db::AgentEvent) {
+    let embedder = state.embedder.clone();
+    let qdrant_url = state.qdrant_url.clone();
+    spawn_bounded_background(state, "qdrant_index_event", async move {
+        let event_id = event.id.clone();
+        let event_type = event.event_type.clone();
+        if let Err(e) = qdrant::store_event(&embedder, &qdrant_url, &event).await {
+            tracing::warn!(
+                event_id = %event_id,
+                event_type = %event_type,
+                "event stored in postgres but qdrant indexing failed: {e}"
+            );
+        }
+    });
+}
+
+fn spawn_bounded_background<F>(state: &AppState, job: &'static str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let gate = state.background_work.clone();
+    tokio::spawn(async move {
+        let _permit = match gate.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(e) => {
+                tracing::warn!(job, "background work gate closed: {e}");
+                return;
+            }
+        };
+        fut.await;
     });
 }
 
@@ -601,20 +635,17 @@ async fn hybrid_search(
 
 // ── Context pack ────────────────────────────────────────────────
 
-async fn get_or_build_cached_context(
-    state: &AppState,
-    repo: &str,
+fn context_cache_task(
     task: &str,
     session_id: Option<&str>,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
-    task_config: &TaskContextConfig,
-) -> Result<CachedContext, anyhow::Error> {
-    let event_count = db::count_events_for_repo(&state.pool, repo).await?;
+    feature_extraction_enabled: bool,
+) -> String {
     let cache_task = limit_override
         .map(|limit| format!("{task}:limit={limit}"))
         .unwrap_or_else(|| task.to_string());
-    let cache_task = if state.feature_extraction_enabled {
+    if feature_extraction_enabled {
         if let Some(trajectory) = trajectory {
             format!("{cache_task}:trajectory={}", trajectory.trajectory_id)
         } else if let Some(session_id) = session_id {
@@ -624,12 +655,62 @@ async fn get_or_build_cached_context(
         }
     } else {
         cache_task
-    };
+    }
+}
+
+fn context_cache_prefix(repo: &str, cache_task: &str) -> String {
+    format!("{repo}:{cache_task}:")
+}
+
+async fn get_or_build_cached_context(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    session_id: Option<&str>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    limit_override: Option<i64>,
+    task_config: &TaskContextConfig,
+) -> Result<CachedContext, anyhow::Error> {
+    get_or_build_cached_context_inner(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        limit_override,
+        task_config,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn get_or_build_cached_context_inner(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    session_id: Option<&str>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    limit_override: Option<i64>,
+    task_config: &TaskContextConfig,
+    record_metrics: bool,
+) -> Result<CachedContext, anyhow::Error> {
+    let event_count = db::count_events_for_repo(&state.pool, repo).await?;
+    let cache_task = context_cache_task(
+        task,
+        session_id,
+        trajectory,
+        limit_override,
+        state.feature_extraction_enabled,
+    );
     let cache_key = context_cache_key(repo, &cache_task, event_count);
     if let Some(cached) = state.cache.get(&cache_key) {
         let mut cached = cached;
         cached.stats.cache_hit = true;
-        telemetry::record_context_pack(&state.metrics, &cached.stats);
+        cached.stats.build_ms = 0;
+        if record_metrics {
+            telemetry::record_context_pack(&state.metrics, &cached.stats);
+        }
         return Ok(cached);
     }
 
@@ -750,8 +831,106 @@ async fn get_or_build_cached_context(
     };
 
     state.cache.put(cache_key, cached.clone());
-    telemetry::record_context_pack(&state.metrics, &cached.stats);
+    if record_metrics {
+        telemetry::record_context_pack(&state.metrics, &cached.stats);
+    }
     Ok(cached)
+}
+
+fn cached_context_for_request(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    session_id: Option<&str>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    task_config: &TaskContextConfig,
+) -> CachedContext {
+    let cache_task = context_cache_task(
+        task,
+        session_id,
+        trajectory,
+        None,
+        state.feature_extraction_enabled,
+    );
+    let cache_prefix = context_cache_prefix(repo, &cache_task);
+    spawn_context_cache_refresh(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        None,
+        task_config,
+        cache_prefix.clone(),
+    );
+
+    if let Some(cached) = state.cache.latest_by_prefix(&cache_prefix) {
+        let mut cached = cached;
+        cached.stats.cache_hit = true;
+        cached.stats.build_ms = 0;
+        telemetry::record_context_pack(&state.metrics, &cached.stats);
+        return cached;
+    }
+
+    let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
+    let stats = ContextPackStats {
+        build_ms: 0,
+        context_chars: context.len(),
+        context_tokens_estimate: db::estimate_tokens(&context),
+        token_budget: task_config.char_budget / 4,
+        cache_hit: false,
+        ..Default::default()
+    };
+    telemetry::record_context_pack(&state.metrics, &stats);
+    CachedContext {
+        context,
+        memories: vec![],
+        cached_at: std::time::Instant::now(),
+        stats,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_context_cache_refresh(
+    state: &AppState,
+    repo: &str,
+    task: &str,
+    session_id: Option<&str>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    limit_override: Option<i64>,
+    task_config: &TaskContextConfig,
+    refresh_key: String,
+) {
+    if !state.cache.try_begin_refresh(refresh_key.clone()) {
+        return;
+    }
+
+    let state_bg = state.clone();
+    let repo = repo.to_string();
+    let task = task.to_string();
+    let session_id = session_id.map(str::to_string);
+    let task_config = task_config.clone();
+    spawn_bounded_background(state, "context_cache_refresh", async move {
+        if let Err(e) = get_or_build_cached_context_inner(
+            &state_bg,
+            &repo,
+            &task,
+            session_id.as_deref(),
+            trajectory,
+            limit_override,
+            &task_config,
+            false,
+        )
+        .await
+        {
+            tracing::warn!(
+                repo = %repo,
+                task = %task,
+                "background context cache refresh failed: {e}"
+            );
+        }
+        state_bg.cache.finish_refresh(&refresh_key);
+    });
 }
 
 fn retrieved_event_ids(
@@ -1020,39 +1199,20 @@ async fn pack_context_into_anthropic_req(
 ) -> Option<uuid::Uuid> {
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    match get_or_build_cached_context(
+    let cached =
+        cached_context_for_request(state, repo, task, session_id, trajectory, &task_config);
+    let context_pack_id = maybe_write_context_pack_event(
         state,
+        session_id,
         repo,
         task,
-        session_id,
         trajectory,
-        None,
-        &task_config,
-    )
-    .await
-    {
-        Ok(cached) => {
-            let context_pack_id = maybe_write_context_pack_event(
-                state,
-                session_id,
-                repo,
-                task,
-                trajectory,
-                parent_event_id,
-                &cached.stats,
-                task_config.char_budget / 4,
-            )
-            .await;
-            inject_system_context_anthropic(req, &cached.context);
-            context_pack_id
-        }
-        Err(e) => {
-            tracing::warn!(repo, task, "failed to build cached context: {e}");
-            let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
-            inject_system_context_anthropic(req, &context);
-            None
-        }
-    }
+        parent_event_id,
+        &cached.stats,
+        task_config.char_budget / 4,
+    );
+    inject_system_context_anthropic(req, &cached.context);
+    context_pack_id
 }
 
 /// Extract assistant text from an Anthropic-format response for persistence.
@@ -1273,11 +1433,19 @@ async fn persist_request_event(
         error_type: None,
         error_description: None,
     };
-    match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req).await
-    {
-        Ok((event_id, _)) => {
+    let event = match db::event_from_append_request(&req) {
+        Ok(event) => event,
+        Err(e) => {
+            tracing::warn!(repo, "failed to build trajectory request event: {e}");
+            return None;
+        }
+    };
+    let event_id = uuid::Uuid::parse_str(&event.id).ok();
+    match db::insert_event(&state.pool, &event).await {
+        Ok(()) => {
+            spawn_qdrant_index_event(state, event);
             spawn_feature_extraction(state, repo, session_id, Some(trajectory.trajectory_id));
-            uuid::Uuid::parse_str(&event_id).ok()
+            event_id
         }
         Err(e) => {
             tracing::warn!(repo, "failed to persist trajectory request event: {e}");
@@ -1467,7 +1635,8 @@ fn capture_tool_results_background(
 
     // This capture is deliberately best-effort and off the response path:
     // telemetry write failures must never change what the user receives.
-    tokio::spawn(async move {
+    let gate_state = state.clone();
+    spawn_bounded_background(&gate_state, "tool_result_capture", async move {
         let ctx = crate::execution_feedback::ExecutionEventContext {
             session_id,
             repo: repo.clone(),
@@ -1510,7 +1679,7 @@ fn capture_tool_results_background(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn maybe_write_context_pack_event(
+fn maybe_write_context_pack_event(
     state: &AppState,
     session_id: Option<&str>,
     repo: &str,
@@ -1536,16 +1705,25 @@ async fn maybe_write_context_pack_event(
         token_budget,
     );
     let event_id = uuid::Uuid::parse_str(&event.id).ok();
-    if let Err(e) =
-        db::append_execution_event(&state.pool, &state.embedder, &state.qdrant_url, event).await
-    {
-        tracing::warn!(
-            repo,
-            task,
-            "failed to write context_pack trajectory event: {e}"
-        );
-        return None;
-    }
+    let state_bg = state.clone();
+    let repo = repo.to_string();
+    let task = task.to_string();
+    spawn_bounded_background(state, "context_pack_event", async move {
+        if let Err(e) = db::append_execution_event(
+            &state_bg.pool,
+            &state_bg.embedder,
+            &state_bg.qdrant_url,
+            event,
+        )
+        .await
+        {
+            tracing::warn!(
+                repo = %repo,
+                task = %task,
+                "failed to write context_pack trajectory event: {e}"
+            );
+        }
+    });
     event_id
 }
 
@@ -1566,39 +1744,20 @@ async fn pack_context_into_req(
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    match get_or_build_cached_context(
+    let cached =
+        cached_context_for_request(state, repo, task, session_id, trajectory, &task_config);
+    let context_pack_id = maybe_write_context_pack_event(
         state,
+        session_id,
         repo,
         task,
-        session_id,
         trajectory,
-        None,
-        &task_config,
-    )
-    .await
-    {
-        Ok(cached) => {
-            let context_pack_id = maybe_write_context_pack_event(
-                state,
-                session_id,
-                repo,
-                task,
-                trajectory,
-                parent_event_id,
-                &cached.stats,
-                task_config.char_budget / 4,
-            )
-            .await;
-            inject_system_context(req, &cached.context);
-            context_pack_id
-        }
-        Err(e) => {
-            tracing::warn!(repo, task, "failed to build cached context: {e}");
-            let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
-            inject_system_context(req, &context);
-            None
-        }
-    }
+        parent_event_id,
+        &cached.stats,
+        task_config.char_budget / 4,
+    );
+    inject_system_context(req, &cached.context);
+    context_pack_id
 }
 
 /// POST the OpenAI request to LiteLLM and return the raw response JSON.
@@ -3011,17 +3170,27 @@ mod tests {
         );
     }
 
-    /// Verify pack_context_into_req is sequential (doesn't use tokio::join!).
+    /// Verify the model request path does not await a full context rebuild.
     #[test]
-    fn pack_context_into_req_is_sequential() {
+    fn pack_context_into_req_uses_async_cache_refresh() {
         let src = include_str!("handlers.rs");
         let pctr_start = src
             .find("async fn pack_context_into_req")
             .expect("pack_context_into_req not found");
         let body = &src[pctr_start..pctr_start + 1500];
         assert!(
-            !body.contains("tokio::join!"),
-            "pack_context_into_req should NOT use tokio::join!"
+            body.contains("cached_context_for_request"),
+            "pack_context_into_req should use cached/minimal context immediately"
+        );
+        assert!(
+            !body.contains("get_or_build_cached_context("),
+            "pack_context_into_req should not await full context construction"
+        );
+        assert!(
+            src.contains("fn spawn_context_cache_refresh")
+                && src.contains("get_or_build_cached_context_inner")
+                && src.contains("tokio::spawn(async move"),
+            "context cache refresh should run in the background"
         );
     }
 

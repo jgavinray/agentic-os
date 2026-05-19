@@ -579,6 +579,13 @@ fn merge_detection_tags(mut metadata: Value, new_tags: Vec<DetectionTag>) -> Val
             continue;
         }
         if let Ok(value) = serde_json::to_value(tag) {
+            tracing::debug!(
+                target: "feature_extraction",
+                tag_type = %value.get("type").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                source = %value.get("source").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                tool = %bounded_tool_label(value.get("tool").and_then(|v| v.as_str())),
+                "detection tag emitted"
+            );
             tags.push(value);
         }
     }
@@ -587,6 +594,15 @@ fn merge_detection_tags(mut metadata: Value, new_tags: Vec<DetectionTag>) -> Val
         obj.insert("detection_tags".to_string(), Value::Array(tags));
     }
     metadata
+}
+
+fn bounded_tool_label(value: Option<&str>) -> &'static str {
+    match value {
+        Some("Read") => "Read",
+        Some("Bash") => "Bash",
+        Some("unknown") | None => "unknown",
+        Some(_) => "other",
+    }
 }
 
 fn dedupe_tags_within_producer(tags: Vec<DetectionTag>) -> Vec<DetectionTag> {

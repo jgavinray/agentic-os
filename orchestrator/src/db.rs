@@ -1368,6 +1368,23 @@ pub async fn append_event_from_request(
     qdrant_url: &str,
     req: &crate::state::AppendEventRequest,
 ) -> Result<(String, bool), anyhow::Error> {
+    let event = event_from_append_request(req)?;
+    let id = event.id.clone();
+    insert_event(pool, &event).await?;
+    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(event_id = %id, "qdrant embedding failed, event stored in postgres only: {e}");
+            false
+        }
+    };
+
+    Ok((id, qdrant_indexed))
+}
+
+pub fn event_from_append_request(
+    req: &crate::state::AppendEventRequest,
+) -> Result<AgentEvent, anyhow::Error> {
     let id = Uuid::new_v4().to_string();
     let actor = req.actor.as_deref().unwrap_or("agent");
     crate::trajectory::validate_event_role(req.event_role.as_deref())?;
@@ -1396,7 +1413,7 @@ pub async fn append_event_from_request(
         metadata,
     );
 
-    let event = AgentEvent {
+    Ok(AgentEvent {
         id: id.clone(),
         session_id: req.session_id.clone(),
         repo: req.repo.clone(),
@@ -1412,18 +1429,7 @@ pub async fn append_event_from_request(
         event_role: req.event_role.clone(),
         created_at: chrono::Utc::now(),
         summary_level: 0,
-    };
-
-    insert_event(pool, &event).await?;
-    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!(event_id = %id, "qdrant embedding failed, event stored in postgres only: {e}");
-            false
-        }
-    };
-
-    Ok((id, qdrant_indexed))
+    })
 }
 
 // ── Context pack builder ──────────────────────────────────────

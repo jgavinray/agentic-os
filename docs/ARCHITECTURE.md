@@ -77,7 +77,11 @@ A single background loop ticks every 60 seconds. It finds sessions with enough u
 
 ## Context Cache
 
-Context packs are cached in process. Cache keys use `repo:task:event_count`; optional limit overrides are folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration. Appending events, checkpoints, persisted exchanges, and summaries invalidate entries for the affected repo.
+Context packs are cached in process. Model requests use stale-while-revalidate semantics: the orchestrator injects the newest cached pack for the repo/task/session scope, or a minimal fallback when no cache exists, then refreshes the full pack in a coalesced background task. This keeps context computation, semantic retrieval, and constraint lookup off the first-token path. The explicit `/context-pack` endpoint still builds synchronously because callers use it to fetch the pack itself.
+
+Stored cache keys use `repo:task:event_count`; optional limit overrides are folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Appending events, checkpoints, persisted exchanges, and summaries invalidate entries for the affected repo.
+
+Request events are durably inserted into Postgres before forwarding, but their Qdrant indexing is background best-effort work so vector embedding does not block request setup.
 
 ## Startup Order
 

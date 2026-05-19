@@ -1,7 +1,7 @@
 use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +28,9 @@ pub const DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET: usize = 1000;
 /// Default token budget for compact Operational Constraints context.
 pub const DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET: usize =
     crate::feature_extraction::DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET;
+
+/// Default concurrency for best-effort derived background work.
+pub const DEFAULT_BACKGROUND_WORK_CONCURRENCY: usize = 4;
 
 /// Cap source events consumed per summarization promotion pass.
 pub const MAX_SUMMARIZER_EVENTS: i64 = 10;
@@ -106,6 +109,7 @@ pub struct CachedContext {
 #[derive(Clone)]
 pub struct ContextCache {
     entries: Arc<std::sync::RwLock<HashMap<String, CachedContext>>>,
+    refreshes: Arc<std::sync::Mutex<HashSet<String>>>,
     ttl_ms: u64,
 }
 
@@ -113,6 +117,7 @@ impl ContextCache {
     pub fn new(ttl_ms: u64) -> Self {
         Self {
             entries: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            refreshes: Arc::new(std::sync::Mutex::new(HashSet::new())),
             ttl_ms,
         }
     }
@@ -127,9 +132,28 @@ impl ContextCache {
         }
     }
 
+    pub fn latest_by_prefix(&self, prefix: &str) -> Option<CachedContext> {
+        let entries = self.entries.read().unwrap();
+        entries
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .max_by_key(|(_, entry)| entry.cached_at)
+            .map(|(_, entry)| entry.clone())
+    }
+
     pub fn put(&self, key: String, value: CachedContext) {
         let mut entries = self.entries.write().unwrap();
         entries.insert(key, value);
+    }
+
+    pub fn try_begin_refresh(&self, key: String) -> bool {
+        let mut refreshes = self.refreshes.lock().unwrap();
+        refreshes.insert(key)
+    }
+
+    pub fn finish_refresh(&self, key: &str) {
+        let mut refreshes = self.refreshes.lock().unwrap();
+        refreshes.remove(key);
     }
 
     /// Invalidate all entries matching a repo (wildcard: "repo:*").
@@ -446,6 +470,8 @@ pub struct AppState {
     pub feature_extraction_enabled: bool,
     /// Token budget for the Operational Constraints context section.
     pub operational_constraints_token_budget: usize,
+    /// Bounded gate for best-effort derived background work.
+    pub background_work: Arc<tokio::sync::Semaphore>,
     /// Controls sampling parameter audit capture and override hook invocation.
     pub sampling_config: crate::sampling::SamplingConfig,
     /// Request-level sampling policy hook. Defaults to a no-op implementation.
@@ -595,6 +621,43 @@ mod tests {
 
         assert!(cache.get(&context_cache_key("repo-a", "task", 1)).is_none());
         assert!(cache.get(&context_cache_key("repo-b", "task", 1)).is_some());
+    }
+
+    #[test]
+    fn context_cache_returns_latest_entry_by_prefix() {
+        let cache = ContextCache::new(CONTEXT_CACHE_TTL_MS);
+        cache.put(
+            context_cache_key("repo-a", "task", 1),
+            CachedContext {
+                context: "old".to_string(),
+                memories: vec![],
+                cached_at: Instant::now() - Duration::from_secs(5),
+                stats: ContextPackStats::default(),
+            },
+        );
+        cache.put(
+            context_cache_key("repo-a", "task", 2),
+            CachedContext {
+                context: "new".to_string(),
+                memories: vec![],
+                cached_at: Instant::now(),
+                stats: ContextPackStats::default(),
+            },
+        );
+
+        let cached = cache.latest_by_prefix("repo-a:task:").unwrap();
+
+        assert_eq!(cached.context, "new");
+    }
+
+    #[test]
+    fn context_cache_coalesces_refreshes() {
+        let cache = ContextCache::new(CONTEXT_CACHE_TTL_MS);
+
+        assert!(cache.try_begin_refresh("repo:task".to_string()));
+        assert!(!cache.try_begin_refresh("repo:task".to_string()));
+        cache.finish_refresh("repo:task");
+        assert!(cache.try_begin_refresh("repo:task".to_string()));
     }
 
     #[test]

@@ -130,6 +130,7 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `TRAJECTORY_IDLE_TIMEOUT_SEC` | `600` | Idle duration after which an open trajectory is finalized as unresolved. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `FEATURE_EXTRACTION_ENABLED` | `true` | Enables deterministic feature extraction and Operational Constraints context. |
+| `BACKGROUND_WORK_CONCURRENCY` | `4` | Max concurrent best-effort derived background jobs such as cache refresh, feature extraction, and Qdrant indexing. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
 | `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |

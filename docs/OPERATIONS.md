@@ -12,7 +12,11 @@ The summarizer ticks every 60 seconds. It scans for sessions with enough unsumma
 
 ## Context Cache
 
-The cache is in process only. Keys are `repo:task:event_count`; limit overrides become part of the task string. `CONTEXT_CACHE_TTL_MS` controls expiration. Writes to memory invalidate all cache entries for the repo.
+The cache is in process only. Full context packs are derived state and are not rebuilt on the user-facing request path. Model requests use the newest cached pack for the repo/task/session scope when one exists, fall back to a minimal context when none exists, and enqueue a coalesced background refresh for the next turn. The explicit `/context-pack` endpoint still builds synchronously because its contract is to return the generated pack.
+
+Stored cache entries are keyed by `repo:task:event_count`; limit overrides become part of the task string. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Request-time lookup may use the latest stale entry by key prefix while a background refresh catches up. Writes to memory invalidate all cache entries for the repo.
+
+Trajectory request events are still durably inserted into Postgres before forwarding, but their Qdrant indexing runs as background best-effort work.
 
 ## Migrations
 
@@ -124,6 +128,7 @@ Optional:
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
+| `BACKGROUND_WORK_CONCURRENCY` | `4` | Max concurrent best-effort derived background jobs such as cache refresh, feature extraction, and Qdrant indexing. |
 | `FEATURE_EXTRACTION_ENABLED` | `true` | Enables inline feature extraction and Operational Constraints context. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |

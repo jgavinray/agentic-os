@@ -85,6 +85,11 @@ async fn main() -> Result<(), anyhow::Error> {
         orchestrator::feature_extraction::feature_extraction_enabled_from_env();
     let operational_constraints_token_budget =
         orchestrator::feature_extraction::operational_constraints_token_budget_from_env();
+    let background_work_concurrency = env::var("BACKGROUND_WORK_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(state::DEFAULT_BACKGROUND_WORK_CONCURRENCY)
+        .max(1);
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
@@ -155,6 +160,7 @@ async fn main() -> Result<(), anyhow::Error> {
         failure_history_token_budget,
         feature_extraction_enabled,
         operational_constraints_token_budget,
+        background_work: Arc::new(tokio::sync::Semaphore::new(background_work_concurrency)),
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
         prometheus,
