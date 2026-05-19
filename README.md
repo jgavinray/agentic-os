@@ -2,6 +2,19 @@
 
 A local-first agent memory orchestrator for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, summarization, and Anthropic tool-use passthrough through LiteLLM.
 
+## What This Solves
+
+LLM coding clients generate valuable engineering evidence while they work: user intent, retrieved context, model responses, tool calls, validation failures, patches, retry attempts, token usage, and final outcomes. Without durable lineage, that evidence is scattered across transient logs and chat history. You can ask what happened, but not reliably which user intent it belonged to, which context informed a response, which validation caused a retry, or how much model work was spent before success, abandonment, or rollback.
+
+agentic-os makes that workflow observable. It records structured engineering memory locally and ties related events into deterministic trajectories, so future context packing, debugging, eval replay, policy experiments, and useful-deliverables-per-token measurement can build on raw facts rather than guesswork.
+
+## Why It Is Useful
+
+- It helps agents resume work with relevant prior decisions, failures, and remediations instead of starting cold every turn.
+- It preserves validation outcomes, failure signatures, patches, retries, sampling parameters, and token usage as queryable memory.
+- It reconstructs the lifecycle of a user intent from request through context, model calls, tools, validations, patches, and final result.
+- It stays local-first and deliberately avoids learned routing, scoring, graph databases, autonomous retry policy, or prompt-body archival in the capture layer.
+
 ```
 Claude Code / opencode / curl
              |
@@ -16,7 +29,8 @@ Claude Code / opencode / curl
 
 ```bash
 cp .env.example .env
-# Edit .env: set LITELLM_SALT_KEY and API_KEYS.
+# Edit .env: set LITELLM_SALT_KEY.
+# Compose provides a default orchestrator API key; change compose.yaml if you want a different key.
 
 ./setup-models.sh
 docker compose up -d
@@ -25,7 +39,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -89,7 +103,7 @@ cargo test
 
 ## Security Model
 
-agentic-os assumes a single-user local node, typically bound to localhost or reachable through a private network such as Tailscale. By default, CORS allows any origin to preserve local-tool compatibility. Set `ALLOWED_ORIGINS` to a comma-separated origin list before exposing the API to a LAN, tunnel, or browser-accessible shared network.
+agentic-os assumes a single-user local node, typically reachable only from localhost or a private network such as Tailscale. The orchestrator listens on `0.0.0.0:8088` in Docker Compose, and by default CORS allows any origin to preserve local-tool compatibility. Set `ALLOWED_ORIGINS` to a comma-separated origin list before exposing the API to a LAN, tunnel, or browser-accessible shared network.
 
 Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. Health, metrics, and memory endpoints are not rate limited.
 
@@ -105,9 +119,14 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
 | `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
 | `DEFAULT_TASK` | `engineering` | Task label when no header is present. |
+| `EMBED_MODEL_PATH` | required | Local ONNX embedder path. Compose sets this to `/data/models/embed`. |
+| `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model path for negative feedback detection. |
+| `SENTIMENT_THRESHOLD` | `0.70` | Negative feedback classifier threshold when the sentiment model is loaded. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
+| `TRAJECTORY_CAPTURE_ENABLED` | `true` | Enables deterministic trajectory lineage metadata, context-pack lineage events, trajectory results, and the idle sweep. |
+| `TRAJECTORY_IDLE_TIMEOUT_SEC` | `600` | Idle duration after which an open trajectory is finalized as unresolved. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `SAMPLING_CAPTURE_ENABLED` | `true` | Captures requested and forwarded chat sampling parameters in event metadata. |
 | `SAMPLING_OVERRIDE_ENABLED` | `false` | Enables the sampling override hook. Requires sampling capture to stay enabled. |

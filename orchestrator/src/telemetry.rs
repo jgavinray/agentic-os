@@ -59,6 +59,11 @@ pub struct MetricsSnapshot {
     pub patch_lifecycle_events: u64,
     pub validation_results: u64,
     pub remediation_reuse: u64,
+    pub trajectory_results: u64,
+    pub trajectory_attempts: u64,
+    pub trajectory_validation_failures: u64,
+    pub trajectory_input_tokens: u64,
+    pub trajectory_output_tokens: u64,
 }
 
 #[derive(Clone)]
@@ -298,6 +303,22 @@ fn describe_metrics() {
         "Sampling parameter override hook executions by bounded parameter and reason."
     );
     describe_counter!(
+        "trajectory_results_total",
+        "Completed trajectory results by bounded operational status."
+    );
+    describe_counter!(
+        "trajectory_attempts_total",
+        "Attempts observed across completed trajectories."
+    );
+    describe_counter!(
+        "trajectory_validation_failures_total",
+        "Failed trajectory validations by bounded validator type."
+    );
+    describe_counter!(
+        "trajectory_tokens_total",
+        "Trajectory model tokens by direction."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -361,6 +382,12 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         "search_events_fts",
         "hydrate_active_search_hits",
         "get_event_chain",
+        "get_trajectory",
+        "get_trajectory_attempts",
+        "get_trajectory_result",
+        "latest_trajectory_event_for_session",
+        "idle_trajectory_ids",
+        "insert_trajectory_result_event",
         "get_failure_history",
         "insert_error_record",
         "get_active_errors",
@@ -487,6 +514,17 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
             "reason" => crate::sampling::REASON_OVERRIDDEN_BY_ORCHESTRATOR
         )
         .increment(0);
+    }
+    for status in crate::trajectory::FINAL_STATUSES {
+        counter!("trajectory_results_total", "status" => status).increment(0);
+    }
+    counter!("trajectory_attempts_total").increment(0);
+    for validator_type in crate::execution_feedback::VALIDATOR_TYPES {
+        counter!("trajectory_validation_failures_total", "validator_type" => validator_type)
+            .increment(0);
+    }
+    for direction in ["input", "output"] {
+        counter!("trajectory_tokens_total", "direction" => direction).increment(0);
     }
 }
 
@@ -667,6 +705,19 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
                 "result" => result
             )
             .increment(1);
+            if !success
+                && event.event_role.as_deref()
+                    == Some(crate::trajectory::EventRole::Validation.as_str())
+            {
+                let validator_type = bounded_validator_type_label(
+                    payload["validator_type"].as_str().unwrap_or("other"),
+                );
+                counter!(
+                    "trajectory_validation_failures_total",
+                    "validator_type" => validator_type
+                )
+                .increment(1);
+            }
         }
         crate::execution_feedback::EVENT_TYPE_REMEDIATION => {
             let task = event
@@ -686,6 +737,32 @@ pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
         }
         _ => {}
     }
+}
+
+fn bounded_validator_type_label(value: &str) -> &'static str {
+    match value {
+        "compile" => "compile",
+        "test" => "test",
+        "lint" => "lint",
+        "type_check" => "type_check",
+        "schema" => "schema",
+        "static_analysis" => "static_analysis",
+        "other" => "other",
+        _ => "other",
+    }
+}
+
+pub fn record_trajectory_result(summary: &crate::trajectory::TrajectoryResultSummary) {
+    counter!(
+        "trajectory_results_total",
+        "status" => summary.final_status.as_str()
+    )
+    .increment(1);
+    counter!("trajectory_attempts_total").increment(summary.final_attempt_index.max(1) as u64);
+    counter!("trajectory_tokens_total", "direction" => "input")
+        .increment(summary.total_input_tokens.max(0) as u64);
+    counter!("trajectory_tokens_total", "direction" => "output")
+        .increment(summary.total_output_tokens.max(0) as u64);
 }
 
 fn record_items(layer: &'static str, count: usize) {

@@ -245,6 +245,39 @@ pub async fn metrics_json(State(state): State<Arc<AppState>>, headers: HeaderMap
     axum::Json(state.metrics.snapshot()).into_response()
 }
 
+pub async fn run_trajectory_idle_sweep(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        if !state.trajectory_capture_enabled {
+            continue;
+        }
+        let ids =
+            match db::idle_trajectory_ids(&state.pool, state.trajectory_idle_timeout_sec, 10_000)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!("trajectory idle sweep failed to list candidates: {e}");
+                    continue;
+                }
+            };
+        for trajectory_id in ids {
+            if let Err(e) = db::emit_trajectory_result_once(
+                &state.pool,
+                &state.embedder,
+                &state.qdrant_url,
+                trajectory_id,
+                Some(crate::trajectory::BoundaryReason::IdleTimeout),
+            )
+            .await
+            {
+                tracing::warn!(trajectory_id = %trajectory_id, "failed to emit idle trajectory result: {e}");
+            }
+        }
+    }
+}
+
 // ── Session management ──────────────────────────────────────────
 
 #[tracing::instrument(name = "handler.start_session", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
@@ -280,7 +313,7 @@ pub async fn start_session(
 pub async fn append_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Json(req): axum::Json<AppendEventRequest>,
+    axum::Json(mut req): axum::Json<AppendEventRequest>,
 ) -> Response {
     if !check_auth(&state, &headers) {
         return (
@@ -288,6 +321,16 @@ pub async fn append_event(
             axum::Json(serde_json::json!({"error": "unauthorized"})),
         )
             .into_response();
+    }
+    if !state.trajectory_capture_enabled {
+        req.trajectory_id = None;
+        req.attempt_index = None;
+        req.event_role = None;
+        if let Some(metadata) = req.metadata.as_mut().and_then(Value::as_object_mut) {
+            metadata.remove("trajectory_id");
+            metadata.remove("attempt_index");
+            metadata.remove("event_role");
+        }
     }
 
     let (event_id, qdrant_indexed) =
@@ -394,8 +437,26 @@ pub async fn validations(
         actor: req.actor.clone().unwrap_or_else(|| "validator".to_string()),
         correlation_id: req.correlation_id.unwrap_or_else(uuid::Uuid::new_v4),
         parent_event_id: req.parent_event_id,
+        trajectory: if state.trajectory_capture_enabled {
+            req.trajectory_id
+                .map(|trajectory_id| crate::trajectory::TrajectoryContext {
+                    trajectory_id,
+                    attempt_index: req.attempt_index.unwrap_or(1),
+                })
+        } else {
+            None
+        },
     };
-    let events = crate::execution_feedback::events_for_validation_report(&ctx, &req);
+    let events = match crate::execution_feedback::events_for_validation_report(&ctx, &req) {
+        Ok(events) => events,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": "invalid_validation_report", "detail": e})),
+            )
+                .into_response();
+        }
+    };
     let mut event_ids = Vec::new();
     let mut qdrant_indexed = true;
     for event in events {
@@ -583,6 +644,18 @@ async fn get_or_build_cached_context(
     stats.retrieval_semantic_hits = hybrid_result.semantic_hits;
     stats.retrieval_fts_hits = hybrid_result.fts_hits;
     stats.retrieval_deduped_hits = hybrid_result.deduped_hits;
+    stats.retrieved_event_ids = retrieved_event_ids(&evidence, &hybrid_result.hits);
+    stats.memory_levels_used = memory_levels_used(&evidence);
+    stats.injected_failure_signatures = evidence
+        .failure_history
+        .iter()
+        .map(|item| item.signature.clone())
+        .chain(failure_signatures)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    stats.token_budget = task_config.char_budget / 4;
+    stats.truncated = context.contains("[truncated:");
     stats.cache_hit = false;
 
     let cached = CachedContext {
@@ -595,6 +668,53 @@ async fn get_or_build_cached_context(
     state.cache.put(cache_key, cached.clone());
     telemetry::record_context_pack(&state.metrics, &cached.stats);
     Ok(cached)
+}
+
+fn retrieved_event_ids(
+    evidence: &db::ContextEvidence,
+    hits: &[crate::state::SearchHit],
+) -> Vec<String> {
+    evidence
+        .l0_recent
+        .iter()
+        .chain(evidence.l1_matching.iter())
+        .chain(evidence.l2_repo.iter())
+        .chain(evidence.l3_project.iter())
+        .chain(evidence.failures.iter())
+        .chain(
+            evidence
+                .failure_history
+                .iter()
+                .flat_map(|item| std::iter::once(&item.failure).chain(item.remediation.iter())),
+        )
+        .map(|event| event.id.clone())
+        .chain(hits.iter().map(|hit| hit.event_id.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn memory_levels_used(evidence: &db::ContextEvidence) -> Vec<String> {
+    let mut levels = Vec::new();
+    if !evidence.l0_recent.is_empty() {
+        levels.push("l0".to_string());
+    }
+    if !evidence.l1_matching.is_empty() {
+        levels.push("l1".to_string());
+    }
+    if !evidence.l2_repo.is_empty() {
+        levels.push("l2".to_string());
+    }
+    if !evidence.l3_project.is_empty() {
+        levels.push("l3".to_string());
+    }
+    if !evidence.failures.is_empty() {
+        levels.push("failures".to_string());
+    }
+    if !evidence.failure_history.is_empty() {
+        levels.push("failure_history".to_string());
+    }
+    levels
 }
 
 #[tracing::instrument(name = "handler.context_pack", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
@@ -675,6 +795,9 @@ pub async fn checkpoint(
         })),
         correlation_id: None,
         parent_event_id: None,
+        trajectory_id: None,
+        attempt_index: None,
+        event_role: None,
         task: Some(task_string),
         error_type: None,
         error_description: None,
@@ -799,17 +922,35 @@ fn inject_system_context_anthropic(payload: &mut Value, context: &str) {
 async fn pack_context_into_anthropic_req(
     state: &AppState,
     req: &mut Value,
+    session_id: Option<&str>,
     repo: &str,
     task: &str,
-) {
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    parent_event_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     match get_or_build_cached_context(state, repo, task, None, &task_config).await {
-        Ok(cached) => inject_system_context_anthropic(req, &cached.context),
+        Ok(cached) => {
+            let context_pack_id = maybe_write_context_pack_event(
+                state,
+                session_id,
+                repo,
+                task,
+                trajectory,
+                parent_event_id,
+                &cached.stats,
+                task_config.char_budget / 4,
+            )
+            .await;
+            inject_system_context_anthropic(req, &cached.context);
+            context_pack_id
+        }
         Err(e) => {
             tracing::warn!(repo, task, "failed to build cached context: {e}");
             let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
             inject_system_context_anthropic(req, &context);
+            None
         }
     }
 }
@@ -920,6 +1061,172 @@ fn extract_token_usage_from_sse(raw: &str) -> TokenUsage {
     usage
 }
 
+fn optional_token_usage_from_sse(raw: &str) -> (Option<i64>, Option<i64>) {
+    let mut input = None;
+    let mut output = None;
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data.trim() == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let (chunk_input, chunk_output) =
+            crate::trajectory::optional_token_counts_from_value(&value);
+        input = chunk_input.or(input);
+        output = chunk_output.or(output);
+    }
+    (input, output)
+}
+
+fn extract_user_content_openai(payload: &Value) -> String {
+    payload["messages"]
+        .as_array()
+        .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
+        .map(|m| {
+            if let Some(text) = m["content"].as_str() {
+                text.to_string()
+            } else {
+                m["content"].to_string()
+            }
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(500)
+        .collect()
+}
+
+async fn begin_trajectory_for_request(
+    state: &AppState,
+    session_id: &str,
+) -> crate::trajectory::TrajectoryContext {
+    if let Ok(Some(latest)) = db::latest_trajectory_event_for_session(&state.pool, session_id).await
+    {
+        if let Some(trajectory_id) = latest.trajectory_id {
+            let already_ended = latest.event_role.as_deref()
+                == Some(crate::trajectory::EventRole::TrajectoryResult.as_str())
+                || db::get_trajectory_result(&state.pool, trajectory_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if !already_ended {
+                let idle_for = chrono::Utc::now()
+                    .signed_duration_since(latest.created_at)
+                    .num_seconds()
+                    .max(0) as u64;
+                let reason = if idle_for > state.trajectory_idle_timeout_sec {
+                    crate::trajectory::BoundaryReason::IdleTimeout
+                } else {
+                    crate::trajectory::BoundaryReason::NewUserMessage
+                };
+                if let Err(e) = db::emit_trajectory_result_once(
+                    &state.pool,
+                    &state.embedder,
+                    &state.qdrant_url,
+                    trajectory_id,
+                    Some(reason),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        trajectory_id = %trajectory_id,
+                        "failed to finalize previous trajectory at boundary: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    crate::trajectory::TrajectoryContext {
+        trajectory_id: uuid::Uuid::new_v4(),
+        attempt_index: 1,
+    }
+}
+
+async fn persist_request_event(
+    state: &AppState,
+    session_id: &str,
+    repo: &str,
+    user_content: &str,
+    trajectory: crate::trajectory::TrajectoryContext,
+    request_metadata: Option<Value>,
+) -> Option<uuid::Uuid> {
+    let metadata = crate::trajectory::make_request_metadata(request_metadata, trajectory);
+    let req = AppendEventRequest {
+        session_id: session_id.to_string(),
+        repo: repo.to_string(),
+        actor: Some("user".to_string()),
+        event_type: "user_message".to_string(),
+        summary: user_content.chars().take(500).collect(),
+        evidence: None,
+        metadata: Some(metadata),
+        correlation_id: Some(trajectory.trajectory_id),
+        parent_event_id: None,
+        trajectory_id: Some(trajectory.trajectory_id),
+        attempt_index: Some(trajectory.attempt_index),
+        event_role: Some(crate::trajectory::EventRole::Request.as_str().to_string()),
+        task: None,
+        error_type: None,
+        error_description: None,
+    };
+    match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req).await
+    {
+        Ok((event_id, _)) => uuid::Uuid::parse_str(&event_id).ok(),
+        Err(e) => {
+            tracing::warn!(repo, "failed to persist trajectory request event: {e}");
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_model_response_event(
+    state: &AppState,
+    session_id: &str,
+    repo: &str,
+    assistant_content: &str,
+    metadata: Value,
+    trajectory: crate::trajectory::TrajectoryContext,
+    parent_event_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    let req = AppendEventRequest {
+        session_id: session_id.to_string(),
+        repo: repo.to_string(),
+        actor: Some("assistant".to_string()),
+        event_type: "assistant_message".to_string(),
+        summary: assistant_content.chars().take(500).collect(),
+        evidence: None,
+        metadata: Some(metadata),
+        correlation_id: Some(trajectory.trajectory_id),
+        parent_event_id,
+        trajectory_id: Some(trajectory.trajectory_id),
+        attempt_index: Some(trajectory.attempt_index),
+        event_role: Some(
+            crate::trajectory::EventRole::ModelResponse
+                .as_str()
+                .to_string(),
+        ),
+        task: None,
+        error_type: None,
+        error_description: None,
+    };
+    match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req).await
+    {
+        Ok((event_id, _)) => uuid::Uuid::parse_str(&event_id).ok(),
+        Err(e) => {
+            tracing::warn!(
+                repo,
+                "failed to persist trajectory model_response event: {e}"
+            );
+            None
+        }
+    }
+}
+
 async fn persist_exchange_with_correlation(
     state: &AppState,
     session_id: &str,
@@ -948,6 +1255,9 @@ async fn persist_exchange_with_correlation(
             metadata,
             correlation_id,
             parent_event_id: correlation_id.and(parent_event_id),
+            trajectory_id: None,
+            attempt_index: None,
+            event_role: None,
             task: None,
             error_type: None,
             error_description: None,
@@ -1033,6 +1343,7 @@ async fn persist_exchange_with_correlation(
     assistant_event_id
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_tool_results_background(
     state: AppState,
     session_id: String,
@@ -1040,6 +1351,7 @@ fn capture_tool_results_background(
     task: String,
     correlation_id: uuid::Uuid,
     parent_event_id: Option<uuid::Uuid>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
     tool_results: Vec<crate::execution_feedback::CapturedToolResult>,
 ) {
     if !state.execution_feedback_enabled || tool_results.is_empty() {
@@ -1056,6 +1368,7 @@ fn capture_tool_results_background(
             actor: "validator".to_string(),
             correlation_id,
             parent_event_id,
+            trajectory,
         };
         for result in tool_results {
             // One observed tool result can fan out into tool_result, normalized
@@ -1083,21 +1396,84 @@ fn capture_tool_results_background(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn maybe_write_context_pack_event(
+    state: &AppState,
+    session_id: Option<&str>,
+    repo: &str,
+    task: &str,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    parent_event_id: Option<uuid::Uuid>,
+    stats: &crate::state::ContextPackStats,
+    token_budget: usize,
+) -> Option<uuid::Uuid> {
+    if !state.trajectory_capture_enabled {
+        return None;
+    }
+    let (Some(session_id), Some(trajectory)) = (session_id, trajectory) else {
+        return None;
+    };
+    let event = crate::trajectory::context_pack_event(
+        session_id,
+        repo,
+        task,
+        trajectory,
+        parent_event_id,
+        stats,
+        token_budget,
+    );
+    let event_id = uuid::Uuid::parse_str(&event.id).ok();
+    if let Err(e) =
+        db::append_execution_event(&state.pool, &state.embedder, &state.qdrant_url, event).await
+    {
+        tracing::warn!(
+            repo,
+            task,
+            "failed to write context_pack trajectory event: {e}"
+        );
+        return None;
+    }
+    event_id
+}
+
 /// Pack orchestrator context into an OpenAI-shaped request.
 /// Sets a default model if absent, fetches memory events, builds context string,
 /// and injects it as a system message.
-async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, task: &str) {
+async fn pack_context_into_req(
+    state: &AppState,
+    req: &mut Value,
+    session_id: Option<&str>,
+    repo: &str,
+    task: &str,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    parent_event_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
     if req.get("model").is_none() {
         req["model"] = Value::String(state.default_model.clone());
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     match get_or_build_cached_context(state, repo, task, None, &task_config).await {
-        Ok(cached) => inject_system_context(req, &cached.context),
+        Ok(cached) => {
+            let context_pack_id = maybe_write_context_pack_event(
+                state,
+                session_id,
+                repo,
+                task,
+                trajectory,
+                parent_event_id,
+                &cached.stats,
+                task_config.char_budget / 4,
+            )
+            .await;
+            inject_system_context(req, &cached.context);
+            context_pack_id
+        }
         Err(e) => {
             tracing::warn!(repo, task, "failed to build cached context: {e}");
             let context = db::build_context(repo, task, &[], &[], &[], task_config.char_budget);
             inject_system_context(req, &context);
+            None
         }
     }
 }
@@ -1107,7 +1483,7 @@ async fn pack_context_into_req(state: &AppState, req: &mut Value, repo: &str, ta
 async fn dispatch_non_streaming_raw(
     state: &AppState,
     openai_req: &Value,
-) -> Result<Value, Response> {
+) -> Result<(Value, u64), Response> {
     let url = format!("{}/chat/completions", state.litellm_url);
     let started = std::time::Instant::now();
     match state
@@ -1131,14 +1507,18 @@ async fn dispatch_non_streaming_raw(
                     telemetry::upstream_error_kind(status),
                 );
             }
-            r.json::<Value>().await.map_err(|_| {
-                telemetry::record_upstream_litellm_error("chat_completions", "parse");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
-                )
-                    .into_response()
-            })
+            let latency_ms = started.elapsed().as_millis() as u64;
+            r.json::<Value>()
+                .await
+                .map(|value| (value, latency_ms))
+                .map_err(|_| {
+                    telemetry::record_upstream_litellm_error("chat_completions", "parse");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+                    )
+                        .into_response()
+                })
         }
         Err(e) => {
             telemetry::record_upstream_litellm("chat_completions", started.elapsed(), "error");
@@ -1191,10 +1571,6 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
-    // Generate the chain ID at user-message ingestion. With the feature flag
-    // off, keep this None so ordinary chat persistence is unchanged.
-    let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
-
     tracing::info!(repo = %repo, task = %task, "routing request");
 
     let requested_model = payload
@@ -1202,11 +1578,11 @@ pub async fn chat_completions(
         .and_then(|v| v.as_str())
         .unwrap_or(&state.default_model)
         .to_string();
+    let user_content = extract_user_content_openai(&payload);
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
     req["model"] = Value::String(state.default_model.clone());
     enforce_min_max_tokens(&mut req);
-    pack_context_into_req(&state, &mut req, &repo, &task).await;
     let sampling_audit = crate::sampling::capture_and_maybe_override(
         &payload,
         &mut req,
@@ -1220,6 +1596,49 @@ pub async fn chat_completions(
             &state.default_model,
         )
     });
+    let session_id = if state.trajectory_capture_enabled {
+        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+            Ok(session_id) => Some(session_id),
+            Err(e) => {
+                tracing::warn!("find_or_create_session failed before trajectory capture: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let trajectory = if let Some(session_id) = session_id.as_deref() {
+        Some(begin_trajectory_for_request(&state, session_id).await)
+    } else {
+        None
+    };
+    let request_event_id =
+        if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+            persist_request_event(
+                &state,
+                session_id,
+                &repo,
+                &user_content,
+                trajectory,
+                request_metadata.clone(),
+            )
+            .await
+        } else {
+            None
+        };
+    let context_pack_id = pack_context_into_req(
+        &state,
+        &mut req,
+        session_id.as_deref(),
+        &repo,
+        &task,
+        trajectory,
+        request_event_id,
+    )
+    .await;
+    let correlation_id = trajectory
+        .map(|trajectory| trajectory.trajectory_id)
+        .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
 
     if is_stream {
         return handle_streaming(
@@ -1231,13 +1650,18 @@ pub async fn chat_completions(
             namespace,
             correlation_id,
             request_metadata,
+            session_id,
+            trajectory,
+            request_event_id,
+            context_pack_id,
+            user_content,
         )
         .await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &req).await {
-        Ok(val) => {
+        Ok((val, latency_ms)) => {
             let usage = TokenUsage::from_openai_value(&val);
             telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
             if !usage.is_empty() {
@@ -1254,14 +1678,6 @@ pub async fn chat_completions(
                 });
             }
 
-            let user_content: String = req["messages"]
-                .as_array()
-                .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .chars()
-                .take(500)
-                .collect();
             let assistant_content: String = val["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or("")
@@ -1272,31 +1688,68 @@ pub async fn chat_completions(
             // inspect them after normal exchange persistence has an event parent.
             let tool_results = crate::execution_feedback::tool_results_from_value(&val);
 
-            match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-                Ok(session_id) => {
-                    let assistant_event_id = persist_exchange_with_correlation(
-                        &state,
-                        &session_id,
-                        &repo,
-                        &user_content,
-                        &assistant_content,
-                        correlation_id,
-                        request_metadata.clone(),
-                    )
-                    .await;
-                    if let Some(correlation_id) = correlation_id {
-                        capture_tool_results_background(
-                            state.as_ref().clone(),
-                            session_id,
-                            repo.clone(),
-                            task.clone(),
+            if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+                let (input_tokens, output_tokens) =
+                    crate::trajectory::optional_token_counts_from_value(&val);
+                let metadata = crate::trajectory::model_response_metadata(
+                    &state.default_model,
+                    "litellm",
+                    input_tokens,
+                    output_tokens,
+                    Some(latency_ms as i64),
+                    crate::trajectory::model_finish_reason(&val),
+                    request_metadata.clone(),
+                    context_pack_id,
+                    Some(trajectory),
+                );
+                let assistant_event_id = persist_model_response_event(
+                    &state,
+                    session_id,
+                    &repo,
+                    &assistant_content,
+                    metadata,
+                    trajectory,
+                    request_event_id,
+                )
+                .await;
+                capture_tool_results_background(
+                    state.as_ref().clone(),
+                    session_id.to_string(),
+                    repo.clone(),
+                    task.clone(),
+                    trajectory.trajectory_id,
+                    assistant_event_id,
+                    Some(trajectory),
+                    tool_results,
+                );
+            } else {
+                match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+                    Ok(session_id) => {
+                        let assistant_event_id = persist_exchange_with_correlation(
+                            &state,
+                            &session_id,
+                            &repo,
+                            &user_content,
+                            &assistant_content,
                             correlation_id,
-                            assistant_event_id,
-                            tool_results,
-                        );
+                            request_metadata.clone(),
+                        )
+                        .await;
+                        if let Some(correlation_id) = correlation_id {
+                            capture_tool_results_background(
+                                state.as_ref().clone(),
+                                session_id,
+                                repo.clone(),
+                                task.clone(),
+                                correlation_id,
+                                assistant_event_id,
+                                None,
+                                tool_results,
+                            );
+                        }
                     }
+                    Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
                 }
-                Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
             }
             axum::Json(val).into_response()
         }
@@ -1314,6 +1767,11 @@ async fn handle_streaming(
     namespace: String,
     correlation_id: Option<uuid::Uuid>,
     request_metadata: Option<Value>,
+    session_id: Option<String>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    request_event_id: Option<uuid::Uuid>,
+    context_pack_id: Option<uuid::Uuid>,
+    user_content: String,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
@@ -1387,15 +1845,6 @@ async fn handle_streaming(
         }
     };
 
-    let user_content: String = req["messages"]
-        .as_array()
-        .and_then(|msgs| msgs.iter().rfind(|m| m["role"].as_str() == Some("user")))
-        .and_then(|m| m["content"].as_str())
-        .unwrap_or("")
-        .chars()
-        .take(500)
-        .collect();
-
     let state_bg = state.clone();
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
@@ -1420,31 +1869,67 @@ async fn handle_streaming(
             // Stream capture reuses the accumulated bytes already needed for
             // token accounting, so no extra read is introduced.
             let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
-            match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
-                Ok(sid) => {
-                    let assistant_event_id = persist_exchange_with_correlation(
-                        &state_bg,
-                        &sid,
-                        &repo,
-                        &user_content,
-                        &assistant_content,
-                        correlation_id,
-                        request_metadata,
-                    )
-                    .await;
-                    if let Some(correlation_id) = correlation_id {
-                        capture_tool_results_background(
-                            state_bg.clone(),
-                            sid,
-                            repo.clone(),
-                            task.clone(),
+            if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+                let (input_tokens, output_tokens) = optional_token_usage_from_sse(&raw);
+                let metadata = crate::trajectory::model_response_metadata(
+                    &state_bg.default_model,
+                    "litellm",
+                    input_tokens,
+                    output_tokens,
+                    Some(started.elapsed().as_millis() as i64),
+                    None,
+                    request_metadata.clone(),
+                    context_pack_id,
+                    Some(trajectory),
+                );
+                let assistant_event_id = persist_model_response_event(
+                    &state_bg,
+                    session_id,
+                    &repo,
+                    &assistant_content,
+                    metadata,
+                    trajectory,
+                    request_event_id,
+                )
+                .await;
+                capture_tool_results_background(
+                    state_bg.clone(),
+                    session_id.to_string(),
+                    repo.clone(),
+                    task.clone(),
+                    trajectory.trajectory_id,
+                    assistant_event_id,
+                    Some(trajectory),
+                    tool_results,
+                );
+            } else {
+                match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
+                    Ok(sid) => {
+                        let assistant_event_id = persist_exchange_with_correlation(
+                            &state_bg,
+                            &sid,
+                            &repo,
+                            &user_content,
+                            &assistant_content,
                             correlation_id,
-                            assistant_event_id,
-                            tool_results,
-                        );
+                            request_metadata,
+                        )
+                        .await;
+                        if let Some(correlation_id) = correlation_id {
+                            capture_tool_results_background(
+                                state_bg.clone(),
+                                sid,
+                                repo.clone(),
+                                task.clone(),
+                                correlation_id,
+                                assistant_event_id,
+                                None,
+                                tool_results,
+                            );
+                        }
                     }
+                    Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
                 }
-                Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
             }
         }
     });
@@ -1494,10 +1979,6 @@ pub async fn messages(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
-    // Anthropic messages use the same optional event-chain model as OpenAI
-    // completions so downstream trajectory tooling can handle both endpoints.
-    let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
-
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
 
     let user_content = anthropic::extract_user_content_from_anthropic(&payload);
@@ -1512,7 +1993,41 @@ pub async fn messages(
     req["model"] = Value::String(state.default_model.clone());
     enforce_min_max_tokens(&mut req);
     normalize_response_content_types(&mut req);
-    pack_context_into_anthropic_req(&state, &mut req, &repo, &task).await;
+    let session_id = if state.trajectory_capture_enabled {
+        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+            Ok(session_id) => Some(session_id),
+            Err(e) => {
+                tracing::warn!("find_or_create_session failed before trajectory capture: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let trajectory = if let Some(session_id) = session_id.as_deref() {
+        Some(begin_trajectory_for_request(&state, session_id).await)
+    } else {
+        None
+    };
+    let request_event_id =
+        if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+            persist_request_event(&state, session_id, &repo, &user_content, trajectory, None).await
+        } else {
+            None
+        };
+    let context_pack_id = pack_context_into_anthropic_req(
+        &state,
+        &mut req,
+        session_id.as_deref(),
+        &repo,
+        &task,
+        trajectory,
+        request_event_id,
+    )
+    .await;
+    let correlation_id = trajectory
+        .map(|trajectory| trajectory.trajectory_id)
+        .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
 
     if is_stream {
         return handle_streaming_anthropic(
@@ -1524,6 +2039,10 @@ pub async fn messages(
             model,
             namespace,
             correlation_id,
+            session_id,
+            trajectory,
+            request_event_id,
+            context_pack_id,
         )
         .await;
     }
@@ -1602,31 +2121,68 @@ pub async fn messages(
     // LiteLLM may surface Anthropic tool results inside the response content.
     // Feed them through the same deterministic parser used for OpenAI results.
     let tool_results = crate::execution_feedback::tool_results_from_value(&val);
-    match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-        Ok(sid) => {
-            let assistant_event_id = persist_exchange_with_correlation(
-                &state,
-                &sid,
-                &repo,
-                &user_content,
-                &assistant_content,
-                correlation_id,
-                None,
-            )
-            .await;
-            if let Some(correlation_id) = correlation_id {
-                capture_tool_results_background(
-                    state.as_ref().clone(),
-                    sid,
-                    repo.clone(),
-                    task.clone(),
+    if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+        let (input_tokens, output_tokens) =
+            crate::trajectory::optional_token_counts_from_value(&val);
+        let metadata = crate::trajectory::model_response_metadata(
+            &state.default_model,
+            "litellm",
+            input_tokens,
+            output_tokens,
+            Some(started.elapsed().as_millis() as i64),
+            crate::trajectory::model_finish_reason(&val),
+            None,
+            context_pack_id,
+            Some(trajectory),
+        );
+        let assistant_event_id = persist_model_response_event(
+            &state,
+            session_id,
+            &repo,
+            &assistant_content,
+            metadata,
+            trajectory,
+            request_event_id,
+        )
+        .await;
+        capture_tool_results_background(
+            state.as_ref().clone(),
+            session_id.to_string(),
+            repo.clone(),
+            task.clone(),
+            trajectory.trajectory_id,
+            assistant_event_id,
+            Some(trajectory),
+            tool_results,
+        );
+    } else {
+        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
+            Ok(sid) => {
+                let assistant_event_id = persist_exchange_with_correlation(
+                    &state,
+                    &sid,
+                    &repo,
+                    &user_content,
+                    &assistant_content,
                     correlation_id,
-                    assistant_event_id,
-                    tool_results,
-                );
+                    None,
+                )
+                .await;
+                if let Some(correlation_id) = correlation_id {
+                    capture_tool_results_background(
+                        state.as_ref().clone(),
+                        sid,
+                        repo.clone(),
+                        task.clone(),
+                        correlation_id,
+                        assistant_event_id,
+                        None,
+                        tool_results,
+                    );
+                }
             }
+            Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
         }
-        Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
     }
 
     axum::Json(val).into_response()
@@ -1643,6 +2199,10 @@ async fn handle_streaming_anthropic(
     model: String,
     namespace: String,
     correlation_id: Option<uuid::Uuid>,
+    session_id: Option<String>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
+    request_event_id: Option<uuid::Uuid>,
+    context_pack_id: Option<uuid::Uuid>,
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
 
@@ -1744,31 +2304,67 @@ async fn handle_streaming_anthropic(
             // Anthropic streaming tool_result blocks are parsed from the final
             // accumulated SSE transcript after the upstream stream completes.
             let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
-            match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
-                Ok(sid) => {
-                    let assistant_event_id = persist_exchange_with_correlation(
-                        &state_bg,
-                        &sid,
-                        &repo,
-                        &user_content,
-                        &assistant_content,
-                        correlation_id,
-                        None,
-                    )
-                    .await;
-                    if let Some(correlation_id) = correlation_id {
-                        capture_tool_results_background(
-                            state_bg.clone(),
-                            sid,
-                            repo.clone(),
-                            task.clone(),
+            if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
+                let (input_tokens, output_tokens) = optional_token_usage_from_sse(&raw);
+                let metadata = crate::trajectory::model_response_metadata(
+                    &state_bg.default_model,
+                    "litellm",
+                    input_tokens,
+                    output_tokens,
+                    Some(started.elapsed().as_millis() as i64),
+                    None,
+                    None,
+                    context_pack_id,
+                    Some(trajectory),
+                );
+                let assistant_event_id = persist_model_response_event(
+                    &state_bg,
+                    session_id,
+                    &repo,
+                    &assistant_content,
+                    metadata,
+                    trajectory,
+                    request_event_id,
+                )
+                .await;
+                capture_tool_results_background(
+                    state_bg.clone(),
+                    session_id.to_string(),
+                    repo.clone(),
+                    task.clone(),
+                    trajectory.trajectory_id,
+                    assistant_event_id,
+                    Some(trajectory),
+                    tool_results,
+                );
+            } else {
+                match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
+                    Ok(sid) => {
+                        let assistant_event_id = persist_exchange_with_correlation(
+                            &state_bg,
+                            &sid,
+                            &repo,
+                            &user_content,
+                            &assistant_content,
                             correlation_id,
-                            assistant_event_id,
-                            tool_results,
-                        );
+                            None,
+                        )
+                        .await;
+                        if let Some(correlation_id) = correlation_id {
+                            capture_tool_results_background(
+                                state_bg.clone(),
+                                sid,
+                                repo.clone(),
+                                task.clone(),
+                                correlation_id,
+                                assistant_event_id,
+                                None,
+                                tool_results,
+                            );
+                        }
                     }
+                    Err(e) => tracing::warn!("messages stream: find_or_create_session failed: {e}"),
                 }
-                Err(e) => tracing::warn!("messages stream: find_or_create_session failed: {e}"),
             }
         }
     });
@@ -2255,6 +2851,25 @@ mod tests {
         assert!(validation_body.contains("!state.execution_feedback_enabled"));
     }
 
+    #[test]
+    fn trajectory_capture_is_feature_flagged() {
+        let src = include_str!("handlers.rs");
+        assert!(src.contains("state.trajectory_capture_enabled"));
+        let append_start = src
+            .find("pub async fn append_event")
+            .expect("append_event handler not found");
+        let append_body: String = src[append_start..].chars().take(1400).collect();
+        assert!(append_body.contains("req.trajectory_id = None"));
+        assert!(append_body.contains("req.attempt_index = None"));
+        assert!(append_body.contains("req.event_role = None"));
+
+        let sweep_start = src
+            .find("pub async fn run_trajectory_idle_sweep")
+            .expect("trajectory idle sweep not found");
+        let sweep_body: String = src[sweep_start..].chars().take(800).collect();
+        assert!(sweep_body.contains("!state.trajectory_capture_enabled"));
+    }
+
     /// Verify hybrid_search still uses tokio::join! internally.
     #[test]
     fn hybrid_search_uses_tokio_join() {
@@ -2435,6 +3050,9 @@ mod tests {
             metadata: json!({}),
             correlation_id: None,
             parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
+            event_role: None,
             created_at: Utc::now(),
             summary_level,
         }

@@ -13,3 +13,4 @@ pub mod sentiment;
 pub mod state;
 pub mod summarizer;
 pub mod telemetry;
+pub mod trajectory;

@@ -90,6 +90,7 @@ pub struct ExecutionEventContext {
     pub actor: String,
     pub correlation_id: Uuid,
     pub parent_event_id: Option<Uuid>,
+    pub trajectory: Option<crate::trajectory::TrajectoryContext>,
 }
 
 impl ExecutionEventContext {
@@ -299,6 +300,48 @@ pub fn inline_signature_payload(payload: Value, success: bool, raw_error_text: &
     inline_signature_payload_from_fingerprint(payload, false, Some(&fp))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn normalize_validation_payload(
+    mut payload: Value,
+    validator_name: &str,
+    validator_type: &str,
+    command: &str,
+    success: bool,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    failure_excerpt: Option<String>,
+) -> Value {
+    let Some(obj) = payload.as_object_mut() else {
+        return payload;
+    };
+    obj.entry("validator_name".to_string())
+        .or_insert_with(|| json!(validator_name));
+    obj.entry("validator_type".to_string())
+        .or_insert_with(|| json!(validator_type));
+    obj.entry("command".to_string())
+        .or_insert_with(|| json!(command));
+    obj.insert("success".to_string(), json!(success));
+    obj.entry("exit_code".to_string())
+        .or_insert_with(|| exit_code.map(Value::from).unwrap_or(Value::Null));
+    obj.entry("duration_ms".to_string())
+        .or_insert_with(|| duration_ms.map(Value::from).unwrap_or(Value::Null));
+    let failure_signature = obj.get("signature").and_then(Value::as_str);
+    obj.insert(
+        "failure_signature".to_string(),
+        failure_signature
+            .filter(|signature| *signature != "unknown")
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    obj.entry("failure_excerpt".to_string()).or_insert_with(|| {
+        failure_excerpt
+            .filter(|excerpt| !excerpt.is_empty())
+            .map(Value::from)
+            .unwrap_or(Value::Null)
+    });
+    payload
+}
+
 pub fn outcome_raw_text_from_payload(
     payload: &Value,
     fallback_raw_excerpt: Option<&str>,
@@ -385,7 +428,41 @@ pub enum ValidationKind {
     Compile,
     Test,
     Lint,
-    Validation,
+    TypeCheck,
+    Schema,
+    StaticAnalysis,
+    Other,
+}
+
+pub const VALIDATOR_TYPES: [&str; 7] = [
+    "compile",
+    "test",
+    "lint",
+    "type_check",
+    "schema",
+    "static_analysis",
+    "other",
+];
+
+pub fn validate_validator_type(value: Option<&str>) -> Result<(), String> {
+    if let Some(value) = value {
+        if !VALIDATOR_TYPES.contains(&value) {
+            return Err(format!("invalid validator_type `{value}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validator_type_str(kind: ValidationKind) -> &'static str {
+    match kind {
+        ValidationKind::Compile => "compile",
+        ValidationKind::Test => "test",
+        ValidationKind::Lint => "lint",
+        ValidationKind::TypeCheck => "type_check",
+        ValidationKind::Schema => "schema",
+        ValidationKind::StaticAnalysis => "static_analysis",
+        ValidationKind::Other => "other",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -433,13 +510,13 @@ pub fn classify_validator(tool_name: &str, content: &str) -> Option<ValidatorSpe
     if name.contains("tsc") {
         return Some(ValidatorSpec {
             validator: "tsc",
-            kind: ValidationKind::Compile,
+            kind: ValidationKind::TypeCheck,
         });
     }
     if name.contains("mypy") {
         return Some(ValidatorSpec {
             validator: "mypy",
-            kind: ValidationKind::Lint,
+            kind: ValidationKind::TypeCheck,
         });
     }
     if name.contains("ruff") {
@@ -451,13 +528,13 @@ pub fn classify_validator(tool_name: &str, content: &str) -> Option<ValidatorSpe
     if name.contains("terraform") {
         return Some(ValidatorSpec {
             validator: "terraform",
-            kind: ValidationKind::Validation,
+            kind: ValidationKind::Schema,
         });
     }
     if name.contains("kubectl") {
         return Some(ValidatorSpec {
             validator: "kubectl",
-            kind: ValidationKind::Validation,
+            kind: ValidationKind::Schema,
         });
     }
     None
@@ -658,10 +735,15 @@ pub fn build_execution_event(
             payload = inline_signature_payload(payload, success, &raw);
         }
     }
+    let event_role = ctx
+        .trajectory
+        .and_then(|_| crate::trajectory::default_role_for_event_type(event_type));
+    let trajectory_id = ctx.trajectory.map(|trajectory| trajectory.trajectory_id);
+    let attempt_index = ctx.trajectory.map(|trajectory| trajectory.attempt_index);
     // The structured envelope is duplicated into metadata while the chain IDs
     // are also real columns. That keeps old retrieval/indexing behavior intact
     // and gives SQL exact-match queries fast access to chain fields.
-    let metadata = json!({
+    let mut metadata = json!({
         "event_type": event_type,
         "success": success,
         "correlation_id": ctx.correlation_id,
@@ -670,6 +752,13 @@ pub fn build_execution_event(
         "task": ctx.task,
         "payload": payload,
     });
+    if let Some(trajectory) = ctx.trajectory {
+        metadata["trajectory_id"] = json!(trajectory.trajectory_id);
+        metadata["attempt_index"] = json!(trajectory.attempt_index);
+    }
+    if let Some(role) = event_role {
+        metadata["event_role"] = json!(role.as_str());
+    }
 
     AgentEvent {
         id: event_id.to_string(),
@@ -682,6 +771,9 @@ pub fn build_execution_event(
         metadata,
         correlation_id: Some(ctx.correlation_id),
         parent_event_id: ctx.parent_event_id,
+        trajectory_id,
+        attempt_index,
+        event_role: event_role.map(|role| role.as_str().to_string()),
         created_at: chrono::Utc::now(),
         summary_level: 0,
     }
@@ -795,7 +887,7 @@ fn compile_result_payload_with_fingerprint(
     success: bool,
     fp: Option<&FailureFingerprint>,
 ) -> Value {
-    inline_signature_payload_from_fingerprint(
+    let payload = inline_signature_payload_from_fingerprint(
         json!({
         "language": language,
         "target": target,
@@ -805,6 +897,16 @@ fn compile_result_payload_with_fingerprint(
         }),
         success,
         fp,
+    );
+    normalize_validation_payload(
+        payload,
+        target,
+        "compile",
+        target,
+        success,
+        Some(exit_code),
+        None,
+        fp.map(|fp| fp.raw_excerpt.clone()),
     )
 }
 
@@ -842,7 +944,7 @@ fn test_result_payload_with_fingerprint(
     fp: Option<&FailureFingerprint>,
     content: &str,
 ) -> Value {
-    inline_signature_payload_from_fingerprint(
+    let payload = inline_signature_payload_from_fingerprint(
         json!({
         "framework": framework,
         "total": total,
@@ -853,6 +955,16 @@ fn test_result_payload_with_fingerprint(
         }),
         success,
         fp,
+    );
+    normalize_validation_payload(
+        payload,
+        framework,
+        "test",
+        framework,
+        success,
+        None,
+        None,
+        fp.map(|fp| fp.raw_excerpt.clone()),
     )
 }
 
@@ -883,7 +995,7 @@ fn lint_result_payload_with_fingerprint(
     fp: Option<&FailureFingerprint>,
     content: &str,
 ) -> Value {
-    inline_signature_payload_from_fingerprint(
+    let payload = inline_signature_payload_from_fingerprint(
         json!({
         "tool_name": tool_name,
         "error_count": error_count,
@@ -892,11 +1004,21 @@ fn lint_result_payload_with_fingerprint(
         }),
         success,
         fp,
+    );
+    normalize_validation_payload(
+        payload,
+        tool_name,
+        "lint",
+        tool_name,
+        success,
+        None,
+        None,
+        fp.map(|fp| fp.raw_excerpt.clone()),
     )
 }
 
 pub fn validation_result_payload(validator_name: &str, pass: bool, failure_reason: &str) -> Value {
-    inline_signature_payload(
+    let payload = inline_signature_payload(
         json!({
         "validator_name": validator_name,
         "pass": pass,
@@ -904,6 +1026,16 @@ pub fn validation_result_payload(validator_name: &str, pass: bool, failure_reaso
         }),
         pass,
         failure_reason,
+    );
+    normalize_validation_payload(
+        payload,
+        validator_name,
+        "other",
+        validator_name,
+        pass,
+        None,
+        None,
+        (!pass).then(|| summarize_text(failure_reason, 500)),
     )
 }
 
@@ -915,6 +1047,10 @@ pub fn patch_result_payload(
 ) -> Value {
     json!({
         "files_touched": files_touched,
+        "lines_added": 0,
+        "lines_removed": 0,
+        "patch_applied": outcome == "applied",
+        "patch_reverted": outcome == "reverted",
         "outcome": outcome,
         "validation_event_ids": validation_event_ids,
     })
@@ -966,16 +1102,18 @@ pub fn events_for_tool_result(
         // and the normalized compile/test/lint/validation result derived from it.
         let validation_ctx = ctx.child_of(Uuid::parse_str(&tool_event.id).unwrap());
         let (kind, payload, success) = match spec.kind {
-            ValidationKind::Compile => {
+            ValidationKind::Compile | ValidationKind::TypeCheck => {
                 let language = if spec.validator == "tsc" {
                     "typescript"
+                } else if spec.validator == "mypy" {
+                    "python"
                 } else {
                     "rust"
                 };
                 let error_count = compile_error_count(&result.content);
                 let warning_count = warning_count(&result.content);
                 let success = result.exit_code == 0 && error_count == 0;
-                let payload = compile_result_payload_with_fingerprint(
+                let mut payload = compile_result_payload_with_fingerprint(
                     language,
                     spec.validator,
                     result.exit_code,
@@ -984,6 +1122,8 @@ pub fn events_for_tool_result(
                     success,
                     tool_fp.as_ref(),
                 );
+                payload["validator_type"] = json!(validator_type_str(spec.kind));
+                payload["duration_ms"] = json!(result.duration_ms);
                 (ExecutionEventKind::CompileResult, payload, success)
             }
             ValidationKind::Test => {
@@ -995,7 +1135,7 @@ pub fn events_for_tool_result(
                 let total = first_number_before("total", &result.content)
                     .unwrap_or(passed + failed + skipped);
                 let success = result.exit_code == 0 && failed == 0;
-                let payload = test_result_payload_with_fingerprint(
+                let mut payload = test_result_payload_with_fingerprint(
                     spec.validator,
                     total,
                     passed,
@@ -1005,6 +1145,7 @@ pub fn events_for_tool_result(
                     tool_fp.as_ref(),
                     &result.content,
                 );
+                payload["duration_ms"] = json!(result.duration_ms);
                 (ExecutionEventKind::TestResult, payload, success)
             }
             ValidationKind::Lint => {
@@ -1015,7 +1156,7 @@ pub fn events_for_tool_result(
                     .or_else(|| first_number_before("warnings", &result.content))
                     .unwrap_or_else(|| warning_count(&result.content) as u64);
                 let success = result.exit_code == 0 && error_count == 0;
-                let payload = lint_result_payload_with_fingerprint(
+                let mut payload = lint_result_payload_with_fingerprint(
                     spec.validator,
                     error_count,
                     warning_count,
@@ -1023,9 +1164,10 @@ pub fn events_for_tool_result(
                     tool_fp.as_ref(),
                     &result.content,
                 );
+                payload["duration_ms"] = json!(result.duration_ms);
                 (ExecutionEventKind::LintResult, payload, success)
             }
-            ValidationKind::Validation => {
+            ValidationKind::Schema | ValidationKind::StaticAnalysis | ValidationKind::Other => {
                 let success = infer_success(result.exit_code, &result.content);
                 let failure_reason = if success {
                     String::new()
@@ -1040,6 +1182,16 @@ pub fn events_for_tool_result(
                     }),
                     success,
                     tool_fp.as_ref(),
+                );
+                let payload = normalize_validation_payload(
+                    payload,
+                    spec.validator,
+                    validator_type_str(spec.kind),
+                    spec.validator,
+                    success,
+                    Some(result.exit_code),
+                    Some(result.duration_ms),
+                    (!success).then(|| summarize_text(&result.content, 500)),
                 );
                 (ExecutionEventKind::ValidationResult, payload, success)
             }
@@ -1066,6 +1218,8 @@ pub struct ValidationReportRequest {
     pub payload: Option<Value>,
     pub correlation_id: Option<Uuid>,
     pub parent_event_id: Option<Uuid>,
+    pub trajectory_id: Option<Uuid>,
+    pub attempt_index: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1078,7 +1232,8 @@ pub struct ValidationReportResponse {
 pub fn events_for_validation_report(
     ctx: &ExecutionEventContext,
     report: &ValidationReportRequest,
-) -> Vec<AgentEvent> {
+) -> Result<Vec<AgentEvent>, String> {
+    validate_validator_type(report.validator_type.as_deref())?;
     let content = report.content.as_deref().unwrap_or("");
     if let Some(event_type) = report.event_type.as_deref() {
         if let Some(kind) = ExecutionEventKind::from_str(event_type) {
@@ -1097,7 +1252,7 @@ pub fn events_for_validation_report(
             if is_failure_outcome_event_type(kind.as_str()) {
                 payload = inline_signature_payload(payload, success, content);
             }
-            return vec![build_execution_event(ctx, kind, success, payload)];
+            return Ok(vec![build_execution_event(ctx, kind, success, payload)]);
         }
     }
 
@@ -1128,9 +1283,21 @@ pub fn events_for_validation_report(
                 validator: "explicit",
                 kind: ValidationKind::Lint,
             }),
-            "validation" => Some(ValidatorSpec {
+            "type_check" => Some(ValidatorSpec {
                 validator: "explicit",
-                kind: ValidationKind::Validation,
+                kind: ValidationKind::TypeCheck,
+            }),
+            "schema" => Some(ValidatorSpec {
+                validator: "explicit",
+                kind: ValidationKind::Schema,
+            }),
+            "static_analysis" => Some(ValidatorSpec {
+                validator: "explicit",
+                kind: ValidationKind::StaticAnalysis,
+            }),
+            "other" => Some(ValidatorSpec {
+                validator: "explicit",
+                kind: ValidationKind::Other,
             }),
             _ => None,
         })
@@ -1178,7 +1345,7 @@ pub fn events_for_validation_report(
             }
         }
     }
-    events
+    Ok(events)
 }
 
 pub fn bounded_validator_label(name: &str) -> &'static str {
@@ -1325,6 +1492,7 @@ mod tests {
             actor: "agent".to_string(),
             correlation_id: Uuid::new_v4(),
             parent_event_id: None,
+            trajectory: None,
         }
     }
 
@@ -1559,8 +1727,10 @@ mod tests {
             payload: None,
             correlation_id: Some(ctx().correlation_id),
             parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
         };
-        let events = events_for_validation_report(&ctx(), &report);
+        let events = events_for_validation_report(&ctx(), &report).unwrap();
         assert!(events
             .iter()
             .any(|event| event.event_type == EVENT_TYPE_TOOL_RESULT));
@@ -1575,6 +1745,42 @@ mod tests {
             .find(|event| event.event_type == EVENT_TYPE_TEST_RESULT)
             .unwrap();
         assert_eq!(test_event.metadata["payload"]["signature"], "unknown");
+        assert_eq!(test_event.metadata["payload"]["validator_type"], "test");
+        assert!(test_event.metadata["payload"]
+            .get("failure_excerpt")
+            .is_some());
+    }
+
+    #[test]
+    fn invalid_validator_type_is_rejected() {
+        let report = ValidationReportRequest {
+            session_id: Some("session".to_string()),
+            repo: "repo".to_string(),
+            task: "task".to_string(),
+            actor: None,
+            event_type: None,
+            validator_name: "custom".to_string(),
+            validator_type: Some("free_form".to_string()),
+            success: Some(true),
+            exit_code: Some(0),
+            content: Some("ok".to_string()),
+            payload: None,
+            correlation_id: Some(ctx().correlation_id),
+            parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
+        };
+        assert!(events_for_validation_report(&ctx(), &report).is_err());
+    }
+
+    #[test]
+    fn patch_payload_includes_lineage_metadata_fields() {
+        let payload = patch_result_payload(vec!["src/lib.rs".to_string()], "applied", vec![]);
+        assert_eq!(payload["files_touched"][0], "src/lib.rs");
+        assert_eq!(payload["lines_added"], 0);
+        assert_eq!(payload["lines_removed"], 0);
+        assert_eq!(payload["patch_applied"], true);
+        assert_eq!(payload["patch_reverted"], false);
     }
 
     #[test]

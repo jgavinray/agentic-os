@@ -274,6 +274,9 @@ async fn do_summarize(
         metadata,
         correlation_id: None,
         parent_event_id: None,
+        trajectory_id: None,
+        attempt_index: None,
+        event_role: None,
         created_at: chrono::Utc::now(),
         summary_level: target_level,
     };

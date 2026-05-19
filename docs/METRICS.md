@@ -50,6 +50,10 @@
 | `memory_source_coverage` | gauge | none | Fraction of promoted memory with source IDs. |
 | `rate_limited_total` | counter | `key_hash` | Inference requests rejected with HTTP 429. |
 | `sampling_param_overrides_total` | counter | `parameter`, `reason` | Sampling override hook executions. `parameter` is one of `temperature`, `top_p`, `max_tokens`, `seed`, or `none`; `reason` is `noop` or `overridden_by_orchestrator`. Raw parameter values are never labels. |
+| `trajectory_results_total` | counter | `status` | Completed trajectory results. `status` is one of `succeeded`, `abandoned`, `unresolved`, `reverted`. |
+| `trajectory_attempts_total` | counter | none | Attempt indexes observed on completed trajectories. |
+| `trajectory_validation_failures_total` | counter | `validator_type` | Failed trajectory validations by bounded type. `validator_type` is one of `compile`, `test`, `lint`, `type_check`, `schema`, `static_analysis`, `other`. |
+| `trajectory_tokens_total` | counter | `direction` | Non-null model tokens aggregated from trajectory result events. `direction` is `input` or `output`. |
 | `process_cpu_seconds_total` | counter | none | Process CPU seconds. |
 | `process_resident_memory_bytes` | gauge | none | Resident memory bytes. |
 | `process_start_time_seconds` | gauge | none | Process start time. |

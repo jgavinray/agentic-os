@@ -19,6 +19,9 @@ pub struct AgentEvent {
     pub metadata: serde_json::Value,
     pub correlation_id: Option<Uuid>,
     pub parent_event_id: Option<Uuid>,
+    pub trajectory_id: Option<Uuid>,
+    pub attempt_index: Option<i32>,
+    pub event_role: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub summary_level: i32,
 }
@@ -47,6 +50,9 @@ impl AgentEvent {
             "metadata": self.metadata,
             "correlation_id": self.correlation_id.map(|id| id.to_string()),
             "parent_event_id": self.parent_event_id.map(|id| id.to_string()),
+            "trajectory_id": self.trajectory_id.map(|id| id.to_string()),
+            "attempt_index": self.attempt_index,
+            "event_role": self.event_role,
             "created_at": self.created_at,
             "summary_level": self.summary_level
         })
@@ -282,13 +288,27 @@ pub async fn find_or_create_session(
 }
 
 pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow::Error> {
+    crate::trajectory::validate_event_role(event.event_role.as_deref())?;
+    if matches!(event.attempt_index, Some(attempt) if attempt < 1) {
+        anyhow::bail!("attempt_index must be positive");
+    }
+    let lineage_fields = [
+        event.trajectory_id.is_some(),
+        event.attempt_index.is_some(),
+        event.event_role.is_some(),
+    ];
+    if lineage_fields.iter().any(|present| *present)
+        && !lineage_fields.iter().all(|present| *present)
+    {
+        anyhow::bail!("trajectory_id, attempt_index, and event_role must be written together");
+    }
     let started = std::time::Instant::now();
     let result = async {
         let conn = pool.get().await?;
         conn.execute(
             "INSERT INTO agent_events
-             (id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, summary_level)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             (id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, summary_level)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             &[
                 &event.id,
                 &event.session_id,
@@ -300,6 +320,9 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
                 &event.metadata,
                 &event.correlation_id,
                 &event.parent_event_id,
+                &event.trajectory_id,
+                &event.attempt_index,
+                &event.event_role,
                 &event.summary_level,
             ],
         )
@@ -494,7 +517,7 @@ pub async fn get_events_for_repo(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summarized = false
@@ -518,6 +541,9 @@ pub async fn get_events_for_repo(
             metadata: row.get("metadata"),
             correlation_id: row.get("correlation_id"),
             parent_event_id: row.get("parent_event_id"),
+            trajectory_id: row.get("trajectory_id"),
+            attempt_index: row.get("attempt_index"),
+            event_role: row.get("event_role"),
             created_at: row.get("created_at"),
             summary_level: row.get("summary_level"),
         })
@@ -620,7 +646,7 @@ async fn get_events_for_repo_by_level(
     let level = level.as_i32();
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summary_level = $2
@@ -646,7 +672,7 @@ async fn get_failure_events_for_repo(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND event_type IN ('failed_attempt', 'remediation')
@@ -669,7 +695,7 @@ async fn get_events_for_repo_by_levels(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summarized = false
@@ -696,6 +722,9 @@ fn rows_to_events(rows: Vec<tokio_postgres::Row>) -> Vec<AgentEvent> {
             metadata: row.get("metadata"),
             correlation_id: row.get("correlation_id"),
             parent_event_id: row.get("parent_event_id"),
+            trajectory_id: row.get("trajectory_id"),
+            attempt_index: row.get("attempt_index"),
+            event_role: row.get("event_role"),
             created_at: row.get("created_at"),
             summary_level: row.get("summary_level"),
         })
@@ -815,7 +844,7 @@ pub async fn get_event_chain_by_event_id(
         let conn = pool.get().await?;
         let rows = conn
             .query(
-                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
                  FROM agent_events
                  WHERE correlation_id = $1
                  ORDER BY created_at ASC, id ASC",
@@ -833,13 +862,241 @@ async fn get_event_by_id(pool: &Pool, event_id: &str) -> Result<AgentEvent, anyh
     let conn = pool.get().await?;
     let row = conn
         .query_one(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE id = $1",
             &[&event_id],
         )
         .await?;
     Ok(rows_to_events(vec![row]).remove(0))
+}
+
+pub async fn get_trajectory(
+    pool: &Pool,
+    trajectory_id: Uuid,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+                 FROM agent_events
+                 WHERE trajectory_id = $1
+                 ORDER BY attempt_index ASC NULLS LAST, created_at ASC, id ASC",
+                &[&trajectory_id],
+            )
+            .await?;
+        Ok(rows_to_events(rows))
+    }
+    .await;
+    crate::telemetry::record_db_query("get_trajectory", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn get_trajectory_attempts(
+    pool: &Pool,
+    trajectory_id: Uuid,
+) -> Result<Vec<i32>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT attempt_index
+                 FROM agent_events
+                 WHERE trajectory_id = $1
+                   AND attempt_index IS NOT NULL
+                 ORDER BY attempt_index ASC",
+                &[&trajectory_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get("attempt_index"))
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query("get_trajectory_attempts", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn get_trajectory_result(
+    pool: &Pool,
+    trajectory_id: Uuid,
+) -> Result<Option<AgentEvent>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+                 FROM agent_events
+                 WHERE trajectory_id = $1
+                   AND event_role = 'trajectory_result'
+                 ORDER BY created_at ASC
+                 LIMIT 1",
+                &[&trajectory_id],
+            )
+            .await?;
+        Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+    }
+    .await;
+    crate::telemetry::record_db_query("get_trajectory_result", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn latest_trajectory_event_for_session(
+    pool: &Pool,
+    session_id: &str,
+) -> Result<Option<AgentEvent>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+                 FROM agent_events
+                 WHERE session_id = $1
+                   AND trajectory_id IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                &[&session_id],
+            )
+            .await?;
+        Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "latest_trajectory_event_for_session",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
+
+pub async fn idle_trajectory_ids(
+    pool: &Pool,
+    idle_timeout_sec: u64,
+    limit: i64,
+) -> Result<Vec<Uuid>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "WITH latest AS (
+                    SELECT trajectory_id, max(created_at) AS last_event_at
+                    FROM agent_events
+                    WHERE trajectory_id IS NOT NULL
+                    GROUP BY trajectory_id
+                )
+                SELECT latest.trajectory_id
+                FROM latest
+                WHERE latest.last_event_at < now() - ($1::text || ' seconds')::interval
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM agent_events result
+                      WHERE result.trajectory_id = latest.trajectory_id
+                        AND result.event_role = 'trajectory_result'
+                  )
+                ORDER BY latest.last_event_at ASC
+                LIMIT $2",
+                &[&idle_timeout_sec.to_string(), &limit],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get("trajectory_id"))
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query("idle_trajectory_ids", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn emit_trajectory_result_once(
+    pool: &Pool,
+    embedder: &crate::embedder::Embedder,
+    qdrant_url: &str,
+    trajectory_id: Uuid,
+    boundary_reason: Option<crate::trajectory::BoundaryReason>,
+) -> Result<bool, anyhow::Error> {
+    let events = get_trajectory(pool, trajectory_id).await?;
+    let source_events: Vec<_> = events
+        .into_iter()
+        .filter(|event| {
+            event.event_role.as_deref()
+                != Some(crate::trajectory::EventRole::TrajectoryResult.as_str())
+        })
+        .collect();
+    let Some(first_event) = source_events.first() else {
+        return Ok(false);
+    };
+    let summary =
+        crate::trajectory::summarize_trajectory(trajectory_id, &source_events, boundary_reason);
+    let result_event = crate::trajectory::trajectory_result_event(
+        &first_event.session_id,
+        &first_event.repo,
+        summary.clone(),
+    );
+    let inserted = insert_trajectory_result_event(pool, &result_event).await?;
+    if inserted {
+        crate::telemetry::record_trajectory_result(&summary);
+        let _ = crate::qdrant::store_event(embedder, qdrant_url, &result_event)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    trajectory_id = %trajectory_id,
+                    "trajectory result stored in postgres but qdrant indexing failed: {e}"
+                );
+                e
+            });
+    }
+    Ok(inserted)
+}
+
+async fn insert_trajectory_result_event(
+    pool: &Pool,
+    event: &AgentEvent,
+) -> Result<bool, anyhow::Error> {
+    crate::trajectory::validate_event_role(event.event_role.as_deref())?;
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .execute(
+                "INSERT INTO agent_events
+                 (id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, summary_level)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 ON CONFLICT DO NOTHING",
+                &[
+                    &event.id,
+                    &event.session_id,
+                    &event.repo,
+                    &event.actor,
+                    &event.event_type,
+                    &event.summary,
+                    &event.evidence,
+                    &event.metadata,
+                    &event.correlation_id,
+                    &event.parent_event_id,
+                    &event.trajectory_id,
+                    &event.attempt_index,
+                    &event.event_role,
+                    &event.summary_level,
+                ],
+            )
+            .await?;
+        Ok(rows == 1)
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "insert_trajectory_result_event",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
 }
 
 pub fn order_event_chain(events: Vec<AgentEvent>, seed_id: &str) -> Vec<AgentEvent> {
@@ -909,7 +1166,7 @@ pub async fn get_failure_history_for_signatures(
         let conn = pool.get().await?;
         let rows = conn
             .query(
-                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
                  FROM agent_events
                  WHERE repo = $1
                    AND event_type = ANY($2)
@@ -1000,7 +1257,7 @@ async fn remediation_for_failure(
     let conn = pool.get().await?;
     let row = conn
         .query_opt(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND event_type = 'remediation'
@@ -1110,6 +1367,20 @@ pub async fn append_event_from_request(
 ) -> Result<(String, bool), anyhow::Error> {
     let id = Uuid::new_v4().to_string();
     let actor = req.actor.as_deref().unwrap_or("agent");
+    crate::trajectory::validate_event_role(req.event_role.as_deref())?;
+    if matches!(req.attempt_index, Some(attempt) if attempt < 1) {
+        anyhow::bail!("attempt_index must be positive");
+    }
+    let lineage_fields = [
+        req.trajectory_id.is_some(),
+        req.attempt_index.is_some(),
+        req.event_role.is_some(),
+    ];
+    if lineage_fields.iter().any(|present| *present)
+        && !lineage_fields.iter().all(|present| *present)
+    {
+        anyhow::bail!("trajectory_id, attempt_index, and event_role must be written together");
+    }
     let metadata = req
         .metadata
         .as_ref()
@@ -1127,6 +1398,9 @@ pub async fn append_event_from_request(
         metadata,
         correlation_id: req.correlation_id,
         parent_event_id: req.parent_event_id,
+        trajectory_id: req.trajectory_id,
+        attempt_index: req.attempt_index,
+        event_role: req.event_role.clone(),
         created_at: chrono::Utc::now(),
         summary_level: 0,
     };
@@ -1687,6 +1961,9 @@ mod tests {
             metadata: serde_json::json!({}),
             correlation_id: None,
             parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
+            event_role: None,
             created_at: Utc::now(),
             summary_level: 0,
         }
@@ -1704,6 +1981,9 @@ mod tests {
             metadata: serde_json::json!({}),
             correlation_id: None,
             parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
+            event_role: None,
             created_at: Utc::now(),
             summary_level: level,
         }

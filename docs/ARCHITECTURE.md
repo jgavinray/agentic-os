@@ -32,11 +32,17 @@ All endpoints except `/health`, `/health/live`, and `/health/ready` require `Aut
 Postgres owns durable structured memory:
 
 - `agent_sessions` tracks work sessions by repo/task/actor.
-- `agent_events` stores raw events, summaries, checkpoints, and promotion state.
+- `agent_events` stores raw events, summaries, checkpoints, promotion state, and trajectory lineage columns (`trajectory_id`, `attempt_index`, `event_role`).
 - `error_index` aggregates repeated failures by repo/task/type/description.
 - `token_usage` records model token accounting.
 
 Qdrant stores vectors for events in the `agent_events` collection. Qdrant indexing is best-effort: a Postgres write can succeed even if vector indexing fails.
+
+## Trajectory Lineage
+
+Trajectory capture groups one user intent and its downstream context pack, model response, tools, validations, patches, remediations, failures, and final result using the existing event log. A request starts a new `trajectory_id`; follow-on events inherit it. Context packs are written before the model response they inform, and the model response stores the `context_pack_id` back-reference.
+
+Completion writes one idempotent `trajectory_result` event with bounded statuses: `succeeded`, `abandoned`, `unresolved`, or `reverted`. `TRAJECTORY_CAPTURE_ENABLED=false` disables trajectory metadata, result emission, the idle sweep, and trajectory metrics. See [TRAJECTORIES.md](TRAJECTORIES.md).
 
 ## Retrieval Pipeline
 

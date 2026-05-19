@@ -80,6 +80,11 @@ pub struct ContextPackStats {
     pub retrieval_semantic_hits: usize,
     pub retrieval_fts_hits: usize,
     pub retrieval_deduped_hits: usize,
+    pub retrieved_event_ids: Vec<String>,
+    pub memory_levels_used: Vec<String>,
+    pub injected_failure_signatures: Vec<String>,
+    pub token_budget: usize,
+    pub truncated: bool,
     pub cache_hit: bool,
 }
 
@@ -426,6 +431,10 @@ pub struct AppState {
     pub rate_limiter: crate::rate_limit::RateLimiter,
     /// Enables deterministic execution feedback capture and Failure History context.
     pub execution_feedback_enabled: bool,
+    /// Enables deterministic trajectory lineage metadata and result emission.
+    pub trajectory_capture_enabled: bool,
+    /// Idle timeout after which an open trajectory is finalized as unresolved.
+    pub trajectory_idle_timeout_sec: u64,
     /// Token budget for the Failure History context section.
     pub failure_history_token_budget: usize,
     /// Controls sampling parameter audit capture and override hook invocation.
@@ -458,6 +467,9 @@ pub struct AppendEventRequest {
     pub metadata: Option<Value>,
     pub correlation_id: Option<uuid::Uuid>,
     pub parent_event_id: Option<uuid::Uuid>,
+    pub trajectory_id: Option<uuid::Uuid>,
+    pub attempt_index: Option<i32>,
+    pub event_role: Option<String>,
     pub task: Option<String>,
     pub error_type: Option<String>,
     pub error_description: Option<String>,

@@ -64,6 +64,18 @@ async fn main() -> Result<(), anyhow::Error> {
             )
         })
         .unwrap_or(true);
+    let trajectory_capture_enabled = env::var("TRAJECTORY_CAPTURE_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let trajectory_idle_timeout_sec = env::var("TRAJECTORY_IDLE_TIMEOUT_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(orchestrator::trajectory::DEFAULT_TRAJECTORY_IDLE_TIMEOUT_SEC);
     let sampling_config = sampling::SamplingConfig::from_env()?;
     let failure_history_token_budget = env::var("FAILURE_HISTORY_TOKEN_BUDGET")
         .ok()
@@ -134,6 +146,8 @@ async fn main() -> Result<(), anyhow::Error> {
         context_decay_rate,
         rate_limiter: rate_limit::RateLimiter::new(rate_limit_per_minute, rate_limit_burst),
         execution_feedback_enabled,
+        trajectory_capture_enabled,
+        trajectory_idle_timeout_sec,
         failure_history_token_budget,
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
@@ -142,6 +156,9 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     tokio::spawn(summarizer::run(Arc::clone(&state)));
+    if state.trajectory_capture_enabled {
+        tokio::spawn(handlers::run_trajectory_idle_sweep(Arc::clone(&state)));
+    }
 
     // ADD-5: TraceLayer emits structured per-request logs (method, path, status, latency).
     let cors = cors_layer_from_env()?;
