@@ -67,6 +67,7 @@ impl ExecutionEventKind {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         Some(match value {
             EVENT_TYPE_TOOL_RESULT => Self::ToolResult,

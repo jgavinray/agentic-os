@@ -8,6 +8,7 @@ pub mod logging;
 pub mod migrations;
 pub mod qdrant;
 pub mod rate_limit;
+pub mod sampling;
 pub mod sentiment;
 pub mod state;
 pub mod summarizer;

@@ -428,6 +428,10 @@ pub struct AppState {
     pub execution_feedback_enabled: bool,
     /// Token budget for the Failure History context section.
     pub failure_history_token_budget: usize,
+    /// Controls sampling parameter audit capture and override hook invocation.
+    pub sampling_config: crate::sampling::SamplingConfig,
+    /// Request-level sampling policy hook. Defaults to a no-op implementation.
+    pub sampling_policy: Arc<dyn crate::sampling::SamplingPolicy>,
     /// Prometheus scrape handle.
     pub prometheus: metrics_exporter_prometheus::PrometheusHandle,
     /// JSON compatibility snapshot for legacy metrics callers.

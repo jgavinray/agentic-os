@@ -927,6 +927,7 @@ async fn persist_exchange_with_correlation(
     user_content: &str,
     assistant_content: &str,
     correlation_id: Option<uuid::Uuid>,
+    request_metadata: Option<Value>,
 ) -> Option<uuid::Uuid> {
     // With execution feedback disabled, correlation_id is None and this writes
     // the same ordinary conversation events as before the feedback layer. With
@@ -934,7 +935,8 @@ async fn persist_exchange_with_correlation(
     let make_req = |event_type: &str,
                     actor: &str,
                     content: &str,
-                    parent_event_id: Option<uuid::Uuid>|
+                    parent_event_id: Option<uuid::Uuid>,
+                    metadata: Option<Value>|
      -> AppendEventRequest {
         AppendEventRequest {
             session_id: session_id.to_string(),
@@ -943,7 +945,7 @@ async fn persist_exchange_with_correlation(
             event_type: event_type.to_string(),
             summary: content.chars().take(500).collect(),
             evidence: None,
-            metadata: None,
+            metadata,
             correlation_id,
             parent_event_id: correlation_id.and(parent_event_id),
             task: None,
@@ -960,7 +962,7 @@ async fn persist_exchange_with_correlation(
                 repo,
                 "negative feedback detected — storing failed_attempt event"
             );
-            let req = make_req("failed_attempt", "user", user_content, None);
+            let req = make_req("failed_attempt", "user", user_content, None, None);
             if let Err(e) =
                 db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req)
                     .await
@@ -976,7 +978,12 @@ async fn persist_exchange_with_correlation(
         ("user_message", "user", user_content),
         ("assistant_message", "assistant", assistant_content),
     ] {
-        let req = make_req(event_type, actor, content, parent_event_id);
+        let metadata = if event_type == "user_message" {
+            request_metadata.clone()
+        } else {
+            None
+        };
+        let req = make_req(event_type, actor, content, parent_event_id, metadata);
         for attempt in 0u32..3 {
             match db::append_event_from_request(
                 &state.pool,
@@ -1195,12 +1202,24 @@ pub async fn chat_completions(
         .and_then(|v| v.as_str())
         .unwrap_or(&state.default_model)
         .to_string();
-
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
     req["model"] = Value::String(state.default_model.clone());
     enforce_min_max_tokens(&mut req);
     pack_context_into_req(&state, &mut req, &repo, &task).await;
+    let sampling_audit = crate::sampling::capture_and_maybe_override(
+        &payload,
+        &mut req,
+        state.sampling_config,
+        state.sampling_policy.as_ref(),
+    );
+    let request_metadata = sampling_audit.as_ref().map(|audit| {
+        audit.metadata(
+            "/v1/chat/completions",
+            &requested_model,
+            &state.default_model,
+        )
+    });
 
     if is_stream {
         return handle_streaming(
@@ -1211,6 +1230,7 @@ pub async fn chat_completions(
             requested_model,
             namespace,
             correlation_id,
+            request_metadata,
         )
         .await;
     }
@@ -1261,6 +1281,7 @@ pub async fn chat_completions(
                         &user_content,
                         &assistant_content,
                         correlation_id,
+                        request_metadata.clone(),
                     )
                     .await;
                     if let Some(correlation_id) = correlation_id {
@@ -1283,6 +1304,7 @@ pub async fn chat_completions(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_streaming(
     state: &AppState,
     req: Value,
@@ -1291,6 +1313,7 @@ async fn handle_streaming(
     requested_model: String,
     namespace: String,
     correlation_id: Option<uuid::Uuid>,
+    request_metadata: Option<Value>,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
@@ -1406,6 +1429,7 @@ async fn handle_streaming(
                         &user_content,
                         &assistant_content,
                         correlation_id,
+                        request_metadata,
                     )
                     .await;
                     if let Some(correlation_id) = correlation_id {
@@ -1587,6 +1611,7 @@ pub async fn messages(
                 &user_content,
                 &assistant_content,
                 correlation_id,
+                None,
             )
             .await;
             if let Some(correlation_id) = correlation_id {
@@ -1728,6 +1753,7 @@ async fn handle_streaming_anthropic(
                         &user_content,
                         &assistant_content,
                         correlation_id,
+                        None,
                     )
                     .await;
                     if let Some(correlation_id) = correlation_id {

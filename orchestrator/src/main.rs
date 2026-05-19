@@ -3,8 +3,8 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use orchestrator::{
-    db, embedder, handlers, logging, migrations, qdrant, rate_limit, sentiment, state, summarizer,
-    telemetry,
+    db, embedder, handlers, logging, migrations, qdrant, rate_limit, sampling, sentiment, state,
+    summarizer, telemetry,
 };
 use std::env;
 use std::sync::Arc;
@@ -64,6 +64,7 @@ async fn main() -> Result<(), anyhow::Error> {
             )
         })
         .unwrap_or(true);
+    let sampling_config = sampling::SamplingConfig::from_env()?;
     let failure_history_token_budget = env::var("FAILURE_HISTORY_TOKEN_BUDGET")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -134,6 +135,8 @@ async fn main() -> Result<(), anyhow::Error> {
         rate_limiter: rate_limit::RateLimiter::new(rate_limit_per_minute, rate_limit_burst),
         execution_feedback_enabled,
         failure_history_token_budget,
+        sampling_config,
+        sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
         prometheus,
         metrics,
     });

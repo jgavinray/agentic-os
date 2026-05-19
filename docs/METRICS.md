@@ -49,6 +49,7 @@
 | `memory_promotions_total` | counter | `result` | Accepted/rejected promotion decisions. |
 | `memory_source_coverage` | gauge | none | Fraction of promoted memory with source IDs. |
 | `rate_limited_total` | counter | `key_hash` | Inference requests rejected with HTTP 429. |
+| `sampling_param_overrides_total` | counter | `parameter`, `reason` | Sampling override hook executions. `parameter` is one of `temperature`, `top_p`, `max_tokens`, `seed`, or `none`; `reason` is `noop` or `overridden_by_orchestrator`. Raw parameter values are never labels. |
 | `process_cpu_seconds_total` | counter | none | Process CPU seconds. |
 | `process_resident_memory_bytes` | gauge | none | Resident memory bytes. |
 | `process_start_time_seconds` | gauge | none | Process start time. |

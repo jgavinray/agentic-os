@@ -294,6 +294,10 @@ fn describe_metrics() {
         "Requests rejected by the per-key rate limiter."
     );
     describe_counter!(
+        "sampling_param_overrides_total",
+        "Sampling parameter override hook executions by bounded parameter and reason."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -465,6 +469,25 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         }
     }
     gauge!("memory_source_coverage").set(registry.snapshot().memory_source_coverage);
+    counter!(
+        "sampling_param_overrides_total",
+        "parameter" => crate::sampling::PARAM_NONE,
+        "reason" => crate::sampling::REASON_NOOP
+    )
+    .increment(0);
+    for parameter in [
+        crate::sampling::PARAM_TEMPERATURE,
+        crate::sampling::PARAM_TOP_P,
+        crate::sampling::PARAM_MAX_TOKENS,
+        crate::sampling::PARAM_SEED,
+    ] {
+        counter!(
+            "sampling_param_overrides_total",
+            "parameter" => parameter,
+            "reason" => crate::sampling::REASON_OVERRIDDEN_BY_ORCHESTRATOR
+        )
+        .increment(0);
+    }
 }
 
 pub async fn http_metrics_middleware(req: Request, next: Next) -> Response {
@@ -713,6 +736,11 @@ pub fn record_promotion(registry: &MetricsRegistry, accepted: bool, has_sources:
 
 pub fn record_rate_limited(key_hash: &str) {
     counter!("rate_limited_total", "key_hash" => key_hash.to_string()).increment(1);
+}
+
+pub fn record_sampling_param_override(parameter: &'static str, reason: &'static str) {
+    counter!("sampling_param_overrides_total", "parameter" => parameter, "reason" => reason)
+        .increment(1);
 }
 
 pub fn record_db_query(op: &'static str, elapsed: Duration, success: bool) {
