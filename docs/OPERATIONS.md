@@ -84,6 +84,8 @@ Optional:
 | `DEFAULT_TASK` | `engineering` | Task label when no header is provided. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
+| `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
+| `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model directory. |
 | `SENTIMENT_THRESHOLD` | `0.70` | Negative sentiment threshold. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference route refill rate. |

@@ -40,6 +40,7 @@ pub struct MetricsSnapshot {
     pub l3_items_injected: u64,
     pub failed_attempts_injected: u64,
     pub remediations_injected: u64,
+    pub failure_history_items_injected: u64,
     pub retrieval_semantic_hits: u64,
     pub retrieval_fts_hits: u64,
     pub retrieval_deduped_hits: u64,
@@ -53,6 +54,11 @@ pub struct MetricsSnapshot {
     pub memory_source_items_with_sources: u64,
     pub memory_source_coverage: f64,
     pub stale_cache_invalidations: u64,
+    pub execution_artifacts: u64,
+    pub failure_signatures: u64,
+    pub patch_lifecycle_events: u64,
+    pub validation_results: u64,
+    pub remediation_reuse: u64,
 }
 
 #[derive(Clone)]
@@ -250,6 +256,30 @@ fn describe_metrics() {
         "context_cache_stale_invalidations_total",
         "Context cache invalidations triggered by new memory."
     );
+    describe_counter!(
+        "execution_artifacts_total",
+        "Structured execution artifact events written."
+    );
+    describe_counter!(
+        "failure_signatures_total",
+        "Canonical failure fingerprints recorded."
+    );
+    describe_counter!(
+        "patch_lifecycle_total",
+        "Patch lifecycle outcomes recorded."
+    );
+    describe_counter!(
+        "validation_results_total",
+        "Deterministic validation outcomes recorded."
+    );
+    describe_counter!(
+        "remediation_reuse_total",
+        "Prior remediations surfaced in context packs."
+    );
+    describe_gauge!(
+        "task_retries",
+        "Currently active retry chains across tasks."
+    );
     describe_counter!("memory_promotions_total", "Memory promotion decisions.");
     describe_gauge!(
         "memory_source_coverage",
@@ -288,6 +318,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         "/v1/models",
         "/sessions/start",
         "/events/append",
+        "/v1/validations",
         "/context/pack",
         "/search",
         "/metrics",
@@ -321,6 +352,8 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         "get_context_evidence",
         "search_events_fts",
         "hydrate_active_search_hits",
+        "get_event_chain",
+        "get_failure_history",
         "insert_error_record",
         "get_active_errors",
         "record_token_usage",
@@ -363,6 +396,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     for layer in ["l0", "l1", "l2", "l3", "failed_attempt", "remediation"] {
         counter!("context_pack_items_injected_total", "layer" => layer).increment(0);
     }
+    counter!("context_pack_items_injected_total", "layer" => "failure_history").increment(0);
     for source in ["semantic", "fts", "deduped"] {
         counter!("retrieval_hits_total", "source" => source).increment(0);
     }
@@ -371,6 +405,41 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
             .increment(0);
     }
     counter!("context_cache_stale_invalidations_total").increment(0);
+    for event_type in crate::execution_feedback::EXECUTION_EVENT_TYPES {
+        for success in ["true", "false"] {
+            counter!(
+                "execution_artifacts_total",
+                "event_type" => event_type,
+                "success" => success
+            )
+            .increment(0);
+        }
+    }
+    for outcome in ["applied", "rejected", "reverted"] {
+        counter!("patch_lifecycle_total", "outcome" => outcome).increment(0);
+    }
+    for validator in [
+        "cargo",
+        "pytest",
+        "npm test",
+        "eslint",
+        "tsc",
+        "mypy",
+        "ruff",
+        "terraform",
+        "kubectl",
+        "other",
+    ] {
+        for result in ["pass", "fail"] {
+            counter!(
+                "validation_results_total",
+                "validator" => validator,
+                "result" => result
+            )
+            .increment(0);
+        }
+    }
+    gauge!("task_retries").set(0.0);
     gauge!("memory_source_coverage").set(registry.snapshot().memory_source_coverage);
 }
 
@@ -434,6 +503,14 @@ pub fn record_context_pack(registry: &MetricsRegistry, stats: &crate::state::Con
     record_items("l3", stats.l3_items_injected);
     record_items("failed_attempt", stats.failed_attempts_injected);
     record_items("remediation", stats.remediations_injected);
+    record_items("failure_history", stats.failure_history_items_injected);
+    for signature in &stats.failure_history_remediation_signatures {
+        counter!(
+            "remediation_reuse_total",
+            "signature" => crate::execution_feedback::bounded_failure_signature_label(signature)
+        )
+        .increment(1);
+    }
     counter!("retrieval_hits_total", "source" => "semantic")
         .increment(stats.retrieval_semantic_hits as u64);
     counter!("retrieval_hits_total", "source" => "fts").increment(stats.retrieval_fts_hits as u64);
@@ -456,9 +533,76 @@ pub fn record_context_pack(registry: &MetricsRegistry, stats: &crate::state::Con
     metrics.l3_items_injected += stats.l3_items_injected as u64;
     metrics.failed_attempts_injected += stats.failed_attempts_injected as u64;
     metrics.remediations_injected += stats.remediations_injected as u64;
+    metrics.failure_history_items_injected += stats.failure_history_items_injected as u64;
+    metrics.remediation_reuse += stats.failure_history_remediation_signatures.len() as u64;
     metrics.retrieval_semantic_hits += stats.retrieval_semantic_hits as u64;
     metrics.retrieval_fts_hits += stats.retrieval_fts_hits as u64;
     metrics.retrieval_deduped_hits += stats.retrieval_deduped_hits as u64;
+}
+
+pub fn record_execution_artifact(event: &crate::db::AgentEvent) {
+    if !crate::execution_feedback::EXECUTION_EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return;
+    }
+
+    let success = event
+        .metadata
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let success_label = if success { "true" } else { "false" };
+    counter!(
+        "execution_artifacts_total",
+        "event_type" => event.event_type.clone(),
+        "success" => success_label
+    )
+    .increment(1);
+
+    match event.event_type.as_str() {
+        crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE => {
+            let payload = &event.metadata["payload"];
+            let signature = payload["signature"].as_str().unwrap_or("unknown");
+            let category = payload["category"].as_str().unwrap_or("unknown");
+            counter!(
+                "failure_signatures_total",
+                "signature" => crate::execution_feedback::bounded_failure_signature_label(signature),
+                "category" => crate::execution_feedback::bounded_failure_category_label(category)
+            )
+            .increment(1);
+            gauge!("task_retries").increment(1.0);
+        }
+        crate::execution_feedback::EVENT_TYPE_PATCH_RESULT => {
+            let outcome = match event.metadata["payload"]["outcome"].as_str() {
+                Some("applied") => "applied",
+                Some("reverted") => "reverted",
+                _ => "rejected",
+            };
+            counter!("patch_lifecycle_total", "outcome" => outcome).increment(1);
+        }
+        crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT
+        | crate::execution_feedback::EVENT_TYPE_TEST_RESULT
+        | crate::execution_feedback::EVENT_TYPE_LINT_RESULT
+        | crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT => {
+            let payload = &event.metadata["payload"];
+            let validator = payload["validator_name"]
+                .as_str()
+                .or_else(|| payload["framework"].as_str())
+                .or_else(|| payload["tool_name"].as_str())
+                .or_else(|| payload["target"].as_str())
+                .unwrap_or("other");
+            let result = if success { "pass" } else { "fail" };
+            counter!(
+                "validation_results_total",
+                "validator" => crate::execution_feedback::bounded_validator_label(validator),
+                "result" => result
+            )
+            .increment(1);
+        }
+        crate::execution_feedback::EVENT_TYPE_REMEDIATION => {
+            gauge!("task_retries").decrement(1.0);
+        }
+        _ => {}
+    }
 }
 
 fn record_items(layer: &'static str, count: usize) {

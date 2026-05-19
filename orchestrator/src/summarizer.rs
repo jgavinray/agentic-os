@@ -272,6 +272,8 @@ async fn do_summarize(
         summary: summary_text,
         evidence: None,
         metadata,
+        correlation_id: None,
+        parent_event_id: None,
         created_at: chrono::Utc::now(),
         summary_level: target_level,
     };

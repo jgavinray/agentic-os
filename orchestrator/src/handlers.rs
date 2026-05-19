@@ -334,6 +334,100 @@ pub async fn append_event(
         .into_response()
 }
 
+#[tracing::instrument(name = "handler.validations", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
+pub async fn validations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<crate::execution_feedback::ValidationReportRequest>,
+) -> Response {
+    if !check_auth(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    if !state.execution_feedback_enabled {
+        return axum::Json(crate::execution_feedback::ValidationReportResponse {
+            captured: false,
+            event_ids: vec![],
+            qdrant_indexed: false,
+        })
+        .into_response();
+    }
+
+    let session_id = match &req.session_id {
+        Some(session_id) => session_id.clone(),
+        None => match db::find_or_create_session(
+            &state.pool,
+            &req.repo,
+            &req.task,
+            req.actor.as_deref().unwrap_or("validator"),
+        )
+        .await
+        {
+            Ok(session_id) => session_id,
+            Err(e) => {
+                tracing::error!(
+                    target: "execution_feedback",
+                    repo = %req.repo,
+                    task = %req.task,
+                    "failed to create validation session: {e}"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({
+                        "error": "failed_to_create_validation_session",
+                        "detail": e.to_string()
+                    })),
+                )
+                    .into_response();
+            }
+        },
+    };
+
+    let ctx = crate::execution_feedback::ExecutionEventContext {
+        session_id,
+        repo: req.repo.clone(),
+        task: req.task.clone(),
+        actor: req.actor.clone().unwrap_or_else(|| "validator".to_string()),
+        correlation_id: req.correlation_id.unwrap_or_else(uuid::Uuid::new_v4),
+        parent_event_id: req.parent_event_id,
+    };
+    let events = crate::execution_feedback::events_for_validation_report(&ctx, &req);
+    let mut event_ids = Vec::new();
+    let mut qdrant_indexed = true;
+    for event in events {
+        match db::append_execution_event(&state.pool, &state.embedder, &state.qdrant_url, event)
+            .await
+        {
+            Ok((event_id, indexed)) => {
+                event_ids.push(event_id);
+                qdrant_indexed &= indexed;
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "execution_feedback",
+                    repo = %req.repo,
+                    task = %req.task,
+                    "failed to write validation event: {e}"
+                );
+            }
+        }
+    }
+
+    state.cache.invalidate(&req.repo, &req.task);
+    telemetry::record_cache_invalidation(&state.metrics);
+
+    axum::Json(crate::execution_feedback::ValidationReportResponse {
+        captured: !event_ids.is_empty(),
+        event_ids,
+        qdrant_indexed,
+    })
+    .into_response()
+}
+
 // ── Semantic / hybrid search helpers ───────────────────────────
 
 struct HybridSearchResult {
@@ -438,13 +532,37 @@ async fn get_or_build_cached_context(
     } else {
         policy.l0_recent_limit = policy.l0_recent_limit.min(task_config.max_events);
     }
-    let (evidence_result, hybrid_result, errors_result) = tokio::join!(
+    let failure_signatures = if state.execution_feedback_enabled {
+        crate::execution_feedback::extract_failure_signatures(task)
+    } else {
+        vec![]
+    };
+    let failure_history_limit = failure_signatures.len().max(1) as i64;
+
+    let (evidence_result, hybrid_result, errors_result, failure_history_result) = tokio::join!(
         db::get_context_evidence_for_policy(&state.pool, repo, &policy),
         hybrid_search(state, repo, task, task_config.semantic_limit),
         db::get_active_errors(&state.pool, repo, 5),
+        async {
+            if state.execution_feedback_enabled && !failure_signatures.is_empty() {
+                db::get_failure_history_for_signatures(
+                    &state.pool,
+                    repo,
+                    &failure_signatures,
+                    failure_history_limit,
+                )
+                .await
+            } else {
+                Ok(vec![])
+            }
+        },
     );
 
-    let evidence = evidence_result?;
+    let mut evidence = evidence_result?;
+    evidence.failure_history = failure_history_result.unwrap_or_else(|e| {
+        tracing::warn!(repo, task, "failure history lookup failed: {e}");
+        vec![]
+    });
     let errors = errors_result.unwrap_or_default();
     let memories = evidence.memories();
     let (context, mut stats) = db::build_layered_context(
@@ -455,6 +573,7 @@ async fn get_or_build_cached_context(
         &errors,
         &policy,
         task_config.char_budget,
+        state.failure_history_token_budget * 4,
     );
     stats.build_ms = build_started.elapsed().as_millis() as u64;
     stats.retrieval_semantic_hits = hybrid_result.semantic_hits;
@@ -550,6 +669,8 @@ pub async fn checkpoint(
             "next_actions": req.next_actions.unwrap_or_default(),
             "open_questions": req.open_questions.unwrap_or_default(),
         })),
+        correlation_id: None,
+        parent_event_id: None,
         task: Some(task_string),
         error_type: None,
         error_description: None,
@@ -795,24 +916,33 @@ fn extract_token_usage_from_sse(raw: &str) -> TokenUsage {
     usage
 }
 
-async fn persist_exchange(
+async fn persist_exchange_with_correlation(
     state: &AppState,
     session_id: &str,
     repo: &str,
     user_content: &str,
     assistant_content: &str,
-) {
-    let make_req = |event_type: &str, actor: &str, content: &str| AppendEventRequest {
-        session_id: session_id.to_string(),
-        repo: repo.to_string(),
-        actor: Some(actor.to_string()),
-        event_type: event_type.to_string(),
-        summary: content.chars().take(500).collect(),
-        evidence: None,
-        metadata: None,
-        task: None,
-        error_type: None,
-        error_description: None,
+    correlation_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    let make_req = |event_type: &str,
+                    actor: &str,
+                    content: &str,
+                    parent_event_id: Option<uuid::Uuid>|
+     -> AppendEventRequest {
+        AppendEventRequest {
+            session_id: session_id.to_string(),
+            repo: repo.to_string(),
+            actor: Some(actor.to_string()),
+            event_type: event_type.to_string(),
+            summary: content.chars().take(500).collect(),
+            evidence: None,
+            metadata: None,
+            correlation_id,
+            parent_event_id: correlation_id.and(parent_event_id),
+            task: None,
+            error_type: None,
+            error_description: None,
+        }
     };
 
     if let Some(classifier) = &state.sentiment {
@@ -823,7 +953,7 @@ async fn persist_exchange(
                 repo,
                 "negative feedback detected — storing failed_attempt event"
             );
-            let req = make_req("failed_attempt", "user", user_content);
+            let req = make_req("failed_attempt", "user", user_content, None);
             if let Err(e) =
                 db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req)
                     .await
@@ -833,11 +963,13 @@ async fn persist_exchange(
         }
     }
 
+    let mut parent_event_id = None;
+    let mut assistant_event_id = None;
     for (event_type, actor, content) in [
         ("user_message", "user", user_content),
         ("assistant_message", "assistant", assistant_content),
     ] {
-        let req = make_req(event_type, actor, content);
+        let req = make_req(event_type, actor, content, parent_event_id);
         for attempt in 0u32..3 {
             match db::append_event_from_request(
                 &state.pool,
@@ -847,11 +979,23 @@ async fn persist_exchange(
             )
             .await
             {
-                Ok((_, false)) => {
+                Ok((event_id, false)) => {
                     tracing::warn!("{event_type} stored in postgres but not qdrant-indexed");
+                    let parsed = uuid::Uuid::parse_str(&event_id).ok();
+                    if event_type == "assistant_message" {
+                        assistant_event_id = parsed;
+                    }
+                    parent_event_id = correlation_id.and(parsed);
                     break;
                 }
-                Ok(_) => break,
+                Ok((event_id, true)) => {
+                    let parsed = uuid::Uuid::parse_str(&event_id).ok();
+                    if event_type == "assistant_message" {
+                        assistant_event_id = parsed;
+                    }
+                    parent_event_id = correlation_id.and(parsed);
+                    break;
+                }
                 Err(e) if attempt < 2 => {
                     let delay = tokio::time::Duration::from_millis(200 * 2u64.pow(attempt));
                     tracing::debug!(
@@ -870,6 +1014,53 @@ async fn persist_exchange(
 
     state.cache.invalidate(repo, "");
     telemetry::record_cache_invalidation(&state.metrics);
+    assistant_event_id
+}
+
+fn capture_tool_results_background(
+    state: AppState,
+    session_id: String,
+    repo: String,
+    task: String,
+    correlation_id: uuid::Uuid,
+    parent_event_id: Option<uuid::Uuid>,
+    tool_results: Vec<crate::execution_feedback::CapturedToolResult>,
+) {
+    if !state.execution_feedback_enabled || tool_results.is_empty() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let ctx = crate::execution_feedback::ExecutionEventContext {
+            session_id,
+            repo: repo.clone(),
+            task: task.clone(),
+            actor: "validator".to_string(),
+            correlation_id,
+            parent_event_id,
+        };
+        for result in tool_results {
+            for event in crate::execution_feedback::events_for_tool_result(&ctx, &result) {
+                if let Err(e) = db::append_execution_event(
+                    &state.pool,
+                    &state.embedder,
+                    &state.qdrant_url,
+                    event,
+                )
+                .await
+                {
+                    tracing::error!(
+                        target: "execution_feedback",
+                        repo = %repo,
+                        task = %task,
+                        "failed to write execution feedback event: {e}"
+                    );
+                }
+            }
+        }
+        state.cache.invalidate(&repo, &task);
+        telemetry::record_cache_invalidation(&state.metrics);
+    });
 }
 
 /// Pack orchestrator context into an OpenAI-shaped request.
@@ -980,6 +1171,7 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
+    let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
 
     tracing::info!(repo = %repo, task = %task, "routing request");
 
@@ -996,7 +1188,16 @@ pub async fn chat_completions(
     pack_context_into_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
-        return handle_streaming(&state, req, repo, task, requested_model, namespace).await;
+        return handle_streaming(
+            &state,
+            req,
+            repo,
+            task,
+            requested_model,
+            namespace,
+            correlation_id,
+        )
+        .await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
@@ -1032,17 +1233,30 @@ pub async fn chat_completions(
                 .chars()
                 .take(500)
                 .collect();
+            let tool_results = crate::execution_feedback::tool_results_from_value(&val);
 
             match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
                 Ok(session_id) => {
-                    persist_exchange(
+                    let assistant_event_id = persist_exchange_with_correlation(
                         &state,
                         &session_id,
                         &repo,
                         &user_content,
                         &assistant_content,
+                        correlation_id,
                     )
-                    .await
+                    .await;
+                    if let Some(correlation_id) = correlation_id {
+                        capture_tool_results_background(
+                            state.as_ref().clone(),
+                            session_id,
+                            repo.clone(),
+                            task.clone(),
+                            correlation_id,
+                            assistant_event_id,
+                            tool_results,
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!("find_or_create_session failed: {e}"),
             }
@@ -1059,6 +1273,7 @@ async fn handle_streaming(
     task: String,
     requested_model: String,
     namespace: String,
+    correlation_id: Option<uuid::Uuid>,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
@@ -1162,10 +1377,29 @@ async fn handle_streaming(
                 }
             }
             let assistant_content = extract_assistant_from_sse(&raw);
+            let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
-                    persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content)
-                        .await
+                    let assistant_event_id = persist_exchange_with_correlation(
+                        &state_bg,
+                        &sid,
+                        &repo,
+                        &user_content,
+                        &assistant_content,
+                        correlation_id,
+                    )
+                    .await;
+                    if let Some(correlation_id) = correlation_id {
+                        capture_tool_results_background(
+                            state_bg.clone(),
+                            sid,
+                            repo.clone(),
+                            task.clone(),
+                            correlation_id,
+                            assistant_event_id,
+                            tool_results,
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
             }
@@ -1217,6 +1451,7 @@ pub async fn messages(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
+    let correlation_id = state.execution_feedback_enabled.then(uuid::Uuid::new_v4);
 
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
 
@@ -1235,8 +1470,17 @@ pub async fn messages(
     pack_context_into_anthropic_req(&state, &mut req, &repo, &task).await;
 
     if is_stream {
-        return handle_streaming_anthropic(&state, req, user_content, repo, task, model, namespace)
-            .await;
+        return handle_streaming_anthropic(
+            &state,
+            req,
+            user_content,
+            repo,
+            task,
+            model,
+            namespace,
+            correlation_id,
+        )
+        .await;
     }
 
     // ── Non-streaming: passthrough to LiteLLM /messages ────────
@@ -1310,8 +1554,30 @@ pub async fn messages(
     }
 
     let assistant_content = extract_assistant_from_anthropic_response(&val);
+    let tool_results = crate::execution_feedback::tool_results_from_value(&val);
     match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-        Ok(sid) => persist_exchange(&state, &sid, &repo, &user_content, &assistant_content).await,
+        Ok(sid) => {
+            let assistant_event_id = persist_exchange_with_correlation(
+                &state,
+                &sid,
+                &repo,
+                &user_content,
+                &assistant_content,
+                correlation_id,
+            )
+            .await;
+            if let Some(correlation_id) = correlation_id {
+                capture_tool_results_background(
+                    state.as_ref().clone(),
+                    sid,
+                    repo.clone(),
+                    task.clone(),
+                    correlation_id,
+                    assistant_event_id,
+                    tool_results,
+                );
+            }
+        }
         Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
     }
 
@@ -1319,6 +1585,7 @@ pub async fn messages(
 }
 
 /// Proxy an Anthropic streaming request to LiteLLM /messages, passing bytes through unchanged.
+#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_anthropic(
     state: &AppState,
     req: Value,
@@ -1327,6 +1594,7 @@ async fn handle_streaming_anthropic(
     task: String,
     model: String,
     namespace: String,
+    correlation_id: Option<uuid::Uuid>,
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
 
@@ -1425,10 +1693,29 @@ async fn handle_streaming_anthropic(
                 }
             }
             let assistant_content = extract_assistant_from_anthropic_sse(&raw);
+            let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
             match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
                 Ok(sid) => {
-                    persist_exchange(&state_bg, &sid, &repo, &user_content, &assistant_content)
-                        .await
+                    let assistant_event_id = persist_exchange_with_correlation(
+                        &state_bg,
+                        &sid,
+                        &repo,
+                        &user_content,
+                        &assistant_content,
+                        correlation_id,
+                    )
+                    .await;
+                    if let Some(correlation_id) = correlation_id {
+                        capture_tool_results_background(
+                            state_bg.clone(),
+                            sid,
+                            repo.clone(),
+                            task.clone(),
+                            correlation_id,
+                            assistant_event_id,
+                            tool_results,
+                        );
+                    }
                 }
                 Err(e) => tracing::warn!("messages stream: find_or_create_session failed: {e}"),
             }
@@ -1770,6 +2057,7 @@ mod tests {
             &[],
             &policy,
             16_000,
+            4000,
         );
 
         let l3 = context.find("== Durable Project Memory ==").unwrap();
@@ -1796,8 +2084,16 @@ mod tests {
         }];
         let policy = ContextPolicy::for_category(TaskCategory::Narrow);
 
-        let (context, stats) =
-            db::build_layered_context("repo", "debug lag", &evidence, &[], &[], &policy, 8000);
+        let (context, stats) = db::build_layered_context(
+            "repo",
+            "debug lag",
+            &evidence,
+            &[],
+            &[],
+            &policy,
+            8000,
+            4000,
+        );
 
         assert!(context.contains("unbounded retries caused lag"));
         assert!(context.contains("Evidence: the old retry loop timed out"));
@@ -1832,10 +2128,10 @@ mod tests {
     // ── context_pack tokio::join! parallelization ─────────────────
 
     /// Verifies the shared context builder uses tokio::join! to parallelize
-    /// the three independent I/O calls: db::get_context_evidence_for_policy,
-    /// hybrid_search, and db::get_active_errors.
+    /// the independent I/O calls: db::get_context_evidence_for_policy,
+    /// hybrid_search, db::get_active_errors, and failure history lookup.
     #[test]
-    fn context_pack_parallelizes_three_io_calls() {
+    fn context_pack_parallelizes_context_io_calls() {
         let src = include_str!("handlers.rs");
         let ctx_start = src
             .find("async fn get_or_build_cached_context")
@@ -1859,6 +2155,10 @@ mod tests {
             ctx_body.contains("db::get_active_errors"),
             "get_active_errors should be in tokio::join!"
         );
+        assert!(
+            ctx_body.contains("db::get_failure_history_for_signatures"),
+            "failure history lookup should be in tokio::join!"
+        );
 
         let join_block_start = ctx_body
             .find("tokio::join!")
@@ -1867,8 +2167,9 @@ mod tests {
         assert!(
             join_block.contains("get_context_evidence_for_policy")
                 && join_block.contains("hybrid_search")
-                && join_block.contains("get_active_errors"),
-            "All three I/O calls should be within the same tokio::join!"
+                && join_block.contains("get_active_errors")
+                && join_block.contains("get_failure_history_for_signatures"),
+            "All context I/O calls should be within the same tokio::join!"
         );
     }
 
@@ -1884,6 +2185,23 @@ mod tests {
             ctx_body.contains("INTERNAL_SERVER_ERROR"),
             "context_pack should return 500 on events_for_repo error"
         );
+    }
+
+    #[test]
+    fn failure_history_and_validation_capture_are_feature_flagged() {
+        let src = include_str!("handlers.rs");
+        assert!(src.contains("state.execution_feedback_enabled"));
+        let ctx_start = src
+            .find("async fn get_or_build_cached_context")
+            .expect("get_or_build_cached_context not found");
+        let ctx_body: String = src[ctx_start..].chars().take(2500).collect();
+        assert!(ctx_body.contains("state.execution_feedback_enabled"));
+
+        let validation_start = src
+            .find("pub async fn validations")
+            .expect("validations handler not found");
+        let validation_body: String = src[validation_start..].chars().take(1200).collect();
+        assert!(validation_body.contains("!state.execution_feedback_enabled"));
     }
 
     /// Verify hybrid_search still uses tokio::join! internally.
@@ -2064,6 +2382,8 @@ mod tests {
             summary: summary.to_string(),
             evidence: None,
             metadata: json!({}),
+            correlation_id: None,
+            parent_event_id: None,
             created_at: Utc::now(),
             summary_level,
         }

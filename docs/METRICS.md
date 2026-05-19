@@ -39,6 +39,12 @@
 | `retrieval_hits_total` | counter | `source` | Semantic, FTS, and deduped retrieval hits. |
 | `inference_tokens_total` | counter | `kind`, `model` | Processed, cached, and generated tokens. |
 | `context_cache_stale_invalidations_total` | counter | none | Cache invalidations caused by memory writes. |
+| `execution_artifacts_total` | counter | `event_type`, `success` | Structured execution artifact events written. |
+| `failure_signatures_total` | counter | `signature`, `category` | Canonical failure fingerprints recorded. |
+| `patch_lifecycle_total` | counter | `outcome` | Patch outcomes: applied, rejected, or reverted. |
+| `validation_results_total` | counter | `validator`, `result` | Deterministic validator outcomes. |
+| `remediation_reuse_total` | counter | `signature` | Prior remediations surfaced in context packs. |
+| `task_retries` | gauge | none | Currently active retry chains across tasks. |
 | `memory_promotions_total` | counter | `result` | Accepted/rejected promotion decisions. |
 | `memory_source_coverage` | gauge | none | Fraction of promoted memory with source IDs. |
 | `rate_limited_total` | counter | `key_hash` | Inference requests rejected with HTTP 429. |

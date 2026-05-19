@@ -1,6 +1,7 @@
 mod anthropic;
 mod db;
 mod embedder;
+mod execution_feedback;
 mod handlers;
 mod hybrid;
 mod logging;
@@ -66,6 +67,18 @@ async fn main() -> Result<(), anyhow::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
+    let execution_feedback_enabled = env::var("EXECUTION_FEEDBACK_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let failure_history_token_budget = env::var("FAILURE_HISTORY_TOKEN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET);
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
@@ -127,6 +140,8 @@ async fn main() -> Result<(), anyhow::Error> {
         cache: state::ContextCache::new(cache_ttl_ms),
         context_decay_rate,
         rate_limiter: rate_limit::RateLimiter::new(rate_limit_per_minute, rate_limit_burst),
+        execution_feedback_enabled,
+        failure_history_token_budget,
         prometheus,
         metrics,
     });
@@ -143,6 +158,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/messages", post(handlers::messages))
+        .route("/v1/validations", post(handlers::validations))
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/context/pack", post(handlers::context_pack))

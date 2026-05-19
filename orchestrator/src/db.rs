@@ -7,6 +7,7 @@ const SINGLE_WRITER_LOCK_KEY: i64 = 0x4167_656e_7469_634f;
 
 // ── Reusable event type ──────────────────────────────────────
 
+#[derive(Clone, Debug)]
 pub struct AgentEvent {
     pub id: String,
     pub session_id: String,
@@ -16,6 +17,8 @@ pub struct AgentEvent {
     pub summary: String,
     pub evidence: Option<String>,
     pub metadata: serde_json::Value,
+    pub correlation_id: Option<Uuid>,
+    pub parent_event_id: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub summary_level: i32,
 }
@@ -42,6 +45,8 @@ impl AgentEvent {
             "summary": self.summary,
             "evidence": self.evidence,
             "metadata": self.metadata,
+            "correlation_id": self.correlation_id.map(|id| id.to_string()),
+            "parent_event_id": self.parent_event_id.map(|id| id.to_string()),
             "created_at": self.created_at,
             "summary_level": self.summary_level
         })
@@ -66,6 +71,7 @@ pub struct ContextEvidence {
     pub l2_repo: Vec<AgentEvent>,
     pub l3_project: Vec<AgentEvent>,
     pub failures: Vec<AgentEvent>,
+    pub failure_history: Vec<FailureHistoryItem>,
 }
 
 impl ContextEvidence {
@@ -76,6 +82,11 @@ impl ContextEvidence {
             .chain(self.l2_repo.iter())
             .chain(self.l3_project.iter())
             .chain(self.failures.iter())
+            .chain(
+                self.failure_history
+                    .iter()
+                    .flat_map(|item| std::iter::once(&item.failure).chain(item.remediation.iter())),
+            )
             .map(AgentEvent::to_memory)
             .collect()
     }
@@ -96,9 +107,23 @@ impl ContextEvidence {
                 .iter()
                 .filter(|e| e.event_type == "remediation")
                 .count(),
+            failure_history_items_injected: self.failure_history.len(),
+            failure_history_remediation_signatures: self
+                .failure_history
+                .iter()
+                .filter_map(|item| item.remediation.as_ref().map(|_| item.signature.clone()))
+                .collect(),
             ..Default::default()
         }
     }
+}
+
+#[derive(Clone)]
+pub struct FailureHistoryItem {
+    pub signature: String,
+    pub category: String,
+    pub failure: AgentEvent,
+    pub remediation: Option<AgentEvent>,
 }
 
 // ── Connection pool ────────────────────────────────────────────
@@ -262,8 +287,8 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
         let conn = pool.get().await?;
         conn.execute(
             "INSERT INTO agent_events
-             (id, session_id, repo, actor, event_type, summary, evidence, metadata, summary_level)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, summary_level)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             &[
                 &event.id,
                 &event.session_id,
@@ -273,6 +298,8 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
                 &event.summary,
                 &event.evidence,
                 &event.metadata,
+                &event.correlation_id,
+                &event.parent_event_id,
                 &event.summary_level,
             ],
         )
@@ -281,7 +308,192 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     }
     .await;
     crate::telemetry::record_db_query("insert_event", started.elapsed(), result.is_ok());
+    if result.is_ok() {
+        tracing::info!(
+            target: "execution_feedback",
+            event_type = %event.event_type,
+            event_id = %event.id,
+            correlation_id = ?event.correlation_id,
+            "event written"
+        );
+    }
     result
+}
+
+pub async fn append_execution_event(
+    pool: &Pool,
+    embedder: &crate::embedder::Embedder,
+    qdrant_url: &str,
+    event: AgentEvent,
+) -> Result<(String, bool), anyhow::Error> {
+    let id = insert_execution_artifact_event(pool, &event).await?;
+    let qdrant_indexed = match crate::qdrant::store_event(embedder, qdrant_url, &event).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                event_id = %id,
+                event_type = %event.event_type,
+                "execution event stored in postgres but qdrant indexing failed: {e}"
+            );
+            false
+        }
+    };
+    Ok((id, qdrant_indexed))
+}
+
+pub async fn insert_execution_artifact_event(
+    pool: &Pool,
+    event: &AgentEvent,
+) -> Result<String, anyhow::Error> {
+    insert_event(pool, event).await?;
+    crate::telemetry::record_execution_artifact(event);
+    Ok(event.id.clone())
+}
+
+#[allow(dead_code)]
+pub async fn insert_tool_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    result: &crate::execution_feedback::CapturedToolResult,
+) -> Result<String, anyhow::Error> {
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::ToolResult,
+        result.exit_code == 0,
+        crate::execution_feedback::tool_result_payload(result),
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_compile_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    language: &str,
+    target: &str,
+    exit_code: i32,
+    content: &str,
+) -> Result<String, anyhow::Error> {
+    let payload =
+        crate::execution_feedback::compile_result_payload(language, target, exit_code, content);
+    let success = exit_code == 0 && payload["error_count"].as_u64().unwrap_or_default() == 0;
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::CompileResult,
+        success,
+        payload,
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_test_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    framework: &str,
+    content: &str,
+) -> Result<String, anyhow::Error> {
+    let payload = crate::execution_feedback::test_result_payload(framework, content);
+    let success = payload["failed"].as_u64().unwrap_or_default() == 0;
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::TestResult,
+        success,
+        payload,
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_lint_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    tool_name: &str,
+    content: &str,
+) -> Result<String, anyhow::Error> {
+    let payload = crate::execution_feedback::lint_result_payload(tool_name, content);
+    let success = payload["error_count"].as_u64().unwrap_or_default() == 0;
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::LintResult,
+        success,
+        payload,
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_validation_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    validator_name: &str,
+    pass: bool,
+    failure_reason: &str,
+) -> Result<String, anyhow::Error> {
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::ValidationResult,
+        pass,
+        crate::execution_feedback::validation_result_payload(validator_name, pass, failure_reason),
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_patch_result_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    files_touched: Vec<String>,
+    outcome: &str,
+    validation_event_ids: Vec<Uuid>,
+) -> Result<String, anyhow::Error> {
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::PatchResult,
+        outcome == "applied",
+        crate::execution_feedback::patch_result_payload(
+            files_touched,
+            outcome,
+            validation_event_ids,
+        ),
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_remediation_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    failure_event_id: Uuid,
+    resolving_event_id: Uuid,
+    signature: &str,
+) -> Result<String, anyhow::Error> {
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::Remediation,
+        true,
+        crate::execution_feedback::remediation_payload(
+            failure_event_id,
+            resolving_event_id,
+            signature,
+        ),
+    );
+    insert_execution_artifact_event(pool, &event).await
+}
+
+#[allow(dead_code)]
+pub async fn insert_failure_signature_event(
+    pool: &Pool,
+    ctx: &crate::execution_feedback::ExecutionEventContext,
+    fingerprint: &crate::execution_feedback::FailureFingerprint,
+) -> Result<String, anyhow::Error> {
+    let event = crate::execution_feedback::build_execution_event(
+        ctx,
+        crate::execution_feedback::ExecutionEventKind::FailureSignature,
+        false,
+        crate::execution_feedback::failure_signature_payload(fingerprint),
+    );
+    insert_execution_artifact_event(pool, &event).await
 }
 
 #[allow(dead_code)]
@@ -293,7 +505,7 @@ pub async fn get_events_for_repo(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summarized = false
@@ -315,6 +527,8 @@ pub async fn get_events_for_repo(
             summary: row.get("summary"),
             evidence: row.get("evidence"),
             metadata: row.get("metadata"),
+            correlation_id: row.get("correlation_id"),
+            parent_event_id: row.get("parent_event_id"),
             created_at: row.get("created_at"),
             summary_level: row.get("summary_level"),
         })
@@ -397,6 +611,7 @@ pub async fn get_context_evidence_for_policy(
         l2_repo: l2_repo?,
         l3_project: l3_project?,
         failures: failures?,
+        failure_history: vec![],
     });
     crate::telemetry::record_db_query("get_context_evidence", started.elapsed(), result.is_ok());
     result
@@ -416,7 +631,7 @@ async fn get_events_for_repo_by_level(
     let level = level.as_i32();
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summary_level = $2
@@ -442,7 +657,7 @@ async fn get_failure_events_for_repo(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND event_type IN ('failed_attempt', 'remediation')
@@ -465,7 +680,7 @@ async fn get_events_for_repo_by_levels(
     let conn = pool.get().await?;
     let rows = conn
         .query(
-            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, created_at, summary_level
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
              FROM agent_events
              WHERE repo = $1
                AND summarized = false
@@ -490,6 +705,8 @@ fn rows_to_events(rows: Vec<tokio_postgres::Row>) -> Vec<AgentEvent> {
             summary: row.get("summary"),
             evidence: row.get("evidence"),
             metadata: row.get("metadata"),
+            correlation_id: row.get("correlation_id"),
+            parent_event_id: row.get("parent_event_id"),
             created_at: row.get("created_at"),
             summary_level: row.get("summary_level"),
         })
@@ -592,6 +809,177 @@ pub async fn hydrate_active_search_hits(
         result.is_ok(),
     );
     result
+}
+
+pub async fn get_event_chain_by_event_id(
+    pool: &Pool,
+    event_id: &str,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let seed = get_event_by_id(pool, event_id).await?;
+        let Some(correlation_id) = seed.correlation_id else {
+            return Ok(vec![seed]);
+        };
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+                 FROM agent_events
+                 WHERE correlation_id = $1
+                 ORDER BY created_at ASC, id ASC",
+                &[&correlation_id],
+            )
+            .await?;
+        Ok(order_event_chain(rows_to_events(rows), event_id))
+    }
+    .await;
+    crate::telemetry::record_db_query("get_event_chain", started.elapsed(), result.is_ok());
+    result
+}
+
+async fn get_event_by_id(pool: &Pool, event_id: &str) -> Result<AgentEvent, anyhow::Error> {
+    let conn = pool.get().await?;
+    let row = conn
+        .query_one(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+             FROM agent_events
+             WHERE id = $1",
+            &[&event_id],
+        )
+        .await?;
+    Ok(rows_to_events(vec![row]).remove(0))
+}
+
+pub fn order_event_chain(events: Vec<AgentEvent>, seed_id: &str) -> Vec<AgentEvent> {
+    if events.is_empty() {
+        return vec![];
+    }
+    let by_id: std::collections::HashMap<String, AgentEvent> = events
+        .iter()
+        .map(|event| (event.id.clone(), event.clone()))
+        .collect();
+    let Some(seed) = by_id.get(seed_id).cloned() else {
+        return events;
+    };
+
+    let mut root = seed.clone();
+    let mut guard = std::collections::HashSet::new();
+    while let Some(parent_id) = root.parent_event_id {
+        if !guard.insert(root.id.clone()) {
+            break;
+        }
+        let parent_key = parent_id.to_string();
+        let Some(parent) = by_id.get(&parent_key) else {
+            break;
+        };
+        root = parent.clone();
+    }
+
+    let grouped = crate::execution_feedback::group_by_parent(&events);
+    let mut ordered = Vec::new();
+    append_chain_tree(&root, &grouped, &mut ordered);
+    ordered
+}
+
+fn append_chain_tree(
+    event: &AgentEvent,
+    grouped: &std::collections::BTreeMap<Option<Uuid>, Vec<AgentEvent>>,
+    ordered: &mut Vec<AgentEvent>,
+) {
+    ordered.push(event.clone());
+    let Ok(event_uuid) = Uuid::parse_str(&event.id) else {
+        return;
+    };
+    if let Some(children) = grouped.get(&Some(event_uuid)) {
+        for child in children {
+            append_chain_tree(child, grouped, ordered);
+        }
+    }
+}
+
+pub async fn get_failure_history_for_signatures(
+    pool: &Pool,
+    repo: &str,
+    signatures: &[String],
+    limit: i64,
+) -> Result<Vec<FailureHistoryItem>, anyhow::Error> {
+    if signatures.is_empty() || limit <= 0 {
+        return Ok(vec![]);
+    }
+
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND event_type = 'failure_signature'
+                   AND metadata->'payload'->>'signature' = ANY($2)
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+                &[&repo, &signatures, &limit],
+            )
+            .await?;
+
+        let failures = rows_to_events(rows);
+        let mut items = Vec::new();
+        for failure in failures {
+            let signature = event_payload_str(&failure, "signature").unwrap_or("unknown");
+            let category = event_payload_str(&failure, "category").unwrap_or("unknown");
+            let remediation = remediation_for_failure(pool, &failure, signature).await?;
+            items.push(FailureHistoryItem {
+                signature: signature.to_string(),
+                category: category.to_string(),
+                failure,
+                remediation,
+            });
+        }
+        Ok(items)
+    }
+    .await;
+    crate::telemetry::record_db_query("get_failure_history", started.elapsed(), result.is_ok());
+    result
+}
+
+async fn remediation_for_failure(
+    pool: &Pool,
+    failure: &AgentEvent,
+    signature: &str,
+) -> Result<Option<AgentEvent>, anyhow::Error> {
+    let chain = get_event_chain_by_event_id(pool, &failure.id).await?;
+    if let Some(remediation) = chain.into_iter().find(|event| {
+        event.event_type == crate::execution_feedback::EVENT_TYPE_REMEDIATION
+            && (event_payload_str(event, "signature") == Some(signature)
+                || event_payload_str(event, "failure_event_id") == Some(failure.id.as_str()))
+    }) {
+        return Ok(Some(remediation));
+    }
+
+    let conn = pool.get().await?;
+    let row = conn
+        .query_opt(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND event_type = 'remediation'
+               AND metadata->'payload'->>'signature' = $2
+             ORDER BY created_at DESC
+             LIMIT 1",
+            &[&failure.repo, &signature],
+        )
+        .await?;
+    Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+}
+
+fn event_payload_str<'a>(event: &'a AgentEvent, key: &str) -> Option<&'a str> {
+    event
+        .metadata
+        .get("payload")
+        .and_then(|payload| payload.get(key))
+        .and_then(serde_json::Value::as_str)
 }
 
 pub async fn insert_error_record(
@@ -698,6 +1086,8 @@ pub async fn append_event_from_request(
         summary: req.summary.clone(),
         evidence: req.evidence.clone(),
         metadata,
+        correlation_id: req.correlation_id,
+        parent_event_id: req.parent_event_id,
         created_at: chrono::Utc::now(),
         summary_level: 0,
     };
@@ -850,6 +1240,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_layered_context(
     repo: &str,
     task: &str,
@@ -858,6 +1249,7 @@ pub fn build_layered_context(
     errors: &[crate::state::ErrorRecord],
     policy: &crate::state::ContextPolicy,
     char_budget: usize,
+    failure_history_char_budget: usize,
 ) -> (String, crate::state::ContextPackStats) {
     let header = format!(
         "Repository: {repo}\nTask: {task}\nContext policy: {:?}\n\n",
@@ -908,14 +1300,76 @@ pub fn build_layered_context(
         policy.budget_for(policy.failure_pct, char_budget),
         &mut seen,
     );
+    let reused_signatures = append_failure_history_section(
+        &mut out,
+        &evidence.failure_history,
+        failure_history_char_budget,
+        &mut seen,
+    );
     append_open_questions(&mut out, &evidence.l0_recent, &mut seen);
 
     let mut stats = evidence.stats();
+    stats.failure_history_remediation_signatures = reused_signatures;
     stats.context_chars = out.len();
     stats.context_tokens_estimate = estimate_tokens(&out);
     stats.retrieval_deduped_hits = hybrid_hits.len();
 
     (out, stats)
+}
+
+fn append_failure_history_section(
+    out: &mut String,
+    items: &[FailureHistoryItem],
+    budget: usize,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<String> {
+    if items.is_empty() || budget == 0 {
+        return vec![];
+    }
+
+    let mut body = String::new();
+    let mut used = 0usize;
+    let mut reused_signatures = Vec::new();
+    for item in items {
+        let key = format!("failure-history:{}", item.failure.id);
+        if !seen.insert(key) {
+            continue;
+        }
+        let mut line = format!(
+            "- [failure_signature:{}] {}\n  Category: {}\n",
+            item.signature, item.failure.summary, item.category
+        );
+        if let Some(excerpt) = item
+            .failure
+            .metadata
+            .get("payload")
+            .and_then(|payload| payload.get("raw_excerpt"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|excerpt| !excerpt.is_empty())
+        {
+            line.push_str(&format!(
+                "  Excerpt: {}\n",
+                excerpt.chars().take(300).collect::<String>()
+            ));
+        }
+        if let Some(remediation) = &item.remediation {
+            line.push_str(&format!("  Remediation: {}\n", remediation.summary));
+            reused_signatures.push(item.signature.clone());
+        }
+        if used + line.len() > budget {
+            body.push_str("- [truncated: failure history budget exceeded]\n");
+            break;
+        }
+        used += line.len();
+        body.push_str(&line);
+    }
+
+    if !body.is_empty() {
+        out.push_str("== Failure History ==\n");
+        out.push_str(&body);
+        out.push('\n');
+    }
+    reused_signatures
 }
 
 fn append_event_section(
@@ -1162,6 +1616,8 @@ mod tests {
             summary: summary.to_string(),
             evidence: None,
             metadata: serde_json::json!({}),
+            correlation_id: None,
+            parent_event_id: None,
             created_at: Utc::now(),
             summary_level: 0,
         }
@@ -1177,6 +1633,8 @@ mod tests {
             summary: summary.to_string(),
             evidence: None,
             metadata: serde_json::json!({}),
+            correlation_id: None,
+            parent_event_id: None,
             created_at: Utc::now(),
             summary_level: level,
         }
@@ -1299,7 +1757,7 @@ mod tests {
 
         let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
         let (out, stats) =
-            build_layered_context("r", "fix bug", &evidence, &[], &[], &policy, 8000);
+            build_layered_context("r", "fix bug", &evidence, &[], &[], &policy, 8000, 4000);
 
         assert!(out.contains("== Recent Evidence =="));
         assert!(out.contains("fresh implementation detail"));
@@ -1317,8 +1775,16 @@ mod tests {
         evidence.l2_repo = vec![event_at_level("summary", "repo-level pattern", 2)];
 
         let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Broad);
-        let (out, _stats) =
-            build_layered_context("r", "large refactor", &evidence, &[], &[], &policy, 8000);
+        let (out, _stats) = build_layered_context(
+            "r",
+            "large refactor",
+            &evidence,
+            &[],
+            &[],
+            &policy,
+            8000,
+            4000,
+        );
 
         assert!(out.contains("latest local change"));
         assert!(out.contains("session summary"));
@@ -1341,6 +1807,7 @@ mod tests {
             &[],
             &policy,
             8000,
+            4000,
         );
 
         let l3_pos = out.find("durable architecture truth").unwrap();
@@ -1358,8 +1825,16 @@ mod tests {
 
         let policy =
             crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Architecture);
-        let (out, _stats) =
-            build_layered_context("r", "architecture", &evidence, &[], &[], &policy, 8000);
+        let (out, _stats) = build_layered_context(
+            "r",
+            "architecture",
+            &evidence,
+            &[],
+            &[],
+            &policy,
+            8000,
+            4000,
+        );
 
         assert!(out.contains("raw event still included"));
         assert!(out.contains("durable compressed memory"));
@@ -1376,13 +1851,228 @@ mod tests {
 
         let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
         let (out, stats) =
-            build_layered_context("r", "fix cache", &evidence, &[], &[], &policy, 8000);
+            build_layered_context("r", "fix cache", &evidence, &[], &[], &policy, 8000, 4000);
 
         assert!(out.contains("== Failed Attempts and Remediations =="));
         assert!(out.contains("observed repeated stale pack after append_event"));
         assert!(out.contains("Outcome: new key includes event count"));
         assert!(out.contains("Source IDs: 2"));
         assert_eq!(stats.failed_attempts_injected, 1);
+    }
+
+    #[test]
+    fn failure_history_section_sits_between_failures_and_open_questions() {
+        let mut evidence = ContextEvidence::default();
+        evidence.failures = vec![failed_event(
+            "old patch broke cache invalidation",
+            "cargo test failed",
+            "invalidate by repo prefix",
+        )];
+        evidence.failure_history = vec![FailureHistoryItem {
+            signature: "rust:type-mismatch".to_string(),
+            category: "rust".to_string(),
+            failure: AgentEvent {
+                event_type: crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE.to_string(),
+                summary: "failure signature rust:type-mismatch".to_string(),
+                metadata: serde_json::json!({
+                    "payload": {
+                        "signature": "rust:type-mismatch",
+                        "category": "rust",
+                        "raw_excerpt": "error[E0308]: mismatched types"
+                    }
+                }),
+                ..event_at_level(
+                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
+                    "failure signature rust:type-mismatch",
+                    0,
+                )
+            },
+            remediation: Some(AgentEvent {
+                event_type: crate::execution_feedback::EVENT_TYPE_REMEDIATION.to_string(),
+                summary: "changed generic bound to match caller".to_string(),
+                metadata: serde_json::json!({
+                    "payload": {"signature": "rust:type-mismatch"}
+                }),
+                ..event_at_level(
+                    crate::execution_feedback::EVENT_TYPE_REMEDIATION,
+                    "changed generic bound to match caller",
+                    0,
+                )
+            }),
+        }];
+        evidence.l0_recent = vec![AgentEvent {
+            event_type: "checkpoint".to_string(),
+            metadata: serde_json::json!({"open_questions": ["Should cache TTL change?"]}),
+            ..event_at_level("checkpoint", "checkpoint", 0)
+        }];
+
+        let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
+        let (out, stats) = build_layered_context(
+            "r",
+            "error[E0308]",
+            &evidence,
+            &[],
+            &[],
+            &policy,
+            8000,
+            4000,
+        );
+
+        let failed = out.find("== Failed Attempts and Remediations ==").unwrap();
+        let history = out.find("== Failure History ==").unwrap();
+        let open = out.find("== Open Questions ==").unwrap();
+        assert!(failed < history);
+        assert!(history < open);
+        assert!(out.contains("changed generic bound to match caller"));
+        assert_eq!(stats.failure_history_items_injected, 1);
+        assert_eq!(
+            stats.failure_history_remediation_signatures,
+            vec!["rust:type-mismatch".to_string()]
+        );
+    }
+
+    #[test]
+    fn failure_history_section_omitted_when_empty() {
+        let evidence = ContextEvidence::default();
+        let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
+        let (out, stats) =
+            build_layered_context("r", "no failures", &evidence, &[], &[], &policy, 8000, 4000);
+
+        assert!(!out.contains("== Failure History =="));
+        assert_eq!(stats.failure_history_items_injected, 0);
+    }
+
+    #[test]
+    fn failure_history_section_respects_budget() {
+        let mut evidence = ContextEvidence::default();
+        evidence.failure_history = vec![FailureHistoryItem {
+            signature: "unknown".to_string(),
+            category: "unknown".to_string(),
+            failure: AgentEvent {
+                event_type: crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE.to_string(),
+                summary: "x".repeat(200),
+                metadata: serde_json::json!({
+                    "payload": {
+                        "signature": "unknown",
+                        "category": "unknown",
+                        "raw_excerpt": "y".repeat(200)
+                    }
+                }),
+                ..event_at_level(
+                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
+                    "long failure",
+                    0,
+                )
+            },
+            remediation: None,
+        }];
+        let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
+        let (out, _stats) =
+            build_layered_context("r", "unknown", &evidence, &[], &[], &policy, 8000, 50);
+        assert!(out.contains("truncated: failure history budget exceeded"));
+    }
+
+    #[test]
+    fn event_chain_orders_from_root_to_leaf() {
+        let correlation_id = uuid::Uuid::new_v4();
+        let root_id = uuid::Uuid::new_v4();
+        let response_id = uuid::Uuid::new_v4();
+        let tool_id = uuid::Uuid::new_v4();
+        let validation_id = uuid::Uuid::new_v4();
+
+        let mut root = event_at_level("user_message", "request", 0);
+        root.id = root_id.to_string();
+        root.correlation_id = Some(correlation_id);
+        root.parent_event_id = None;
+
+        let mut response = event_at_level("assistant_message", "patch", 0);
+        response.id = response_id.to_string();
+        response.correlation_id = Some(correlation_id);
+        response.parent_event_id = Some(root_id);
+
+        let mut tool = event_at_level(
+            crate::execution_feedback::EVENT_TYPE_TOOL_RESULT,
+            "apply",
+            0,
+        );
+        tool.id = tool_id.to_string();
+        tool.correlation_id = Some(correlation_id);
+        tool.parent_event_id = Some(response_id);
+
+        let mut validation = event_at_level(
+            crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT,
+            "schema ok",
+            0,
+        );
+        validation.id = validation_id.to_string();
+        validation.correlation_id = Some(correlation_id);
+        validation.parent_event_id = Some(tool_id);
+
+        let ordered = order_event_chain(
+            vec![
+                validation.clone(),
+                tool.clone(),
+                root.clone(),
+                response.clone(),
+            ],
+            &validation.id,
+        );
+        let ids: Vec<String> = ordered.into_iter().map(|event| event.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                root_id.to_string(),
+                response_id.to_string(),
+                tool_id.to_string(),
+                validation_id.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn failure_history_context_build_p99_under_five_ms() {
+        let mut durations = Vec::new();
+        let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
+        let mut evidence = ContextEvidence::default();
+        evidence.failure_history = (0..50)
+            .map(|idx| FailureHistoryItem {
+                signature: format!("typescript:TS{idx:04}"),
+                category: "typescript".to_string(),
+                failure: event_at_level(
+                    crate::execution_feedback::EVENT_TYPE_FAILURE_SIGNATURE,
+                    &format!("failure {idx}"),
+                    0,
+                ),
+                remediation: Some(event_at_level(
+                    crate::execution_feedback::EVENT_TYPE_REMEDIATION,
+                    &format!("remediation {idx}"),
+                    0,
+                )),
+            })
+            .collect();
+
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            let _ = build_layered_context(
+                "r",
+                "typescript:TS2322",
+                &evidence,
+                &[],
+                &[],
+                &policy,
+                8000,
+                4000,
+            );
+            durations.push(started.elapsed());
+        }
+        durations.sort();
+        let p99 = durations[durations.len() - 1];
+        let threshold = if cfg!(debug_assertions) {
+            std::time::Duration::from_millis(20)
+        } else {
+            std::time::Duration::from_millis(5)
+        };
+        assert!(p99 < threshold, "p99 was {p99:?}");
     }
 
     #[test]

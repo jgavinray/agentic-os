@@ -25,7 +25,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and recurring failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -46,6 +46,7 @@ All endpoints except health checks require `Authorization: Bearer <key>`.
 | `/v1/models` | GET | Model list proxied from LiteLLM. |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat completions, streaming or non-streaming, with injected memory context. |
 | `/v1/messages` | POST | Anthropic-compatible messages passthrough with memory context. |
+| `/v1/validations` | POST | Submit a structured validation report for deterministic execution feedback. |
 | `/sessions/start` | POST | Create an explicit memory session. |
 | `/events/append` | POST | Store a memory event and best-effort vector index it. |
 | `/context/pack` | POST | Return a layered context pack for a repo/task. |
@@ -105,6 +106,8 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `DEFAULT_TASK` | `engineering` | Task label when no header is present. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
+| `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
+| `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference refill rate. |
 | `RATE_LIMIT_BURST` | `30` | Per-key inference burst. |
 | `ALLOWED_ORIGINS` | `*` | CORS origin policy. |

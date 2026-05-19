@@ -22,6 +22,9 @@ pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
 /// e^(-0.006 * 60) ~= 0.698.
 pub const DEFAULT_CONTEXT_DECAY_RATE: f64 = 0.006;
 
+/// Default token budget for deterministic Failure History context.
+pub const DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET: usize = 1000;
+
 /// Cap source events consumed per summarization promotion pass.
 pub const MAX_SUMMARIZER_EVENTS: i64 = 10;
 
@@ -71,6 +74,9 @@ pub struct ContextPackStats {
     pub l3_items_injected: usize,
     pub failed_attempts_injected: usize,
     pub remediations_injected: usize,
+    pub failure_history_items_injected: usize,
+    #[serde(skip_serializing)]
+    pub failure_history_remediation_signatures: Vec<String>,
     pub retrieval_semantic_hits: usize,
     pub retrieval_fts_hits: usize,
     pub retrieval_deduped_hits: usize,
@@ -418,6 +424,10 @@ pub struct AppState {
     pub context_decay_rate: f64,
     /// Per-API-key limiter for expensive inference routes.
     pub rate_limiter: crate::rate_limit::RateLimiter,
+    /// Enables deterministic execution feedback capture and Failure History context.
+    pub execution_feedback_enabled: bool,
+    /// Token budget for the Failure History context section.
+    pub failure_history_token_budget: usize,
     /// Prometheus scrape handle.
     pub prometheus: metrics_exporter_prometheus::PrometheusHandle,
     /// JSON compatibility snapshot for legacy metrics callers.
@@ -442,6 +452,8 @@ pub struct AppendEventRequest {
     pub summary: String,
     pub evidence: Option<String>,
     pub metadata: Option<Value>,
+    pub correlation_id: Option<uuid::Uuid>,
+    pub parent_event_id: Option<uuid::Uuid>,
     pub task: Option<String>,
     pub error_type: Option<String>,
     pub error_description: Option<String>,
