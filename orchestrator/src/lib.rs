@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod db;
 pub mod embedder;
 pub mod execution_feedback;
+pub mod feature_extraction;
 pub mod handlers;
 pub mod hybrid;
 pub mod logging;

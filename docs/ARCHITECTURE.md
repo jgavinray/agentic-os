@@ -33,6 +33,7 @@ Postgres owns durable structured memory:
 
 - `agent_sessions` tracks work sessions by repo/task/actor.
 - `agent_events` stores raw events, summaries, checkpoints, promotion state, and trajectory lineage columns (`trajectory_id`, `attempt_index`, `event_role`).
+- `agent_feature_records` stores rebuildable operational feature aggregates and bounded constraint recommendations derived from `agent_events`.
 - `error_index` aggregates repeated failures by repo/task/type/description.
 - `token_usage` records model token accounting.
 
@@ -67,6 +68,8 @@ Raw events start at L0. The summarizer promotes memory through L1, L2, and L3 wh
 | L3 | Project-level memory | Durable architecture truths. |
 
 The context policy changes layer weights by task category: narrow/debug work favors fresh L0/L1 plus failures, while architecture work favors L2/L3.
+
+Operational Constraints are assembled from deterministic feature records and placed immediately above Failure History. They are capped by count and token budget and contain only compact corrective text, never raw events or metadata. See [FEATURE_EXTRACTION.md](FEATURE_EXTRACTION.md).
 
 ## Summarizer Loop
 

@@ -35,7 +35,7 @@
 | `context_pack_cache_misses_total` | counter | none | Context cache misses. |
 | `context_pack_build_duration_seconds` | histogram | none | Context build latency. |
 | `context_pack_tokens_estimate` | histogram | none | Estimated injected tokens. |
-| `context_pack_items_injected_total` | counter | `layer` | Injected L0/L1/L2/L3/failure/remediation items. |
+| `context_pack_items_injected_total` | counter | `layer` | Injected L0/L1/L2/L3/failure/remediation/failure_history/operational_constraints items. |
 | `retrieval_hits_total` | counter | `source` | Semantic, FTS, and deduped retrieval hits. |
 | `inference_tokens_total` | counter | `kind`, `model` | Processed, cached, and generated tokens. |
 | `context_cache_stale_invalidations_total` | counter | none | Cache invalidations caused by memory writes. |
@@ -54,9 +54,16 @@
 | `trajectory_attempts_total` | counter | none | Attempt indexes observed on completed trajectories. |
 | `trajectory_validation_failures_total` | counter | `validator_type` | Failed trajectory validations by bounded type. `validator_type` is one of `compile`, `test`, `lint`, `type_check`, `schema`, `static_analysis`, `other`. |
 | `trajectory_tokens_total` | counter | `direction` | Non-null model tokens aggregated from trajectory result events. `direction` is `input` or `output`. |
+| `trajectory_features_total` | counter | none | Feature records written or updated. |
+| `feature_failure_classes_total` | counter | `failure_class` | Feature failure classes observed. `failure_class` is one of `tool_loop`, `user_interruption`, `missing_auth`, `wrong_endpoint`, `summarization_failure`, `migration_failure`, `other`. |
+| `operational_constraints_injected_total` | counter | `constraint_type` | Operational constraints injected into context packs. `constraint_type` is one of `use_known_auth`, `use_known_endpoint`, `use_known_migration_fix`, `avoid_tool_loop`, `handle_user_interruption`, `handle_summarization_failure`. |
+| `operational_constraints_suppressed_total` | counter | `constraint_type`, `reason` | Operational constraints suppressed. `reason` is one of `freshness_window`, `recovery_detected`, `priority_cap`, `token_budget`. |
+| `feature_extraction_duration_seconds` | histogram | none | Inline feature extraction latency. |
+| `feature_extraction_failures_total` | counter | `stage` | Best-effort feature extraction failures. `stage` is one of `extraction`, `constraint_build`, `persistence`. |
+| `feature_tag_schema_version_unknown_total` | counter | none | Detection tags skipped because their schema version is unknown. |
 | `process_cpu_seconds_total` | counter | none | Process CPU seconds. |
 | `process_resident_memory_bytes` | gauge | none | Resident memory bytes. |
 | `process_start_time_seconds` | gauge | none | Process start time. |
 | `process_open_fds` | gauge | none | Open file descriptors. |
 
-Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM and streaming buckets span 100 ms to 10 min, database/Qdrant buckets span 1 ms to 5 s, embedder/sentiment buckets span 1 ms to 5 s, and token buckets span 16 to 32768 tokens.
+Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM and streaming buckets span 100 ms to 10 min, database/Qdrant/feature extraction buckets span 1 ms to 5 s, embedder/sentiment buckets span 1 ms to 5 s, and token buckets span 16 to 32768 tokens.

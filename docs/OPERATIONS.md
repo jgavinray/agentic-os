@@ -25,6 +25,44 @@ To add a migration:
 3. Do not edit previously applied migrations.
 4. Run `cargo test`, `cargo clippy -- -D warnings`, and a fresh compose boot.
 
+## Maintenance CLI
+
+`orchestrator-maint` is the one-off maintenance binary built from `orchestrator/src/bin/orchestrator-maint.rs`. It connects directly to Postgres through `DATABASE_URL`, runs embedded migrations, and performs idempotent backfills or rebuilds that are intentionally kept outside normal request handling.
+
+Run it locally with Cargo:
+
+```bash
+cd orchestrator
+cargo run --bin orchestrator-maint -- backfill-signatures --dry-run
+cargo run --bin orchestrator-maint -- extract-features --dry-run
+```
+
+In a packaged deployment, run the built `orchestrator-maint` executable with the same environment as the orchestrator service.
+
+With the Docker Compose stack in this repo, prefer a one-off container on the same network:
+
+```bash
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features --dry-run
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features
+```
+
+If the orchestrator container is already running and the image contains `/usr/local/bin/orchestrator-maint`, this is equivalent:
+
+```bash
+docker compose exec orchestrator /usr/local/bin/orchestrator-maint extract-features
+```
+
+Current commands:
+
+- `backfill-signatures`: rewrites historical failed outcome events to carry inline deterministic failure signatures.
+- `extract-features`: bootstrap-tags historical operational events and rebuilds `agent_feature_records`.
+
+These commands are safe to re-run. Use `--dry-run` first when inspecting a production database.
+
+New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. The CLI is for historical data and repair/rebuild operations, not for the steady-state path.
+
+It is deliberately not run as a background thread today because bootstrap tagging can update many old rows and should be operator-controlled. A future lightweight reconciler could periodically rebuild missed feature records, but it should not perform historical metadata rewrites without an explicit operator action.
+
 ## Backup And Restore
 
 Run `scripts/backup.sh` against a live stack. It writes a timestamped tarball to `./backups` unless `BACKUP_DIR` is set. The tarball contains a Postgres dump and a Qdrant collection snapshot.
@@ -86,6 +124,11 @@ Optional:
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
+| `FEATURE_EXTRACTION_ENABLED` | `true` | Enables inline feature extraction and Operational Constraints context. |
+| `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
+| `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
+| `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |
+| `OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET` | `300` | Token budget for Operational Constraints context. |
 | `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model directory. |
 | `SENTIMENT_THRESHOLD` | `0.70` | Negative sentiment threshold. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference route refill rate. |

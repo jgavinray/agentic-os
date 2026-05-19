@@ -39,7 +39,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -87,6 +87,7 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 - Exactly one orchestrator process may own a Postgres database.
 - Schema migrations are embedded in `orchestrator/migrations/`.
 - Signature backfill runs with `orchestrator-maint backfill-signatures`.
+- Feature extraction backfill runs with `orchestrator-maint extract-features`.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 
@@ -128,6 +129,11 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `TRAJECTORY_CAPTURE_ENABLED` | `true` | Enables deterministic trajectory lineage metadata, context-pack lineage events, trajectory results, and the idle sweep. |
 | `TRAJECTORY_IDLE_TIMEOUT_SEC` | `600` | Idle duration after which an open trajectory is finalized as unresolved. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
+| `FEATURE_EXTRACTION_ENABLED` | `true` | Enables deterministic feature extraction and Operational Constraints context. |
+| `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
+| `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
+| `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |
+| `OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET` | `300` | Token budget for Operational Constraints context. |
 | `SAMPLING_CAPTURE_ENABLED` | `true` | Captures requested and forwarded chat sampling parameters in event metadata. |
 | `SAMPLING_OVERRIDE_ENABLED` | `false` | Enables the sampling override hook. Requires sampling capture to stay enabled. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference refill rate. |

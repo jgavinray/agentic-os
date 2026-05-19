@@ -81,6 +81,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET);
+    let feature_extraction_enabled =
+        orchestrator::feature_extraction::feature_extraction_enabled_from_env();
+    let operational_constraints_token_budget =
+        orchestrator::feature_extraction::operational_constraints_token_budget_from_env();
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
@@ -149,6 +153,8 @@ async fn main() -> Result<(), anyhow::Error> {
         trajectory_capture_enabled,
         trajectory_idle_timeout_sec,
         failure_history_token_budget,
+        feature_extraction_enabled,
+        operational_constraints_token_budget,
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
         prometheus,

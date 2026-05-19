@@ -759,6 +759,12 @@ pub fn build_execution_event(
     if let Some(role) = event_role {
         metadata["event_role"] = json!(role.as_str());
     }
+    metadata = crate::feature_extraction::annotate_event_metadata(
+        event_type,
+        &event_summary(event_type, success, &metadata["payload"]),
+        Some(&summarize_text(&metadata["payload"].to_string(), 1000)),
+        metadata,
+    );
 
     AgentEvent {
         id: event_id.to_string(),

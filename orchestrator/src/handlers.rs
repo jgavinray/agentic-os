@@ -348,6 +348,7 @@ pub async fn append_event(
                 .into_response();
             }
         };
+    spawn_feature_extraction(&state, &req.repo, &req.session_id, req.trajectory_id);
 
     // Detect and record errors from the event.
     if let Some(error_type) = &req.error_type {
@@ -477,6 +478,14 @@ pub async fn validations(
             }
         }
     }
+    if !event_ids.is_empty() {
+        spawn_feature_extraction(
+            &state,
+            &req.repo,
+            &ctx.session_id,
+            ctx.trajectory.map(|trajectory| trajectory.trajectory_id),
+        );
+    }
 
     state.cache.invalidate(&req.repo, &req.task);
     telemetry::record_cache_invalidation(&state.metrics);
@@ -487,6 +496,31 @@ pub async fn validations(
         qdrant_indexed,
     })
     .into_response()
+}
+
+fn spawn_feature_extraction(
+    state: &AppState,
+    repo: &str,
+    session_id: &str,
+    trajectory_id: Option<uuid::Uuid>,
+) {
+    if !state.feature_extraction_enabled {
+        return;
+    }
+    let pool = state.pool.clone();
+    let metrics = state.metrics.clone();
+    let repo = repo.to_string();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        crate::feature_extraction::run_inline_extraction_best_effort(
+            pool,
+            metrics,
+            repo,
+            session_id,
+            trajectory_id,
+        )
+        .await;
+    });
 }
 
 // ── Semantic / hybrid search helpers ───────────────────────────
@@ -571,6 +605,8 @@ async fn get_or_build_cached_context(
     state: &AppState,
     repo: &str,
     task: &str,
+    session_id: Option<&str>,
+    trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
     task_config: &TaskContextConfig,
 ) -> Result<CachedContext, anyhow::Error> {
@@ -578,6 +614,17 @@ async fn get_or_build_cached_context(
     let cache_task = limit_override
         .map(|limit| format!("{task}:limit={limit}"))
         .unwrap_or_else(|| task.to_string());
+    let cache_task = if state.feature_extraction_enabled {
+        if let Some(trajectory) = trajectory {
+            format!("{cache_task}:trajectory={}", trajectory.trajectory_id)
+        } else if let Some(session_id) = session_id {
+            format!("{cache_task}:session={session_id}")
+        } else {
+            cache_task
+        }
+    } else {
+        cache_task
+    };
     let cache_key = context_cache_key(repo, &cache_task, event_count);
     if let Some(cached) = state.cache.get(&cache_key) {
         let mut cached = cached;
@@ -602,7 +649,27 @@ async fn get_or_build_cached_context(
     };
     let failure_history_limit = failure_signatures.len().max(1) as i64;
 
-    let (evidence_result, hybrid_result, errors_result, failure_history_result) = tokio::join!(
+    let operational_constraints = async {
+        if !state.feature_extraction_enabled {
+            return Ok((vec![], vec![]));
+        }
+        crate::feature_extraction::operational_constraints_for_context(
+            &state.pool,
+            repo,
+            session_id,
+            trajectory.map(|trajectory| trajectory.trajectory_id),
+            state.operational_constraints_token_budget,
+        )
+        .await
+    };
+
+    let (
+        evidence_result,
+        hybrid_result,
+        errors_result,
+        failure_history_result,
+        operational_constraints_result,
+    ) = tokio::join!(
         db::get_context_evidence_for_policy(&state.pool, repo, &policy),
         hybrid_search(state, repo, task, task_config.semantic_limit),
         db::get_active_errors(&state.pool, repo, 5),
@@ -621,6 +688,7 @@ async fn get_or_build_cached_context(
                 Ok(vec![])
             }
         },
+        operational_constraints,
     );
 
     let mut evidence = evidence_result?;
@@ -628,6 +696,22 @@ async fn get_or_build_cached_context(
         tracing::warn!(repo, task, "failure history lookup failed: {e}");
         vec![]
     });
+    let (constraints, suppressed_constraints) =
+        operational_constraints_result.unwrap_or_else(|e| {
+            tracing::warn!(repo, task, "operational constraint lookup failed: {e}");
+            telemetry::record_feature_extraction_failure("constraint_build");
+            (vec![], vec![])
+        });
+    for constraint in &constraints {
+        telemetry::record_operational_constraint_injected(&constraint.constraint_type);
+    }
+    for suppressed in &suppressed_constraints {
+        telemetry::record_operational_constraint_suppressed(
+            &suppressed.constraint_type,
+            &suppressed.reason,
+        );
+    }
+    evidence.operational_constraints = constraints;
     let errors = errors_result.unwrap_or_default();
     let memories = evidence.memories();
     let (context, mut stats) = db::build_layered_context(
@@ -714,6 +798,9 @@ fn memory_levels_used(evidence: &db::ContextEvidence) -> Vec<String> {
     if !evidence.failure_history.is_empty() {
         levels.push("failure_history".to_string());
     }
+    if !evidence.operational_constraints.is_empty() {
+        levels.push("operational_constraints".to_string());
+    }
     levels
 }
 
@@ -738,6 +825,8 @@ pub async fn context_pack(
         &state,
         &req.repo,
         &req.task,
+        None,
+        None,
         req.limit,
         &task_config,
     )
@@ -822,6 +911,7 @@ pub async fn checkpoint(
                 .into_response();
         }
     };
+    spawn_feature_extraction(&state, &event.repo, &event.session_id, event.trajectory_id);
 
     state
         .cache
@@ -930,7 +1020,17 @@ async fn pack_context_into_anthropic_req(
 ) -> Option<uuid::Uuid> {
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    match get_or_build_cached_context(state, repo, task, None, &task_config).await {
+    match get_or_build_cached_context(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        None,
+        &task_config,
+    )
+    .await
+    {
         Ok(cached) => {
             let context_pack_id = maybe_write_context_pack_event(
                 state,
@@ -1175,7 +1275,10 @@ async fn persist_request_event(
     };
     match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req).await
     {
-        Ok((event_id, _)) => uuid::Uuid::parse_str(&event_id).ok(),
+        Ok((event_id, _)) => {
+            spawn_feature_extraction(state, repo, session_id, Some(trajectory.trajectory_id));
+            uuid::Uuid::parse_str(&event_id).ok()
+        }
         Err(e) => {
             tracing::warn!(repo, "failed to persist trajectory request event: {e}");
             None
@@ -1216,7 +1319,10 @@ async fn persist_model_response_event(
     };
     match db::append_event_from_request(&state.pool, &state.embedder, &state.qdrant_url, &req).await
     {
-        Ok((event_id, _)) => uuid::Uuid::parse_str(&event_id).ok(),
+        Ok((event_id, _)) => {
+            spawn_feature_extraction(state, repo, session_id, Some(trajectory.trajectory_id));
+            uuid::Uuid::parse_str(&event_id).ok()
+        }
         Err(e) => {
             tracing::warn!(
                 repo,
@@ -1338,6 +1444,7 @@ async fn persist_exchange_with_correlation(
 
     state.cache.invalidate(repo, "");
     telemetry::record_cache_invalidation(&state.metrics);
+    spawn_feature_extraction(state, repo, session_id, None);
     // Tool and validation events use the assistant message as parent when it is
     // known. If persistence failed, correlation_id alone can still link events.
     assistant_event_id
@@ -1391,6 +1498,12 @@ fn capture_tool_results_background(
                 }
             }
         }
+        spawn_feature_extraction(
+            &state,
+            &repo,
+            &ctx.session_id,
+            trajectory.map(|trajectory| trajectory.trajectory_id),
+        );
         state.cache.invalidate(&repo, &task);
         telemetry::record_cache_invalidation(&state.metrics);
     });
@@ -1453,7 +1566,17 @@ async fn pack_context_into_req(
     }
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    match get_or_build_cached_context(state, repo, task, None, &task_config).await {
+    match get_or_build_cached_context(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        None,
+        &task_config,
+    )
+    .await
+    {
         Ok(cached) => {
             let context_pack_id = maybe_write_context_pack_event(
                 state,
@@ -2783,7 +2906,7 @@ mod tests {
         let ctx_start = src
             .find("async fn get_or_build_cached_context")
             .expect("get_or_build_cached_context not found in source");
-        let ctx_body: String = src[ctx_start..].chars().take(2500).collect();
+        let ctx_body: String = src[ctx_start..].chars().take(4000).collect();
 
         assert!(
             ctx_body.contains("tokio::join!"),

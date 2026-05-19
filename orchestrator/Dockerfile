@@ -18,6 +18,7 @@ RUN useradd -r -s /bin/false orchestrator
 
 WORKDIR /app
 COPY --from=builder /app/target/release/orchestrator /usr/local/bin/orchestrator
+COPY --from=builder /app/target/release/orchestrator-maint /usr/local/bin/orchestrator-maint
 COPY --from=builder /app/libs/ /usr/local/lib/
 
 ENV LD_LIBRARY_PATH=/usr/local/lib

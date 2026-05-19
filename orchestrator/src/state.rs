@@ -25,6 +25,10 @@ pub const DEFAULT_CONTEXT_DECAY_RATE: f64 = 0.006;
 /// Default token budget for deterministic Failure History context.
 pub const DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET: usize = 1000;
 
+/// Default token budget for compact Operational Constraints context.
+pub const DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET: usize =
+    crate::feature_extraction::DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET;
+
 /// Cap source events consumed per summarization promotion pass.
 pub const MAX_SUMMARIZER_EVENTS: i64 = 10;
 
@@ -75,6 +79,7 @@ pub struct ContextPackStats {
     pub failed_attempts_injected: usize,
     pub remediations_injected: usize,
     pub failure_history_items_injected: usize,
+    pub operational_constraints_injected: usize,
     #[serde(skip_serializing)]
     pub failure_history_remediation_signatures: Vec<String>,
     pub retrieval_semantic_hits: usize,
@@ -437,6 +442,10 @@ pub struct AppState {
     pub trajectory_idle_timeout_sec: u64,
     /// Token budget for the Failure History context section.
     pub failure_history_token_budget: usize,
+    /// Enables deterministic feature extraction and Operational Constraints context.
+    pub feature_extraction_enabled: bool,
+    /// Token budget for the Operational Constraints context section.
+    pub operational_constraints_token_budget: usize,
     /// Controls sampling parameter audit capture and override hook invocation.
     pub sampling_config: crate::sampling::SamplingConfig,
     /// Request-level sampling policy hook. Defaults to a no-op implementation.

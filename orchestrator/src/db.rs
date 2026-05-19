@@ -78,6 +78,7 @@ pub struct ContextEvidence {
     pub l3_project: Vec<AgentEvent>,
     pub failures: Vec<AgentEvent>,
     pub failure_history: Vec<FailureHistoryItem>,
+    pub operational_constraints: Vec<crate::feature_extraction::OperationalConstraint>,
 }
 
 impl ContextEvidence {
@@ -114,6 +115,7 @@ impl ContextEvidence {
                 .filter(|e| e.event_type == "remediation")
                 .count(),
             failure_history_items_injected: self.failure_history.len(),
+            operational_constraints_injected: self.operational_constraints.len(),
             failure_history_remediation_signatures: self
                 .failure_history
                 .iter()
@@ -627,6 +629,7 @@ pub async fn get_context_evidence_for_policy(
         l3_project: l3_project?,
         failures: failures?,
         failure_history: vec![],
+        operational_constraints: vec![],
     });
     crate::telemetry::record_db_query("get_context_evidence", started.elapsed(), result.is_ok());
     result
@@ -1386,6 +1389,12 @@ pub async fn append_event_from_request(
         .as_ref()
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    let metadata = crate::feature_extraction::annotate_event_metadata(
+        &req.event_type,
+        &req.summary,
+        req.evidence.as_deref(),
+        metadata,
+    );
 
     let event = AgentEvent {
         id: id.clone(),
@@ -1613,6 +1622,7 @@ pub fn build_layered_context(
         policy.budget_for(policy.failure_pct, char_budget),
         &mut seen,
     );
+    append_operational_constraints_section(&mut out, &evidence.operational_constraints);
     let reused_signatures = append_failure_history_section(
         &mut out,
         &evidence.failure_history,
@@ -1623,11 +1633,29 @@ pub fn build_layered_context(
 
     let mut stats = evidence.stats();
     stats.failure_history_remediation_signatures = reused_signatures;
+    stats.operational_constraints_injected = evidence.operational_constraints.len();
     stats.context_chars = out.len();
     stats.context_tokens_estimate = estimate_tokens(&out);
     stats.retrieval_deduped_hits = hybrid_hits.len();
 
     (out, stats)
+}
+
+fn append_operational_constraints_section(
+    out: &mut String,
+    constraints: &[crate::feature_extraction::OperationalConstraint],
+) {
+    if constraints.is_empty() {
+        return;
+    }
+
+    out.push_str("Operational Constraints:\n");
+    for constraint in constraints {
+        out.push_str("- ");
+        out.push_str(&constraint.text);
+        out.push('\n');
+    }
+    out.push('\n');
 }
 
 fn append_failure_history_section(
@@ -2279,6 +2307,35 @@ mod tests {
             stats.failure_history_remediation_signatures,
             vec!["rust:type-mismatch".to_string()]
         );
+    }
+
+    #[test]
+    fn operational_constraints_section_sits_above_failure_history() {
+        let mut evidence = ContextEvidence::default();
+        evidence.operational_constraints = vec![crate::feature_extraction::OperationalConstraint {
+            constraint_type: "use_known_endpoint".to_string(),
+            text: "Do not use `localhost` for host-side orchestrator testing. The correct endpoint for this environment is `http://host.docker.internal:8088`.".to_string(),
+        }];
+        evidence.failure_history = vec![FailureHistoryItem {
+            signature: "process:non-zero-exit".to_string(),
+            category: "unknown".to_string(),
+            failure: event_at_level(
+                crate::execution_feedback::EVENT_TYPE_TOOL_RESULT,
+                "failed tool `Bash` exit_code=1",
+                0,
+            ),
+            remediation: None,
+        }];
+
+        let policy = crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Narrow);
+        let (out, stats) =
+            build_layered_context("r", "debug", &evidence, &[], &[], &policy, 8000, 4000);
+
+        let constraints = out.find("Operational Constraints:").unwrap();
+        let history = out.find("== Failure History ==").unwrap();
+        assert!(constraints < history);
+        assert!(out.contains("- Do not use `localhost`"));
+        assert_eq!(stats.operational_constraints_injected, 1);
     }
 
     #[test]
