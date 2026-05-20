@@ -104,6 +104,10 @@ pub fn install_recorder() -> Result<PrometheusHandle, anyhow::Error> {
             UPSTREAM_BUCKETS,
         )?
         .set_buckets_for_metric(
+            Matcher::Full("summarizer_upstream_duration_seconds".to_string()),
+            UPSTREAM_BUCKETS,
+        )?
+        .set_buckets_for_metric(
             Matcher::Full("stream_first_token_seconds".to_string()),
             UPSTREAM_BUCKETS,
         )?
@@ -177,6 +181,18 @@ fn describe_metrics() {
     describe_counter!(
         "upstream_litellm_errors_total",
         "LiteLLM upstream request errors by path and kind."
+    );
+    describe_counter!(
+        "summarizer_upstream_requests_total",
+        "Requests sent from the orchestrator to the summarizer endpoint."
+    );
+    describe_histogram!(
+        "summarizer_upstream_duration_seconds",
+        "Summarizer upstream request latency in seconds."
+    );
+    describe_counter!(
+        "summarizer_upstream_errors_total",
+        "Summarizer upstream request errors by path and kind."
     );
     describe_histogram!(
         "stream_first_token_seconds",
@@ -390,17 +406,21 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     ] {
         gauge!("http_requests_in_flight", "endpoint" => endpoint).set(0.0);
     }
-    for path in [
-        "chat_completions",
-        "messages",
-        "models",
-        "summarizer_chat_completions",
-    ] {
+    for path in ["chat_completions", "messages", "models"] {
         counter!("upstream_litellm_requests_total", "path" => path, "status" => "none")
             .increment(0);
         histogram!("upstream_litellm_duration_seconds", "path" => path).record(0.0);
         for kind in ["timeout", "connection", "4xx", "5xx", "parse"] {
             counter!("upstream_litellm_errors_total", "path" => path, "kind" => kind).increment(0);
+        }
+    }
+    for path in ["chat_completions"] {
+        counter!("summarizer_upstream_requests_total", "path" => path, "status" => "none")
+            .increment(0);
+        histogram!("summarizer_upstream_duration_seconds", "path" => path).record(0.0);
+        for kind in ["timeout", "connection", "4xx", "5xx", "parse"] {
+            counter!("summarizer_upstream_errors_total", "path" => path, "kind" => kind)
+                .increment(0);
         }
     }
     for path in ["chat_completions", "messages"] {
@@ -995,6 +1015,21 @@ pub fn record_upstream_litellm(path: &'static str, elapsed: Duration, status: &s
 
 pub fn record_upstream_litellm_error(path: &'static str, kind: &'static str) {
     counter!("upstream_litellm_errors_total", "path" => path, "kind" => kind).increment(1);
+}
+
+pub fn record_upstream_summarizer(path: &'static str, elapsed: Duration, status: &str) {
+    histogram!("summarizer_upstream_duration_seconds", "path" => path)
+        .record(elapsed.as_secs_f64());
+    counter!(
+        "summarizer_upstream_requests_total",
+        "path" => path,
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
+
+pub fn record_upstream_summarizer_error(path: &'static str, kind: &'static str) {
+    counter!("summarizer_upstream_errors_total", "path" => path, "kind" => kind).increment(1);
 }
 
 pub fn upstream_error_kind(status: reqwest::StatusCode) -> &'static str {

@@ -56,4 +56,30 @@ print('sentiment model exported to /sentiment')
   echo "Sentiment model ready."
 fi
 
+# Download a small CPU-friendly GGUF model for the dedicated local summarizer service.
+SUMMARIZER_DIR="$MODELS_DIR/summarizer"
+SUMMARIZER_FILE="$SUMMARIZER_DIR/qwen2.5-3b-instruct-q4_k_m.gguf"
+if [ ! -f "$SUMMARIZER_FILE" ]; then
+  echo "Downloading Qwen2.5-3B-Instruct Q4_K_M GGUF into $SUMMARIZER_DIR ..."
+  echo "(~2.0GB - requires internet access)"
+  mkdir -p "$SUMMARIZER_DIR"
+  docker run --rm \
+    -v "$SUMMARIZER_DIR:/summarizer" \
+    python:3.11-slim \
+    bash -c "
+      pip install -q huggingface_hub &&
+      python - <<'PY'
+from huggingface_hub import hf_hub_download
+path = hf_hub_download(
+    repo_id='Qwen/Qwen2.5-3B-Instruct-GGUF',
+    filename='qwen2.5-3b-instruct-q4_k_m.gguf',
+    local_dir='/summarizer',
+    local_dir_use_symlinks=False,
+)
+print(f'summarizer model downloaded to {path}')
+PY
+    "
+  echo "Summarizer model ready."
+fi
+
 echo "Done. Run 'docker compose up -d' to start the stack."

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 /// Minimum max_tokens for proxied completion requests.
 pub const MIN_MAX_TOKENS: u64 = 8192;
 
-/// max_tokens used by the internal summarizer — summaries are short.
-pub const SUMMARIZER_MAX_TOKENS: u64 = 2048;
+/// Default max_tokens used by the internal summarizer — summaries are short.
+pub const SUMMARIZER_MAX_TOKENS: u64 = 384;
 
 /// Default TTL for cached context packs: 5 minutes.
 pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
@@ -439,6 +439,14 @@ pub struct AppState {
     pub litellm_url: String,
     /// LiteLLM API key
     pub litellm_key: String,
+    /// Summarizer OpenAI-compatible base URL (must include /v1 suffix).
+    pub summarizer_url: String,
+    /// Optional Summarizer API key. Local llama.cpp deployments usually omit this.
+    pub summarizer_key: Option<String>,
+    /// Model name sent to the summarizer endpoint.
+    pub summarizer_model: String,
+    /// Max output tokens for summary generation.
+    pub summarizer_max_tokens: u64,
     /// Valid API keys — each entry is (token, namespace). Token authenticates; namespace
     /// partitions memory. Format in .env: `token,ns;token2,ns2`
     pub api_keys: Vec<(String, String)>,

@@ -21,7 +21,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let qdrant_url = env::var("QDRANT_URL").expect("QDRANT_URL must be set");
-    let litellm_url = env::var("LITELLM_URL").expect("LITELLM_URL must be set");
+    let litellm_url = env::var("LITELLM_URL")
+        .expect("LITELLM_URL must be set")
+        .trim_end_matches('/')
+        .to_string();
     let litellm_key = env::var("LITELLM_KEY").expect("LITELLM_KEY must be set");
     // BUG-12: canonical model name matches litessh-prompt.md
     // API_KEYS is semicolon-delimited entries: `token,namespace;token2,namespace2`
@@ -39,6 +42,27 @@ async fn main() -> Result<(), anyhow::Error> {
         .collect();
     let default_model =
         env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
+    let summarizer_url = env::var("SUMMARIZER_BASE_URL")
+        .unwrap_or_else(|_| litellm_url.clone())
+        .trim_end_matches('/')
+        .to_string();
+    let summarizer_model = env::var("SUMMARIZER_MODEL").unwrap_or_else(|_| default_model.clone());
+    let summarizer_key = env::var("SUMMARIZER_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            if summarizer_url == litellm_url {
+                Some(litellm_key.clone())
+            } else {
+                None
+            }
+        });
+    let summarizer_max_tokens = env::var("SUMMARIZER_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(state::SUMMARIZER_MAX_TOKENS)
+        .max(1);
     let default_task = env::var("DEFAULT_TASK").unwrap_or_else(|_| "engineering".to_string());
     let cache_ttl_ms = env::var("CONTEXT_CACHE_TTL_MS")
         .ok()
@@ -83,6 +107,14 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap_or(state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET);
     let feature_extraction_enabled =
         orchestrator::feature_extraction::feature_extraction_enabled_from_env();
+    let summarizer_enabled = env::var("SUMMARIZER_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
     let operational_constraints_token_budget =
         orchestrator::feature_extraction::operational_constraints_token_budget_from_env();
     let background_work_concurrency = env::var("BACKGROUND_WORK_CONCURRENCY")
@@ -145,6 +177,10 @@ async fn main() -> Result<(), anyhow::Error> {
         qdrant_url: qdrant_url.clone(),
         litellm_url,
         litellm_key,
+        summarizer_url,
+        summarizer_key,
+        summarizer_model,
+        summarizer_max_tokens,
         api_keys,
         default_model,
         default_task,
@@ -167,7 +203,18 @@ async fn main() -> Result<(), anyhow::Error> {
         metrics,
     });
 
-    tokio::spawn(summarizer::run(Arc::clone(&state)));
+    if summarizer_enabled {
+        tracing::info!(
+            target: "summarizer",
+            endpoint = %state.summarizer_url,
+            model = %state.summarizer_model,
+            max_tokens = state.summarizer_max_tokens,
+            "summarizer loop enabled"
+        );
+        tokio::spawn(summarizer::run(Arc::clone(&state)));
+    } else {
+        tracing::info!("summarizer loop disabled by SUMMARIZER_ENABLED=false");
+    }
     if state.trajectory_capture_enabled {
         tokio::spawn(handlers::run_trajectory_idle_sweep(Arc::clone(&state)));
     }

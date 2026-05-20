@@ -73,7 +73,9 @@ Operational Constraints are assembled from deterministic feature records and pla
 
 ## Summarizer Loop
 
-A single background loop ticks every 60 seconds. It finds sessions with enough unsummarized messages, takes a Postgres advisory lock for each session/target level, asks LiteLLM for a concise summary, inserts a new `summary` event, marks source events summarized, and invalidates context cache entries for the repo.
+A single background loop ticks every 60 seconds. It finds sessions with enough unsummarized messages, takes a Postgres advisory lock for each session/target level, asks the configured OpenAI-compatible summarizer endpoint for a concise summary, inserts a new `summary` event, marks source events summarized, and invalidates context cache entries for the repo.
+
+In Compose, that endpoint is a dedicated llama.cpp sidecar (`http://summarizer:8080/v1`) running a small GGUF model mounted from `models/summarizer`. Outside Compose, `SUMMARIZER_BASE_URL` falls back to `LITELLM_URL` for compatibility unless explicitly configured.
 
 ## Context Cache
 
@@ -93,6 +95,6 @@ On boot the orchestrator:
 4. Runs embedded refinery migrations.
 5. Initializes the Qdrant collection.
 6. Loads local embedder and optional sentiment models.
-7. Starts the summarizer and HTTP server.
+7. Starts the summarizer loop and HTTP server.
 
 The single-writer lock means exactly one orchestrator process may own a given Postgres database.

@@ -62,6 +62,34 @@ services:
       retries: 10
       start_period: 30s
 
+  summarizer:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: agent-summarizer
+    restart: unless-stopped
+    volumes:
+      - ./models/summarizer:/models:ro
+    ports:
+      - "${SUMMARIZER_PORT:-8089}:8080"
+    command:
+      - "-m"
+      - "${SUMMARIZER_MODEL_PATH:-/models/qwen2.5-3b-instruct-q4_k_m.gguf}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-c"
+      - "${SUMMARIZER_CTX_SIZE:-4096}"
+      - "-n"
+      - "${SUMMARIZER_PREDICT_TOKENS:-384}"
+      - "-t"
+      - "${SUMMARIZER_THREADS:-16}"
+      - "-tb"
+      - "${SUMMARIZER_THREADS_BATCH:-16}"
+      - "-ngl"
+      - "${SUMMARIZER_GPU_LAYERS:-0}"
+      - "--parallel"
+      - "${SUMMARIZER_PARALLEL:-1}"
+
   orchestrator:
     build:
       context: ./orchestrator
@@ -71,6 +99,7 @@ services:
       - postgres
       - qdrant
       - litellm
+      - summarizer
     ports:
       - "8088:8088"
     volumes:
@@ -83,6 +112,11 @@ services:
       API_KEYS: sk-local-orchestrator,agent-os
       DEFAULT_MODEL: qwen36-35b-heretic
       DEFAULT_TASK: engineering
+      SUMMARIZER_ENABLED: "${SUMMARIZER_ENABLED:-true}"
+      SUMMARIZER_BASE_URL: "${SUMMARIZER_BASE_URL:-http://summarizer:8080/v1}"
+      SUMMARIZER_MODEL: "${SUMMARIZER_MODEL:-qwen2.5-3b-instruct-q4_k_m}"
+      SUMMARIZER_MAX_TOKENS: "${SUMMARIZER_MAX_TOKENS:-384}"
+      BACKGROUND_WORK_CONCURRENCY: "${BACKGROUND_WORK_CONCURRENCY:-4}"
       CONTEXT_CACHE_TTL_MS: "${CONTEXT_CACHE_TTL_MS:-300000}"
       CONTEXT_DECAY_RATE: "${CONTEXT_DECAY_RATE:-0.006}"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"

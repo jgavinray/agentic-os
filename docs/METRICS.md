@@ -11,6 +11,9 @@
 | `upstream_litellm_requests_total` | counter | `path`, `status` | LiteLLM upstream calls. |
 | `upstream_litellm_duration_seconds` | histogram | `path` | LiteLLM upstream latency. |
 | `upstream_litellm_errors_total` | counter | `path`, `kind` | Timeout, connection, HTTP, and parse failures. |
+| `summarizer_upstream_requests_total` | counter | `path`, `status` | Calls to the configured summarizer endpoint. |
+| `summarizer_upstream_duration_seconds` | histogram | `path` | Summarizer endpoint latency. |
+| `summarizer_upstream_errors_total` | counter | `path`, `kind` | Timeout, connection, HTTP, and parse failures from the summarizer endpoint. |
 | `stream_first_token_seconds` | histogram | `path` | Time to first streamed byte. |
 | `stream_duration_seconds` | histogram | `path` | Full stream duration. |
 | `stream_disconnects_total` | counter | `path`, `reason` | Interrupted streams. |
@@ -66,4 +69,4 @@
 | `process_start_time_seconds` | gauge | none | Process start time. |
 | `process_open_fds` | gauge | none | Open file descriptors. |
 
-Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM and streaming buckets span 100 ms to 10 min, database/Qdrant/feature extraction buckets span 1 ms to 5 s, embedder/sentiment buckets span 1 ms to 5 s, and token buckets span 16 to 32768 tokens.
+Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM, summarizer upstream, and streaming buckets span 100 ms to 10 min, database/Qdrant/feature extraction buckets span 1 ms to 5 s, embedder/sentiment buckets span 1 ms to 5 s, and token buckets span 16 to 32768 tokens.

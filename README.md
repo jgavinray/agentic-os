@@ -22,7 +22,7 @@ Claude Code / opencode / curl
       Rust orchestrator
        |       |       |
        v       v       v
-   Postgres  Qdrant  LiteLLM
+   Postgres  Qdrant  LiteLLM  llama.cpp summarizer
 ```
 
 ## Quick Start
@@ -47,6 +47,7 @@ The orchestrator is a single-node control plane. It also captures deterministic 
 | PostgreSQL | Durable sessions, events, summaries, errors, token usage, migration history | 5432 |
 | Qdrant | Vector memory for semantic recall | 6333-6334 |
 | LiteLLM | Model routing and OpenAI/Anthropic-compatible upstream API | 4000 |
+| llama.cpp Summarizer | Local OpenAI-compatible CPU summarization sidecar | 8089 |
 | Local ONNX Embedder | In-process embeddings for Qdrant indexing and search | n/a |
 
 ## API Endpoints
@@ -123,6 +124,19 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `EMBED_MODEL_PATH` | required | Local ONNX embedder path. Compose sets this to `/data/models/embed`. |
 | `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model path for negative feedback detection. |
 | `SENTIMENT_THRESHOLD` | `0.70` | Negative feedback classifier threshold when the sentiment model is loaded. |
+| `SUMMARIZER_ENABLED` | `true` | Enables the background summarizer loop. |
+| `SUMMARIZER_BASE_URL` | `http://summarizer:8080/v1` in Compose, otherwise `LITELLM_URL` | OpenAI-compatible summarizer endpoint. Compose points this at the local llama.cpp sidecar. |
+| `SUMMARIZER_MODEL` | `DEFAULT_MODEL` outside Compose, `qwen2.5-3b-instruct-q4_k_m` in Compose | Model name sent to the summarizer endpoint. |
+| `SUMMARIZER_KEY` | unset | Optional bearer token for the summarizer endpoint. Not used by the local llama.cpp sidecar. |
+| `SUMMARIZER_MAX_TOKENS` | `384` | Max summary output tokens requested by the orchestrator. |
+| `SUMMARIZER_PORT` | `8089` | Host port for the Compose llama.cpp summarizer service. |
+| `SUMMARIZER_MODEL_PATH` | `/models/qwen2.5-3b-instruct-q4_k_m.gguf` | Model path inside the llama.cpp summarizer container. |
+| `SUMMARIZER_PREDICT_TOKENS` | `384` | llama.cpp generation cap for the summarizer service. |
+| `SUMMARIZER_THREADS` | `16` | CPU threads used by the llama.cpp summarizer service. |
+| `SUMMARIZER_THREADS_BATCH` | `16` | CPU batch threads used by the llama.cpp summarizer service. |
+| `SUMMARIZER_CTX_SIZE` | `4096` | Context window for the llama.cpp summarizer service. |
+| `SUMMARIZER_GPU_LAYERS` | `0` | GPU layers for the llama.cpp summarizer service. Set higher when running a GPU image/runtime. |
+| `SUMMARIZER_PARALLEL` | `1` | Concurrent llama.cpp slots for the summarizer service. Keep low to protect foreground work. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |

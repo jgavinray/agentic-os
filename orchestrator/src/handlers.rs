@@ -540,6 +540,30 @@ fn spawn_qdrant_index_event(state: &AppState, event: db::AgentEvent) {
     });
 }
 
+fn spawn_trajectory_result_emit(
+    state: &AppState,
+    trajectory_id: uuid::Uuid,
+    reason: crate::trajectory::BoundaryReason,
+) {
+    let state_bg = state.clone();
+    spawn_bounded_background(state, "trajectory_result_emit", async move {
+        if let Err(e) = db::emit_trajectory_result_once(
+            &state_bg.pool,
+            &state_bg.embedder,
+            &state_bg.qdrant_url,
+            trajectory_id,
+            Some(reason),
+        )
+        .await
+        {
+            tracing::warn!(
+                trajectory_id = %trajectory_id,
+                "failed to emit trajectory result: {e}"
+            );
+        }
+    });
+}
+
 fn spawn_bounded_background<F>(state: &AppState, job: &'static str, fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -1383,20 +1407,7 @@ async fn begin_trajectory_for_request(
                 } else {
                     crate::trajectory::BoundaryReason::NewUserMessage
                 };
-                if let Err(e) = db::emit_trajectory_result_once(
-                    &state.pool,
-                    &state.embedder,
-                    &state.qdrant_url,
-                    trajectory_id,
-                    Some(reason),
-                )
-                .await
-                {
-                    tracing::warn!(
-                        trajectory_id = %trajectory_id,
-                        "failed to finalize previous trajectory at boundary: {e}"
-                    );
-                }
+                spawn_trajectory_result_emit(state, trajectory_id, reason);
             }
         }
     }

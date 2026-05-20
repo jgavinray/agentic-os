@@ -4,11 +4,15 @@
 
 Exactly one orchestrator process may own a given Postgres database. Startup acquires a Postgres advisory lock before running migrations or serving traffic. A second orchestrator pointed at the same database exits with a clear error instead of running background work.
 
-Postgres and Qdrant can run as ordinary single-node services. The in-process context cache, summarizer loop, and startup migration runner are intentionally not distributed.
+Postgres, Qdrant, LiteLLM, and the local llama.cpp summarizer can run as ordinary single-node services. The in-process context cache, summarizer loop, and startup migration runner are intentionally not distributed.
 
 ## Summarizer
 
-The summarizer ticks every 60 seconds. It scans for sessions with enough unsummarized source events, locks each session/target level with a Postgres advisory lock, writes summary events, marks source events summarized, and invalidates context cache entries for the repo.
+The summarizer ticks every 60 seconds when `SUMMARIZER_ENABLED=true`. It scans for sessions with enough unsummarized source events, locks each session/target level with a Postgres advisory lock, writes summary events, marks source events summarized, and invalidates context cache entries for the repo. Candidate sessions are summarized serially so background summarization cannot spawn an unbounded burst of model calls.
+
+Compose runs summarization through a dedicated llama.cpp sidecar at `http://summarizer:8080/v1` by default. `./setup-models.sh` downloads `qwen2.5-3b-instruct-q4_k_m.gguf` into `models/summarizer`, which is mounted read-only into that container. The host-facing summarizer port is `SUMMARIZER_PORT`, default `8089`.
+
+Set `SUMMARIZER_ENABLED=false` to pause memory compaction. Set `SUMMARIZER_BASE_URL` to a different OpenAI-compatible endpoint only when you intentionally want summaries to run somewhere else, such as LiteLLM or a GPU-backed summarizer service.
 
 ## Context Cache
 
@@ -124,6 +128,19 @@ Optional:
 | `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
 | `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
 | `DEFAULT_TASK` | `engineering` | Task label when no header is provided. |
+| `SUMMARIZER_ENABLED` | `true` | Enables the background summarizer loop. |
+| `SUMMARIZER_BASE_URL` | Compose: `http://summarizer:8080/v1`; otherwise `LITELLM_URL` | OpenAI-compatible summarizer endpoint. |
+| `SUMMARIZER_MODEL` | Compose: `qwen2.5-3b-instruct-q4_k_m`; otherwise `DEFAULT_MODEL` | Model name sent to the summarizer endpoint. |
+| `SUMMARIZER_KEY` | unset | Optional bearer token for the summarizer endpoint. |
+| `SUMMARIZER_MAX_TOKENS` | `384` | Max summary output tokens requested by the orchestrator. |
+| `SUMMARIZER_PORT` | `8089` | Host port for the Compose llama.cpp summarizer service. |
+| `SUMMARIZER_MODEL_PATH` | `/models/qwen2.5-3b-instruct-q4_k_m.gguf` | Model path inside the llama.cpp summarizer container. |
+| `SUMMARIZER_PREDICT_TOKENS` | `384` | llama.cpp generation cap for the summarizer service. |
+| `SUMMARIZER_THREADS` | `16` | CPU threads used by the llama.cpp summarizer service. |
+| `SUMMARIZER_THREADS_BATCH` | `16` | CPU batch threads used by the llama.cpp summarizer service. |
+| `SUMMARIZER_CTX_SIZE` | `4096` | Context window for the llama.cpp summarizer service. |
+| `SUMMARIZER_GPU_LAYERS` | `0` | GPU layers for the llama.cpp summarizer service. |
+| `SUMMARIZER_PARALLEL` | `1` | Concurrent llama.cpp slots for the summarizer service. Keep low to protect foreground work. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
