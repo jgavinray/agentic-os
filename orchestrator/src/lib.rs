@@ -15,3 +15,4 @@ pub mod state;
 pub mod summarizer;
 pub mod telemetry;
 pub mod trajectory;
+pub mod context_ledger;
