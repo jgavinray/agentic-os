@@ -8,7 +8,7 @@ Postgres, Qdrant, LiteLLM, and the local llama.cpp summarizer can run as ordinar
 
 ## Summarizer
 
-The summarizer ticks every 60 seconds when `SUMMARIZER_ENABLED=true`. It scans for sessions with enough unsummarized source events, locks each session/target level with a Postgres advisory lock, writes summary events, marks source events summarized, and invalidates context cache entries for the repo. Candidate sessions are summarized serially so background summarization cannot spawn an unbounded burst of model calls.
+The summarizer ticks every 60 seconds when `SUMMARIZER_ENABLED=true`. It scans for sessions with enough unsummarized source events, locks each session/target level with a Postgres advisory lock, writes summary events, and marks source events summarized. Candidate sessions are summarized serially so background summarization cannot spawn an unbounded burst of model calls.
 
 Compose runs summarization through a dedicated llama.cpp sidecar at `http://summarizer:8080/v1` by default. `./setup-models.sh` downloads `qwen2.5-3b-instruct-q4_k_m.gguf` into `models/summarizer`, which is mounted read-only into that container. The host-facing summarizer port is `SUMMARIZER_PORT`, default `8089`.
 
@@ -18,7 +18,7 @@ Set `SUMMARIZER_ENABLED=false` to pause memory compaction. Set `SUMMARIZER_BASE_
 
 The cache is in process only. Full context packs are derived state and are not rebuilt on the user-facing request path. Model requests use the newest cached pack for the repo/task/session scope when one exists, fall back to a minimal context when none exists, and enqueue a coalesced background refresh for the next turn. The explicit `/context-pack` endpoint still builds synchronously because its contract is to return the generated pack.
 
-Stored cache entries are keyed by `repo:task:event_count`; limit overrides become part of the task string. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Request-time lookup may use the latest stale entry by key prefix while a background refresh catches up. Writes to memory invalidate all cache entries for the repo.
+Stored cache entries are keyed by `repo:task:event_count`; limit overrides become part of the task string. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Request-time lookup may use the latest stale entry by key prefix while a background refresh catches up. Writes to memory do not delete cached packs; refreshed packs replace older event-count versions for the same repo/task prefix.
 
 Trajectory request events are still durably inserted into Postgres before forwarding, but their Qdrant indexing runs as background best-effort work.
 

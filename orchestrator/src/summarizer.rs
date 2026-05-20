@@ -332,9 +332,6 @@ async fn do_summarize(
         "summarized session messages"
     );
 
-    state.cache.invalidate(&repo, "");
-    telemetry::record_cache_invalidation(&state.metrics);
-
     Ok(())
 }
 
@@ -415,9 +412,6 @@ async fn record_summarization_failure(
         summary_level: 0,
     };
     crate::db::insert_event(&state.pool, &event).await?;
-    state.cache.invalidate(&repo, "");
-    telemetry::record_cache_invalidation(&state.metrics);
-
     if state.feature_extraction_enabled {
         crate::feature_extraction::run_inline_extraction_best_effort(
             state.pool.clone(),

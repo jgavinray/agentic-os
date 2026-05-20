@@ -36,12 +36,13 @@
 | `context_pack_requests_total` | counter | none | Context pack requests. |
 | `context_pack_cache_hits_total` | counter | none | Context cache hits. |
 | `context_pack_cache_misses_total` | counter | none | Context cache misses. |
+| `context_cache_replacements_total` | counter | none | Older cache versions replaced after background refresh. |
 | `context_pack_build_duration_seconds` | histogram | none | Context build latency. |
 | `context_pack_tokens_estimate` | histogram | none | Estimated injected tokens. |
 | `context_pack_items_injected_total` | counter | `layer` | Injected L0/L1/L2/L3/failure/remediation/failure_history/operational_constraints items. |
 | `retrieval_hits_total` | counter | `source` | Semantic, FTS, and deduped retrieval hits. |
 | `inference_tokens_total` | counter | `kind`, `model` | Processed, cached, and generated tokens. |
-| `context_cache_stale_invalidations_total` | counter | none | Cache invalidations caused by memory writes. |
+| `context_cache_stale_invalidations_total` | counter | none | Deprecated cache invalidation counter retained for compatibility. Stale-while-revalidate no longer deletes cached packs on memory writes. |
 | `execution_artifacts_total` | counter | `event_type`, `success` | Structured execution artifact events written. |
 | `failure_signatures_total` | counter | `signature`, `category` | Canonical failure fingerprints recorded inline on failed outcome events. |
 | `patch_lifecycle_total` | counter | `outcome` | Patch outcomes: applied, rejected, or reverted. |

@@ -141,9 +141,21 @@ impl ContextCache {
             .map(|(_, entry)| entry.clone())
     }
 
-    pub fn put(&self, key: String, value: CachedContext) {
+    pub fn put(&self, key: String, value: CachedContext) -> usize {
         let mut entries = self.entries.write().unwrap();
+        let mut replaced = 0;
+        if let Some((prefix, _)) = key.rsplit_once(':') {
+            let prefix = format!("{prefix}:");
+            entries.retain(|existing_key, _| {
+                let keep = existing_key == &key || !existing_key.starts_with(&prefix);
+                if !keep {
+                    replaced += 1;
+                }
+                keep
+            });
+        }
         entries.insert(key, value);
+        replaced
     }
 
     pub fn try_begin_refresh(&self, key: String) -> bool {
@@ -154,12 +166,6 @@ impl ContextCache {
     pub fn finish_refresh(&self, key: &str) {
         let mut refreshes = self.refreshes.lock().unwrap();
         refreshes.remove(key);
-    }
-
-    /// Invalidate all entries matching a repo (wildcard: "repo:*").
-    pub fn invalidate(&self, repo: &str, _task: &str) {
-        let mut entries = self.entries.write().unwrap();
-        entries.retain(|k, _| !k.starts_with(&format!("{repo}:")));
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -604,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn context_cache_invalidate_removes_repo_entries() {
+    fn context_cache_put_replaces_prior_versions_for_prefix() {
         let cache = ContextCache::new(CONTEXT_CACHE_TTL_MS);
         cache.put(
             context_cache_key("repo-a", "task", 1),
@@ -616,19 +622,17 @@ mod tests {
             },
         );
         cache.put(
-            context_cache_key("repo-b", "task", 1),
+            context_cache_key("repo-a", "task", 2),
             CachedContext {
-                context: "b".to_string(),
+                context: "new".to_string(),
                 memories: vec![],
                 cached_at: Instant::now(),
                 stats: ContextPackStats::default(),
             },
         );
 
-        cache.invalidate("repo-a", "task");
-
         assert!(cache.get(&context_cache_key("repo-a", "task", 1)).is_none());
-        assert!(cache.get(&context_cache_key("repo-b", "task", 1)).is_some());
+        assert!(cache.get(&context_cache_key("repo-a", "task", 2)).is_some());
     }
 
     #[test]

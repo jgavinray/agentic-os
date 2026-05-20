@@ -31,6 +31,7 @@ pub struct MetricsSnapshot {
     pub context_pack_requests: u64,
     pub context_cache_hits: u64,
     pub context_cache_misses: u64,
+    pub context_cache_replacements: u64,
     pub context_pack_build_ms_total: u64,
     pub context_pack_chars_total: u64,
     pub context_pack_tokens_estimate_total: u64,
@@ -264,6 +265,10 @@ fn describe_metrics() {
         "context_pack_cache_misses_total",
         "Context pack cache misses."
     );
+    describe_counter!(
+        "context_cache_replacements_total",
+        "Older context cache versions replaced after refresh."
+    );
     describe_histogram!(
         "context_pack_build_duration_seconds",
         "Context pack build latency in seconds."
@@ -490,6 +495,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     counter!("context_pack_items_injected_total", "layer" => "failure_history").increment(0);
     counter!("context_pack_items_injected_total", "layer" => "operational_constraints")
         .increment(0);
+    counter!("context_cache_replacements_total").increment(0);
     for source in ["semantic", "fts", "deduped"] {
         counter!("retrieval_hits_total", "source" => source).increment(0);
     }
@@ -960,6 +966,11 @@ pub fn record_tokens(registry: &MetricsRegistry, usage: &crate::state::TokenUsag
 pub fn record_cache_invalidation(registry: &MetricsRegistry) {
     counter!("context_cache_stale_invalidations_total").increment(1);
     registry.inner.write().unwrap().stale_cache_invalidations += 1;
+}
+
+pub fn record_context_cache_replacement(registry: &MetricsRegistry, replaced: usize) {
+    counter!("context_cache_replacements_total").increment(replaced as u64);
+    registry.inner.write().unwrap().context_cache_replacements += replaced as u64;
 }
 
 pub fn record_promotion(registry: &MetricsRegistry, accepted: bool, has_sources: bool) {

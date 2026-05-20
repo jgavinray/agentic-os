@@ -73,7 +73,7 @@ Operational Constraints are assembled from deterministic feature records and pla
 
 ## Summarizer Loop
 
-A single background loop ticks every 60 seconds. It finds sessions with enough unsummarized messages, takes a Postgres advisory lock for each session/target level, asks the configured OpenAI-compatible summarizer endpoint for a concise summary, inserts a new `summary` event, marks source events summarized, and invalidates context cache entries for the repo.
+A single background loop ticks every 60 seconds. It finds sessions with enough unsummarized messages, takes a Postgres advisory lock for each session/target level, asks the configured OpenAI-compatible summarizer endpoint for a concise summary, inserts a new `summary` event, and marks source events summarized.
 
 In Compose, that endpoint is a dedicated llama.cpp sidecar (`http://summarizer:8080/v1`) running a small GGUF model mounted from `models/summarizer`. Outside Compose, `SUMMARIZER_BASE_URL` falls back to `LITELLM_URL` for compatibility unless explicitly configured.
 
@@ -81,7 +81,7 @@ In Compose, that endpoint is a dedicated llama.cpp sidecar (`http://summarizer:8
 
 Context packs are cached in process. Model requests use stale-while-revalidate semantics: the orchestrator injects the newest cached pack for the repo/task/session scope, or a minimal fallback when no cache exists, then refreshes the full pack in a coalesced background task. This keeps context computation, semantic retrieval, and constraint lookup off the first-token path. The explicit `/context-pack` endpoint still builds synchronously because callers use it to fetch the pack itself.
 
-Stored cache keys use `repo:task:event_count`; optional limit overrides are folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Appending events, checkpoints, persisted exchanges, and summaries invalidate entries for the affected repo.
+Stored cache keys use `repo:task:event_count`; optional limit overrides are folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Memory writes do not delete existing cache entries. Instead, request-time lookup can use the newest pack for the repo/task prefix while a coalesced background refresh builds the current event-count version. When a refreshed pack is stored, older versions for that same prefix are replaced.
 
 Request events are durably inserted into Postgres before forwarding, but their Qdrant indexing is background best-effort work so vector embedding does not block request setup.
 

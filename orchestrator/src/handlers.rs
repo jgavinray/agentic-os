@@ -370,11 +370,6 @@ pub async fn append_event(
         }
     }
 
-    state
-        .cache
-        .invalidate(&req.repo, req.task.as_deref().unwrap_or(""));
-    telemetry::record_cache_invalidation(&state.metrics);
-
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
 }
@@ -487,9 +482,6 @@ pub async fn validations(
             ctx.trajectory.map(|trajectory| trajectory.trajectory_id),
         );
     }
-
-    state.cache.invalidate(&req.repo, &req.task);
-    telemetry::record_cache_invalidation(&state.metrics);
 
     axum::Json(crate::execution_feedback::ValidationReportResponse {
         captured: !event_ids.is_empty(),
@@ -854,7 +846,10 @@ async fn get_or_build_cached_context_inner(
         stats,
     };
 
-    state.cache.put(cache_key, cached.clone());
+    let replaced = state.cache.put(cache_key, cached.clone());
+    if replaced > 0 {
+        telemetry::record_context_cache_replacement(&state.metrics, replaced);
+    }
     if record_metrics {
         telemetry::record_context_pack(&state.metrics, &cached.stats);
     }
@@ -1115,11 +1110,6 @@ pub async fn checkpoint(
         }
     };
     spawn_feature_extraction(&state, &event.repo, &event.session_id, event.trajectory_id);
-
-    state
-        .cache
-        .invalidate(&event.repo, event.task.as_deref().unwrap_or(""));
-    telemetry::record_cache_invalidation(&state.metrics);
 
     axum::Json(serde_json::json!({"event_id": event_id, "qdrant_indexed": qdrant_indexed}))
         .into_response()
@@ -1621,8 +1611,6 @@ async fn persist_exchange_with_correlation(
         }
     }
 
-    state.cache.invalidate(repo, "");
-    telemetry::record_cache_invalidation(&state.metrics);
     spawn_feature_extraction(state, repo, session_id, None);
     // Tool and validation events use the assistant message as parent when it is
     // known. If persistence failed, correlation_id alone can still link events.
@@ -1684,8 +1672,6 @@ fn capture_tool_results_background(
             &ctx.session_id,
             trajectory.map(|trajectory| trajectory.trajectory_id),
         );
-        state.cache.invalidate(&repo, &task);
-        telemetry::record_cache_invalidation(&state.metrics);
     });
 }
 
