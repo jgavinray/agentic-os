@@ -1,4 +1,4 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION pgcrypto;
 
 CREATE TABLE agent_sessions (
     id TEXT PRIMARY KEY,
