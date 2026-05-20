@@ -36,7 +36,6 @@ services:
       retries: 5
       start_period: 10s
 
-
   litellm:
     # Pinned from docker.litellm.ai/berriai/litellm:main-stable on 2026-05-18.
     image: docker.litellm.ai/berriai/litellm@sha256:2e8517e2bed423c50ab7e40fb1ac0a9cbe62a764e9d65161d871fb6a9bf75a2d
@@ -63,13 +62,20 @@ services:
       start_period: 30s
 
   summarizer:
-    image: ghcr.io/ggml-org/llama.cpp:server
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: agent-summarizer
     restart: unless-stopped
     volumes:
       - ./models/summarizer:/models:ro
     ports:
       - "${SUMMARIZER_PORT:-8089}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     command:
       - "-m"
       - "${SUMMARIZER_MODEL_PATH:-/models/qwen2.5-3b-instruct-q4_k_m.gguf}"
@@ -86,7 +92,7 @@ services:
       - "-tb"
       - "${SUMMARIZER_THREADS_BATCH:-16}"
       - "-ngl"
-      - "${SUMMARIZER_GPU_LAYERS:-0}"
+      - "${SUMMARIZER_GPU_LAYERS:-99}"
       - "--parallel"
       - "${SUMMARIZER_PARALLEL:-1}"
 
@@ -123,7 +129,6 @@ services:
       RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-30}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
-
       EMBED_MODEL_PATH: /data/models/embed
       SENTIMENT_MODEL_PATH: /data/models/sentiment
       SENTIMENT_THRESHOLD: "${SENTIMENT_THRESHOLD:-0.70}"
