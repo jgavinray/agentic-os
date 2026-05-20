@@ -87,8 +87,9 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 
 - Exactly one orchestrator process may own a Postgres database.
 - Schema migrations are embedded in `orchestrator/migrations/`.
+- Feature extraction bootstrap and feature-record rebuild run automatically as a startup gate before traffic.
 - Signature backfill runs with `orchestrator-maint backfill-signatures`.
-- Feature extraction backfill runs with `orchestrator-maint extract-features`.
+- Feature extraction backfill can also be run manually with `orchestrator-maint extract-features` for dry-runs or scoped repair.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 
@@ -145,6 +146,9 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `FEATURE_EXTRACTION_ENABLED` | `true` | Enables deterministic feature extraction and Operational Constraints context. |
 | `BACKGROUND_WORK_CONCURRENCY` | `4` | Max concurrent best-effort derived background jobs such as cache refresh, feature extraction, and Qdrant indexing. |
+| `FEATURE_STARTUP_BACKFILL_ENABLED` | `true` | Runs feature bootstrap tagging and feature-record rebuild as a startup gate before serving traffic. |
+| `FEATURE_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup bootstrap metadata updates. |
+| `FEATURE_STARTUP_SKIP_BOOTSTRAP_TAGGING` | `false` | Skips startup historical tag writes and only rebuilds feature records. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
 | `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |

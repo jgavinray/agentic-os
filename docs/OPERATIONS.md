@@ -26,6 +26,8 @@ Trajectory request events are still durably inserted into Postgres before forwar
 
 Schema migrations are embedded with refinery from `orchestrator/migrations/`. The first migration is the baseline schema. On legacy databases created by the old bootstrap DDL, the orchestrator detects the existing tables and marks the baseline as applied without rerunning it.
 
+The main orchestrator runs migrations at boot before serving traffic. When feature extraction is enabled, it then runs an idempotent startup feature backfill before binding the HTTP listener. That job applies deterministic bootstrap tags to historical events, rebuilds `agent_feature_records`, and logs `startup feature backfill completed` with scanned and updated counts. If the startup backfill fails, the orchestrator refuses to serve traffic.
+
 To add a migration:
 
 1. Create `orchestrator/migrations/V<N>__short_name.sql`.
@@ -35,7 +37,7 @@ To add a migration:
 
 ## Maintenance CLI
 
-`orchestrator-maint` is the one-off maintenance binary built from `orchestrator/src/bin/orchestrator-maint.rs`. It connects directly to Postgres through `DATABASE_URL`, runs embedded migrations, and performs idempotent backfills or rebuilds that are intentionally kept outside normal request handling.
+`orchestrator-maint` is the one-off maintenance binary built from `orchestrator/src/bin/orchestrator-maint.rs`. It connects directly to Postgres through `DATABASE_URL`, runs embedded migrations, and performs idempotent backfills or rebuilds for operator-driven repair, dry runs, or scoped rebuilds.
 
 Run it locally with Cargo:
 
@@ -67,9 +69,7 @@ Current commands:
 
 These commands are safe to re-run. Use `--dry-run` first when inspecting a production database.
 
-New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. The CLI is for historical data and repair/rebuild operations, not for the steady-state path.
-
-It is deliberately not run as a background thread today because bootstrap tagging can update many old rows and should be operator-controlled. A future lightweight reconciler could periodically rebuild missed feature records, but it should not perform historical metadata rewrites without an explicit operator action.
+New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. Startup also runs a full idempotent feature backfill by default before serving traffic, so the CLI is mainly for explicit dry-runs, scoped repair, and manual rebuilds.
 
 ## Backup And Restore
 
@@ -147,6 +147,9 @@ Optional:
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `BACKGROUND_WORK_CONCURRENCY` | `4` | Max concurrent best-effort derived background jobs such as cache refresh, feature extraction, and Qdrant indexing. |
 | `FEATURE_EXTRACTION_ENABLED` | `true` | Enables inline feature extraction and Operational Constraints context. |
+| `FEATURE_STARTUP_BACKFILL_ENABLED` | `true` | Runs idempotent feature bootstrap tagging and feature record rebuild as a startup gate before serving traffic when feature extraction is enabled. |
+| `FEATURE_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup bootstrap metadata updates. |
+| `FEATURE_STARTUP_SKIP_BOOTSTRAP_TAGGING` | `false` | Skips startup bootstrap tagging and only rebuilds feature records. Use only after historical tagging is already complete. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
 | `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |

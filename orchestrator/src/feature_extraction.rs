@@ -20,8 +20,11 @@ pub const DEFAULT_FEATURE_WINDOW_SEC: i64 = 3600;
 pub const DEFAULT_CONSTRAINT_FRESHNESS_WINDOW_SEC: i64 = 1800;
 pub const DEFAULT_MAX_OPERATIONAL_CONSTRAINTS: usize = 5;
 pub const DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET: usize = 300;
+pub const CONTEXT_PACK_EMPTY_TOKEN_THRESHOLD: i64 = 50;
+pub const HIGH_INPUT_TOKEN_THRESHOLD: i64 = 100_000;
+pub const SLOW_UPSTREAM_MODEL_MS_THRESHOLD: i64 = 60_000;
 
-pub const DETECTION_TAG_TYPES: [&str; 7] = [
+pub const DETECTION_TAG_TYPES: [&str; 15] = [
     "tool_loop",
     "user_interruption",
     "missing_auth",
@@ -29,33 +32,56 @@ pub const DETECTION_TAG_TYPES: [&str; 7] = [
     "summarization_failure",
     "migration_failure",
     "correction_acknowledged",
+    "context_pack_empty",
+    "context_pack_truncated",
+    "high_input_tokens",
+    "slow_upstream_model",
+    "empty_tool_use_message",
+    "abandoned_before_model",
+    "single_model_abandoned_no_tools",
+    "summarizer_shared_upstream",
 ];
 
-pub const DETECTION_TAG_SOURCES: [&str; 7] = [
+pub const DETECTION_TAG_SOURCES: [&str; 11] = [
     "hook_parser",
     "tool_loop_detector",
     "validation_parser",
     "failed_attempt_classifier",
     "summarizer",
     "remediation_parser",
+    "context_builder",
+    "model_response_parser",
+    "trajectory_analyzer",
+    "config_validator",
     "bootstrap_migration",
 ];
 
-pub const FEATURE_FAILURE_CLASSES: [&str; 7] = [
+pub const FEATURE_FAILURE_CLASSES: [&str; 15] = [
     "tool_loop",
     "user_interruption",
     "missing_auth",
     "wrong_endpoint",
     "summarization_failure",
     "migration_failure",
+    "context_pack_empty",
+    "context_pack_truncated",
+    "high_input_tokens",
+    "slow_upstream_model",
+    "empty_tool_use_message",
+    "abandoned_before_model",
+    "single_model_abandoned_no_tools",
+    "summarizer_shared_upstream",
     "other",
 ];
 
-pub const OPERATIONAL_CONSTRAINT_TYPES: [&str; 6] = [
+pub const OPERATIONAL_CONSTRAINT_TYPES: [&str; 9] = [
     "use_known_auth",
     "use_known_endpoint",
     "use_known_migration_fix",
     "avoid_tool_loop",
+    "fix_context_retrieval",
+    "reduce_context_bloat",
+    "separate_summarizer_upstream",
     "handle_user_interruption",
     "handle_summarization_failure",
 ];
@@ -67,11 +93,14 @@ pub const OPERATIONAL_SUPPRESSION_REASONS: [&str; 4] = [
     "token_budget",
 ];
 
-const CONSTRAINT_PRIORITY: [&str; 6] = [
+const CONSTRAINT_PRIORITY: [&str; 9] = [
     "use_known_auth",
     "use_known_endpoint",
     "use_known_migration_fix",
     "avoid_tool_loop",
+    "fix_context_retrieval",
+    "reduce_context_bloat",
+    "separate_summarizer_upstream",
     "handle_user_interruption",
     "handle_summarization_failure",
 ];
@@ -142,6 +171,14 @@ pub struct FeatureRecord {
     pub summarization_failure_count: i64,
     pub migration_failure_count: i64,
     pub other_failure_count: i64,
+    pub context_pack_empty_count: i64,
+    pub context_pack_truncated_count: i64,
+    pub high_input_token_count: i64,
+    pub slow_upstream_model_count: i64,
+    pub empty_tool_use_message_count: i64,
+    pub abandoned_before_model_count: i64,
+    pub single_model_abandoned_no_tools_count: i64,
+    pub summarizer_shared_upstream_count: i64,
 
     pub known_endpoint: Option<String>,
     pub known_auth_header: Option<String>,
@@ -231,6 +268,14 @@ enum FailureKey {
     WrongEndpoint,
     SummarizationFailure,
     MigrationFailure,
+    ContextPackEmpty,
+    ContextPackTruncated,
+    HighInputTokens,
+    SlowUpstreamModel,
+    EmptyToolUseMessage,
+    AbandonedBeforeModel,
+    SingleModelAbandonedNoTools,
+    SummarizerSharedUpstream,
 }
 
 pub fn feature_extraction_enabled_from_env() -> bool {
@@ -405,6 +450,88 @@ fn deterministic_tags_for_event(
         ));
     }
 
+    if event_type == "context_pack" {
+        if context_pack_empty(metadata) {
+            tags.push(DetectionTag::new(
+                "context_pack_empty",
+                source_override.unwrap_or("context_builder"),
+            ));
+        }
+        if context_pack_truncated(metadata) {
+            tags.push(DetectionTag::new(
+                "context_pack_truncated",
+                source_override.unwrap_or("context_builder"),
+            ));
+        }
+    }
+
+    if event_type == "assistant_message" {
+        if event_input_tokens_from_metadata(metadata)
+            .is_some_and(|tokens| tokens >= HIGH_INPUT_TOKEN_THRESHOLD)
+        {
+            tags.push(DetectionTag::new(
+                "high_input_tokens",
+                source_override.unwrap_or("model_response_parser"),
+            ));
+        }
+        if event_latency_ms_from_metadata(metadata)
+            .is_some_and(|latency_ms| latency_ms >= SLOW_UPSTREAM_MODEL_MS_THRESHOLD)
+        {
+            tags.push(DetectionTag::new(
+                "slow_upstream_model",
+                source_override.unwrap_or("model_response_parser"),
+            ));
+        }
+        if string_path(metadata, &["finish_reason"])
+            .or_else(|| string_path(metadata, &["payload", "finish_reason"]))
+            == Some("tool_use")
+            && summary.trim().is_empty()
+        {
+            tags.push(DetectionTag::new(
+                "empty_tool_use_message",
+                source_override.unwrap_or("model_response_parser"),
+            ));
+        }
+    }
+
+    if event_type == "trajectory_result" {
+        if event_input_tokens_from_metadata(metadata)
+            .is_some_and(|tokens| tokens >= HIGH_INPUT_TOKEN_THRESHOLD)
+        {
+            tags.push(DetectionTag::new(
+                "high_input_tokens",
+                source_override.unwrap_or("trajectory_analyzer"),
+            ));
+        }
+        if event_latency_ms_from_metadata(metadata)
+            .is_some_and(|latency_ms| latency_ms >= SLOW_UPSTREAM_MODEL_MS_THRESHOLD)
+        {
+            tags.push(DetectionTag::new(
+                "slow_upstream_model",
+                source_override.unwrap_or("trajectory_analyzer"),
+            ));
+        }
+        if trajectory_abandoned_before_model(metadata) {
+            tags.push(DetectionTag::new(
+                "abandoned_before_model",
+                source_override.unwrap_or("trajectory_analyzer"),
+            ));
+        }
+        if trajectory_single_model_abandoned_no_tools(metadata) {
+            tags.push(DetectionTag::new(
+                "single_model_abandoned_no_tools",
+                source_override.unwrap_or("trajectory_analyzer"),
+            ));
+        }
+    }
+
+    if summarizer_shares_litellm_upstream(metadata) {
+        tags.push(DetectionTag::new(
+            "summarizer_shared_upstream",
+            source_override.unwrap_or("config_validator"),
+        ));
+    }
+
     if bool_path(metadata, &["correction_acknowledged"])
         || bool_path(metadata, &["payload", "correction_acknowledged"])
     {
@@ -486,11 +613,17 @@ fn bootstrap_text_tags(
     if haystack.contains("repeated read")
         || haystack.contains("read loop")
         || haystack.contains("read tool loop")
+        || haystack.contains("tool 'read' called")
+        || haystack.contains("tool \"read\" called")
+        || haystack.contains("loop warning: tool 'read'")
     {
         tags.push(DetectionTag::tool_loop(source, "Read"));
     } else if haystack.contains("repeated bash")
         || haystack.contains("bash loop")
         || haystack.contains("bash tool loop")
+        || haystack.contains("tool 'bash' called")
+        || haystack.contains("tool \"bash\" called")
+        || haystack.contains("loop warning: tool 'bash'")
     {
         tags.push(DetectionTag::tool_loop(source, "Bash"));
     } else if haystack.contains("tool loop") || haystack.contains("repeat identical tool") {
@@ -500,6 +633,8 @@ fn bootstrap_text_tags(
     if haystack.contains("user interruption")
         || haystack.contains("user interrupted")
         || haystack.contains("user correction")
+        || haystack.contains("request interrupted by user")
+        || haystack.contains("interrupted by user for tool use")
     {
         tags.push(DetectionTag::new("user_interruption", source));
     }
@@ -507,11 +642,17 @@ fn bootstrap_text_tags(
         || haystack.contains("missing auth")
         || haystack.contains("authorization header")
         || haystack.contains("unauthorized")
+        || haystack.contains("without authorization header")
+        || haystack.contains("without the authorization header")
+        || (haystack.contains("without") && haystack.contains("bearer"))
     {
         tags.push(DetectionTag::new("missing_auth", source));
     }
     if (haystack.contains("wrong endpoint") || haystack.contains("incorrect endpoint"))
         || (haystack.contains("localhost") && haystack.contains("correct endpoint"))
+        || (haystack.contains("localhost") && haystack.contains("should be using"))
+        || haystack.contains("trying localhost")
+        || haystack.contains("not localhost")
     {
         tags.push(DetectionTag::new("wrong_endpoint", source));
     }
@@ -716,6 +857,14 @@ fn extract_record_for_group(
         summarization_failure_count: 0,
         migration_failure_count: 0,
         other_failure_count: 0,
+        context_pack_empty_count: 0,
+        context_pack_truncated_count: 0,
+        high_input_token_count: 0,
+        slow_upstream_model_count: 0,
+        empty_tool_use_message_count: 0,
+        abandoned_before_model_count: 0,
+        single_model_abandoned_no_tools_count: 0,
+        summarizer_shared_upstream_count: 0,
         known_endpoint: None,
         known_auth_header: None,
         known_migration_fix: None,
@@ -834,6 +983,57 @@ fn extract_record_for_group(
                     .or_insert(event.created_at);
             }
         }
+
+        if event.created_at >= freshness_cutoff {
+            if event.event_type == "context_pack" {
+                if context_pack_token_count(&event.metadata).is_some()
+                    && !context_pack_empty(&event.metadata)
+                {
+                    record_latest_recovery(
+                        &mut latest_recovery,
+                        FailureKey::ContextPackEmpty,
+                        event.created_at,
+                    );
+                }
+                if context_pack_truncated_value(&event.metadata) == Some(false) {
+                    record_latest_recovery(
+                        &mut latest_recovery,
+                        FailureKey::ContextPackTruncated,
+                        event.created_at,
+                    );
+                }
+            }
+            if matches!(
+                event.event_type.as_str(),
+                "assistant_message" | "trajectory_result"
+            ) {
+                if event_input_tokens_from_metadata(&event.metadata)
+                    .is_some_and(|tokens| tokens > 0 && tokens < HIGH_INPUT_TOKEN_THRESHOLD)
+                {
+                    record_latest_recovery(
+                        &mut latest_recovery,
+                        FailureKey::HighInputTokens,
+                        event.created_at,
+                    );
+                }
+                if event_latency_ms_from_metadata(&event.metadata).is_some_and(|latency_ms| {
+                    latency_ms > 0 && latency_ms < SLOW_UPSTREAM_MODEL_MS_THRESHOLD
+                }) {
+                    record_latest_recovery(
+                        &mut latest_recovery,
+                        FailureKey::SlowUpstreamModel,
+                        event.created_at,
+                    );
+                }
+            }
+            if summarizer_has_dedicated_upstream(&event.metadata) {
+                record_latest_recovery(
+                    &mut latest_recovery,
+                    FailureKey::SummarizerSharedUpstream,
+                    event.created_at,
+                );
+            }
+        }
     }
 
     if let Some(endpoint) = record.known_endpoint.as_deref() {
@@ -908,6 +1108,38 @@ fn apply_tag_to_record(
             if let Some(value) = known_fact(event, "migration_fix") {
                 record.known_migration_fix = Some(value.to_string());
             }
+        }
+        "context_pack_empty" => {
+            record.context_pack_empty_count += 1;
+            failure_classes.insert("context_pack_empty".to_string());
+        }
+        "context_pack_truncated" => {
+            record.context_pack_truncated_count += 1;
+            failure_classes.insert("context_pack_truncated".to_string());
+        }
+        "high_input_tokens" => {
+            record.high_input_token_count += 1;
+            failure_classes.insert("high_input_tokens".to_string());
+        }
+        "slow_upstream_model" => {
+            record.slow_upstream_model_count += 1;
+            failure_classes.insert("slow_upstream_model".to_string());
+        }
+        "empty_tool_use_message" => {
+            record.empty_tool_use_message_count += 1;
+            failure_classes.insert("empty_tool_use_message".to_string());
+        }
+        "abandoned_before_model" => {
+            record.abandoned_before_model_count += 1;
+            failure_classes.insert("abandoned_before_model".to_string());
+        }
+        "single_model_abandoned_no_tools" => {
+            record.single_model_abandoned_no_tools_count += 1;
+            failure_classes.insert("single_model_abandoned_no_tools".to_string());
+        }
+        "summarizer_shared_upstream" => {
+            record.summarizer_shared_upstream_count += 1;
+            failure_classes.insert("summarizer_shared_upstream".to_string());
         }
         "correction_acknowledged" => {}
         _ => {}
@@ -1007,6 +1239,53 @@ fn build_constraints(
     }
 
     if active_detection(
+        &FailureKey::ContextPackEmpty,
+        latest_detection,
+        latest_recovery,
+        &mut suppressed,
+        "fix_context_retrieval",
+    ) {
+        candidates.push(OperationalConstraint {
+            constraint_type: "fix_context_retrieval".to_string(),
+            text: "If the context pack is empty or near-empty, verify cache warmup and retrieval health before assuming no prior memory exists.".to_string(),
+        });
+    }
+
+    let context_truncated_active = active_detection(
+        &FailureKey::ContextPackTruncated,
+        latest_detection,
+        latest_recovery,
+        &mut suppressed,
+        "reduce_context_bloat",
+    );
+    let high_input_active = active_detection(
+        &FailureKey::HighInputTokens,
+        latest_detection,
+        latest_recovery,
+        &mut suppressed,
+        "reduce_context_bloat",
+    );
+    if context_truncated_active || high_input_active {
+        candidates.push(OperationalConstraint {
+            constraint_type: "reduce_context_bloat".to_string(),
+            text: "Avoid expanding context further; use concise cached memory and inspect why input tokens or context truncation are high before retrying.".to_string(),
+        });
+    }
+
+    if active_detection(
+        &FailureKey::SummarizerSharedUpstream,
+        latest_detection,
+        latest_recovery,
+        &mut suppressed,
+        "separate_summarizer_upstream",
+    ) {
+        candidates.push(OperationalConstraint {
+            constraint_type: "separate_summarizer_upstream".to_string(),
+            text: "Keep background summarization on the dedicated summarizer endpoint instead of sharing foreground LiteLLM capacity.".to_string(),
+        });
+    }
+
+    if active_detection(
         &FailureKey::UserInterruption,
         latest_detection,
         latest_recovery,
@@ -1090,6 +1369,21 @@ fn recovery_after_detection(
         .unwrap_or(false)
 }
 
+fn record_latest_recovery(
+    latest_recovery: &mut BTreeMap<FailureKey, DateTime<Utc>>,
+    key: FailureKey,
+    recovered_at: DateTime<Utc>,
+) {
+    latest_recovery
+        .entry(key)
+        .and_modify(|time| {
+            if recovered_at > *time {
+                *time = recovered_at;
+            }
+        })
+        .or_insert(recovered_at);
+}
+
 fn constraint_type_for_failure_key(key: &FailureKey) -> Option<&'static str> {
     match key {
         FailureKey::ToolLoop(_) => Some("avoid_tool_loop"),
@@ -1098,6 +1392,15 @@ fn constraint_type_for_failure_key(key: &FailureKey) -> Option<&'static str> {
         FailureKey::WrongEndpoint => Some("use_known_endpoint"),
         FailureKey::SummarizationFailure => Some("handle_summarization_failure"),
         FailureKey::MigrationFailure => Some("use_known_migration_fix"),
+        FailureKey::ContextPackEmpty => Some("fix_context_retrieval"),
+        FailureKey::ContextPackTruncated | FailureKey::HighInputTokens => {
+            Some("reduce_context_bloat")
+        }
+        FailureKey::SummarizerSharedUpstream => Some("separate_summarizer_upstream"),
+        FailureKey::SlowUpstreamModel
+        | FailureKey::EmptyToolUseMessage
+        | FailureKey::AbandonedBeforeModel
+        | FailureKey::SingleModelAbandonedNoTools => None,
     }
 }
 
@@ -1225,6 +1528,14 @@ fn failure_key_for_tag(tag: &DetectionTag) -> Option<FailureKey> {
         "wrong_endpoint" => Some(FailureKey::WrongEndpoint),
         "summarization_failure" => Some(FailureKey::SummarizationFailure),
         "migration_failure" => Some(FailureKey::MigrationFailure),
+        "context_pack_empty" => Some(FailureKey::ContextPackEmpty),
+        "context_pack_truncated" => Some(FailureKey::ContextPackTruncated),
+        "high_input_tokens" => Some(FailureKey::HighInputTokens),
+        "slow_upstream_model" => Some(FailureKey::SlowUpstreamModel),
+        "empty_tool_use_message" => Some(FailureKey::EmptyToolUseMessage),
+        "abandoned_before_model" => Some(FailureKey::AbandonedBeforeModel),
+        "single_model_abandoned_no_tools" => Some(FailureKey::SingleModelAbandonedNoTools),
+        "summarizer_shared_upstream" => Some(FailureKey::SummarizerSharedUpstream),
         _ => None,
     }
 }
@@ -1297,6 +1608,118 @@ fn is_successful_migration(event: &AgentEvent) -> bool {
             || bool_path(&event.metadata, &["payload", "migration_success"]))
 }
 
+fn context_pack_empty(metadata: &Value) -> bool {
+    let Some(tokens) = context_pack_token_count(metadata) else {
+        return false;
+    };
+    tokens <= CONTEXT_PACK_EMPTY_TOKEN_THRESHOLD
+        && !array_path_has_values(metadata, &["retrieved_event_ids"])
+        && !array_path_has_values(metadata, &["payload", "retrieved_event_ids"])
+        && !array_path_has_values(metadata, &["memory_levels_used"])
+        && !array_path_has_values(metadata, &["payload", "memory_levels_used"])
+}
+
+fn context_pack_truncated(metadata: &Value) -> bool {
+    context_pack_truncated_value(metadata).unwrap_or(false)
+}
+
+fn context_pack_token_count(metadata: &Value) -> Option<i64> {
+    i64_path(metadata, &["total_context_tokens"])
+        .or_else(|| i64_path(metadata, &["payload", "total_context_tokens"]))
+}
+
+fn context_pack_truncated_value(metadata: &Value) -> Option<bool> {
+    bool_path_value(metadata, &["truncated"])
+        .or_else(|| bool_path_value(metadata, &["payload", "truncated"]))
+}
+
+fn event_input_tokens_from_metadata(metadata: &Value) -> Option<i64> {
+    i64_path(metadata, &["input_tokens"])
+        .or_else(|| i64_path(metadata, &["payload", "input_tokens"]))
+        .or_else(|| i64_path(metadata, &["total_input_tokens"]))
+        .or_else(|| i64_path(metadata, &["payload", "total_input_tokens"]))
+        .or_else(|| i64_path(metadata, &["usage", "input_tokens"]))
+        .or_else(|| i64_path(metadata, &["payload", "usage", "input_tokens"]))
+        .or_else(|| i64_path(metadata, &["usage", "prompt_tokens"]))
+        .or_else(|| i64_path(metadata, &["payload", "usage", "prompt_tokens"]))
+}
+
+fn event_latency_ms_from_metadata(metadata: &Value) -> Option<i64> {
+    i64_path(metadata, &["latency_ms"])
+        .or_else(|| i64_path(metadata, &["payload", "latency_ms"]))
+        .or_else(|| i64_path(metadata, &["total_latency_ms"]))
+        .or_else(|| i64_path(metadata, &["payload", "total_latency_ms"]))
+        .or_else(|| {
+            i64_path(metadata, &["latency_seconds"])
+                .or_else(|| i64_path(metadata, &["payload", "latency_seconds"]))
+                .map(|seconds| seconds.saturating_mul(1000))
+        })
+}
+
+fn trajectory_abandoned_before_model(metadata: &Value) -> bool {
+    trajectory_status(metadata) == Some("abandoned")
+        && event_model_calls_from_metadata(metadata) == Some(0)
+}
+
+fn trajectory_single_model_abandoned_no_tools(metadata: &Value) -> bool {
+    trajectory_status(metadata) == Some("abandoned")
+        && event_model_calls_from_metadata(metadata) == Some(1)
+        && i64_path(metadata, &["total_tool_calls"])
+            .or_else(|| i64_path(metadata, &["payload", "total_tool_calls"]))
+            .unwrap_or(0)
+            == 0
+        && i64_path(metadata, &["total_validations"])
+            .or_else(|| i64_path(metadata, &["payload", "total_validations"]))
+            .unwrap_or(0)
+            == 0
+}
+
+fn trajectory_status(metadata: &Value) -> Option<&str> {
+    string_path(metadata, &["final_status"])
+        .or_else(|| string_path(metadata, &["payload", "final_status"]))
+}
+
+fn event_model_calls_from_metadata(metadata: &Value) -> Option<i64> {
+    i64_path(metadata, &["total_model_calls"])
+        .or_else(|| i64_path(metadata, &["payload", "total_model_calls"]))
+}
+
+fn summarizer_shares_litellm_upstream(metadata: &Value) -> bool {
+    let Some(summarizer_url) = string_path(metadata, &["summarizer_base_url"])
+        .or_else(|| string_path(metadata, &["payload", "summarizer_base_url"]))
+    else {
+        return false;
+    };
+    let Some(litellm_url) = string_path(metadata, &["litellm_url"])
+        .or_else(|| string_path(metadata, &["payload", "litellm_url"]))
+        .or_else(|| string_path(metadata, &["upstream_litellm_url"]))
+        .or_else(|| string_path(metadata, &["payload", "upstream_litellm_url"]))
+    else {
+        return false;
+    };
+    normalize_url_for_compare(summarizer_url) == normalize_url_for_compare(litellm_url)
+}
+
+fn summarizer_has_dedicated_upstream(metadata: &Value) -> bool {
+    let Some(summarizer_url) = string_path(metadata, &["summarizer_base_url"])
+        .or_else(|| string_path(metadata, &["payload", "summarizer_base_url"]))
+    else {
+        return false;
+    };
+    let Some(litellm_url) = string_path(metadata, &["litellm_url"])
+        .or_else(|| string_path(metadata, &["payload", "litellm_url"]))
+        .or_else(|| string_path(metadata, &["upstream_litellm_url"]))
+        .or_else(|| string_path(metadata, &["payload", "upstream_litellm_url"]))
+    else {
+        return false;
+    };
+    normalize_url_for_compare(summarizer_url) != normalize_url_for_compare(litellm_url)
+}
+
+fn normalize_url_for_compare(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
 fn string_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut current = value;
     for key in path {
@@ -1305,7 +1728,39 @@ fn string_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     current.as_str()
 }
 
+fn i64_path(value: &Value, path: &[&str]) -> Option<i64> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_i64()
+        .or_else(|| current.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| {
+            current.as_f64().and_then(|value| {
+                if value.is_finite() && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+                    Some(value as i64)
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| current.as_str().and_then(|value| value.parse::<i64>().ok()))
+}
+
 fn bool_path(value: &Value, path: &[&str]) -> bool {
+    bool_path_value(value, path).unwrap_or(false)
+}
+
+fn bool_path_value(value: &Value, path: &[&str]) -> Option<bool> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_bool()
+}
+
+fn array_path_has_values(value: &Value, path: &[&str]) -> bool {
     let mut current = value;
     for key in path {
         let Some(next) = current.get(*key) else {
@@ -1313,7 +1768,10 @@ fn bool_path(value: &Value, path: &[&str]) -> bool {
         };
         current = next;
     }
-    current.as_bool().unwrap_or(false)
+    current
+        .as_array()
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
 }
 
 pub async fn load_events_for_scope(
@@ -1406,6 +1864,10 @@ pub async fn persist_feature_record(
                 summary_count, tool_loop_count, repeated_read_loop_count, repeated_bash_loop_count,
                 user_interruption_count, missing_auth_count, wrong_endpoint_count,
                 summarization_failure_count, migration_failure_count, other_failure_count,
+                context_pack_empty_count, context_pack_truncated_count, high_input_token_count,
+                slow_upstream_model_count, empty_tool_use_message_count,
+                abandoned_before_model_count, single_model_abandoned_no_tools_count,
+                summarizer_shared_upstream_count,
                 known_endpoint, known_auth_header, known_migration_fix, loop_detected,
                 user_interrupted, failure_classes, recommended_constraints, suppressed_constraints,
                 created_at, updated_at
@@ -1418,6 +1880,8 @@ pub async fn persist_feature_record(
                 $18, $19, $20,
                 $21, $22, $23, $24,
                 $25, $26, $27, $28,
+                $29, $30, $31, $32,
+                $33, $34, $35, $36,
                 now(), now()
              )
              ON CONFLICT (feature_id)
@@ -1441,6 +1905,14 @@ pub async fn persist_feature_record(
                 summarization_failure_count = EXCLUDED.summarization_failure_count,
                 migration_failure_count = EXCLUDED.migration_failure_count,
                 other_failure_count = EXCLUDED.other_failure_count,
+                context_pack_empty_count = EXCLUDED.context_pack_empty_count,
+                context_pack_truncated_count = EXCLUDED.context_pack_truncated_count,
+                high_input_token_count = EXCLUDED.high_input_token_count,
+                slow_upstream_model_count = EXCLUDED.slow_upstream_model_count,
+                empty_tool_use_message_count = EXCLUDED.empty_tool_use_message_count,
+                abandoned_before_model_count = EXCLUDED.abandoned_before_model_count,
+                single_model_abandoned_no_tools_count = EXCLUDED.single_model_abandoned_no_tools_count,
+                summarizer_shared_upstream_count = EXCLUDED.summarizer_shared_upstream_count,
                 known_endpoint = EXCLUDED.known_endpoint,
                 known_auth_header = EXCLUDED.known_auth_header,
                 known_migration_fix = EXCLUDED.known_migration_fix,
@@ -1470,6 +1942,14 @@ pub async fn persist_feature_record(
                         agent_feature_records.summarization_failure_count,
                         agent_feature_records.migration_failure_count,
                         agent_feature_records.other_failure_count,
+                        agent_feature_records.context_pack_empty_count,
+                        agent_feature_records.context_pack_truncated_count,
+                        agent_feature_records.high_input_token_count,
+                        agent_feature_records.slow_upstream_model_count,
+                        agent_feature_records.empty_tool_use_message_count,
+                        agent_feature_records.abandoned_before_model_count,
+                        agent_feature_records.single_model_abandoned_no_tools_count,
+                        agent_feature_records.summarizer_shared_upstream_count,
                         agent_feature_records.known_endpoint,
                         agent_feature_records.known_auth_header,
                         agent_feature_records.known_migration_fix,
@@ -1498,6 +1978,14 @@ pub async fn persist_feature_record(
                         EXCLUDED.summarization_failure_count,
                         EXCLUDED.migration_failure_count,
                         EXCLUDED.other_failure_count,
+                        EXCLUDED.context_pack_empty_count,
+                        EXCLUDED.context_pack_truncated_count,
+                        EXCLUDED.high_input_token_count,
+                        EXCLUDED.slow_upstream_model_count,
+                        EXCLUDED.empty_tool_use_message_count,
+                        EXCLUDED.abandoned_before_model_count,
+                        EXCLUDED.single_model_abandoned_no_tools_count,
+                        EXCLUDED.summarizer_shared_upstream_count,
                         EXCLUDED.known_endpoint,
                         EXCLUDED.known_auth_header,
                         EXCLUDED.known_migration_fix,
@@ -1531,6 +2019,14 @@ pub async fn persist_feature_record(
                 &record.summarization_failure_count,
                 &record.migration_failure_count,
                 &record.other_failure_count,
+                &record.context_pack_empty_count,
+                &record.context_pack_truncated_count,
+                &record.high_input_token_count,
+                &record.slow_upstream_model_count,
+                &record.empty_tool_use_message_count,
+                &record.abandoned_before_model_count,
+                &record.single_model_abandoned_no_tools_count,
+                &record.summarizer_shared_upstream_count,
                 &record.known_endpoint,
                 &record.known_auth_header,
                 &record.known_migration_fix,
@@ -2056,6 +2552,139 @@ mod tests {
         let text = &record.recommended_constraints[0].text;
         assert!(text.contains("Read"));
         assert!(text.contains("Bash"));
+    }
+
+    #[test]
+    fn live_operational_health_tags_populate_counters() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+        let events = vec![
+            event(
+                "e1",
+                "context_pack",
+                annotate_event_metadata(
+                    "context_pack",
+                    "",
+                    None,
+                    json!({
+                        "total_context_tokens": 26,
+                        "retrieved_event_ids": [],
+                        "memory_levels_used": [],
+                        "truncated": true
+                    }),
+                ),
+                now,
+            ),
+            event(
+                "e2",
+                "assistant_message",
+                annotate_event_metadata(
+                    "assistant_message",
+                    "",
+                    None,
+                    json!({
+                        "input_tokens": 120000,
+                        "latency_ms": 65000,
+                        "finish_reason": "tool_use"
+                    }),
+                ),
+                now + Duration::seconds(1),
+            ),
+            event(
+                "e3",
+                "trajectory_result",
+                annotate_event_metadata(
+                    "trajectory_result",
+                    "abandoned before model",
+                    None,
+                    json!({
+                        "final_status": "abandoned",
+                        "total_model_calls": 0,
+                        "total_input_tokens": 125000,
+                        "total_latency_ms": 70000
+                    }),
+                ),
+                now + Duration::seconds(2),
+            ),
+            event(
+                "e4",
+                "trajectory_result",
+                annotate_event_metadata(
+                    "trajectory_result",
+                    "single call abandoned",
+                    None,
+                    json!({
+                        "final_status": "abandoned",
+                        "total_model_calls": 1,
+                        "total_tool_calls": 0,
+                        "total_validations": 0
+                    }),
+                ),
+                now + Duration::seconds(3),
+            ),
+            event(
+                "e5",
+                "config_check",
+                annotate_event_metadata(
+                    "config_check",
+                    "shared summarizer upstream",
+                    None,
+                    json!({
+                        "summarizer_base_url": "http://litellm:4000",
+                        "litellm_url": "http://litellm:4000/"
+                    }),
+                ),
+                now + Duration::seconds(4),
+            ),
+        ];
+
+        let record = &extract_records(&events, &config(now + Duration::seconds(4))).records[0];
+        assert_eq!(record.context_pack_empty_count, 1);
+        assert_eq!(record.context_pack_truncated_count, 1);
+        assert_eq!(record.high_input_token_count, 2);
+        assert_eq!(record.slow_upstream_model_count, 2);
+        assert_eq!(record.empty_tool_use_message_count, 1);
+        assert_eq!(record.abandoned_before_model_count, 1);
+        assert_eq!(record.single_model_abandoned_no_tools_count, 1);
+        assert_eq!(record.summarizer_shared_upstream_count, 1);
+        assert!(record
+            .recommended_constraints
+            .iter()
+            .any(|item| item.constraint_type == "fix_context_retrieval"));
+        assert!(record
+            .recommended_constraints
+            .iter()
+            .any(|item| item.constraint_type == "reduce_context_bloat"));
+        assert!(record
+            .recommended_constraints
+            .iter()
+            .any(|item| item.constraint_type == "separate_summarizer_upstream"));
+    }
+
+    #[test]
+    fn bootstrap_catches_loop_warning_and_bracketed_interruption() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+        let read_loop = AgentEvent {
+            summary: "LOOP WARNING: Tool 'Read' called 3 times with identical params".to_string(),
+            ..event("e1", "failed_attempt", json!({}), now)
+        };
+        let bash_loop = AgentEvent {
+            summary: "LOOP WARNING: Tool 'Bash' called 3 times with identical params".to_string(),
+            ..event("e2", "failed_attempt", json!({}), now)
+        };
+        let interrupted = AgentEvent {
+            summary: "[Request interrupted by user for tool use]".to_string(),
+            ..event("e3", "failed_attempt", json!({}), now)
+        };
+
+        assert!(bootstrap_detection_tags_for_event(&read_loop)
+            .iter()
+            .any(|tag| tag.tag_type == "tool_loop" && tag.tool.as_deref() == Some("Read")));
+        assert!(bootstrap_detection_tags_for_event(&bash_loop)
+            .iter()
+            .any(|tag| tag.tag_type == "tool_loop" && tag.tool.as_deref() == Some("Bash")));
+        assert!(bootstrap_detection_tags_for_event(&interrupted)
+            .iter()
+            .any(|tag| tag.tag_type == "user_interruption"));
     }
 
     #[test]

@@ -38,6 +38,14 @@ Supported tag types:
 - `summarization_failure`
 - `migration_failure`
 - `correction_acknowledged`
+- `context_pack_empty`
+- `context_pack_truncated`
+- `high_input_tokens`
+- `slow_upstream_model`
+- `empty_tool_use_message`
+- `abandoned_before_model`
+- `single_model_abandoned_no_tools`
+- `summarizer_shared_upstream`
 
 Supported live producer sources:
 
@@ -47,6 +55,10 @@ Supported live producer sources:
 - `failed_attempt_classifier`
 - `summarizer`
 - `remediation_parser`
+- `context_builder`
+- `model_response_parser`
+- `trajectory_analyzer`
+- `config_validator`
 
 Historical bootstrap tags use `bootstrap_migration` as their source so provenance stays visible.
 
@@ -60,7 +72,7 @@ During extraction, the same event contributes once per condition. For example, `
 
 When `trajectory_id` is present, extraction groups by trajectory. Otherwise it groups by `session_id` plus `FEATURE_WINDOW_SEC`, default `3600`.
 
-Feature rows include event counts, failure counters, known facts, booleans such as `loop_detected`, `failure_classes`, `recommended_constraints`, and `suppressed_constraints`.
+Feature rows include event counts, failure counters, known facts, booleans such as `loop_detected`, `failure_classes`, `recommended_constraints`, and `suppressed_constraints`. In addition to direct failure classes, the extractor records operational health signals such as empty or truncated context packs, high input-token requests, slow upstream model calls, empty tool-use assistant messages, early abandoned trajectories, and summarizer configuration that shares foreground LiteLLM capacity.
 
 `other_failure_count` increments for `failed_attempt` events with zero recognized detection tags. No constraint is generated for `other_failure`; it exists so operators can see unclassified failure patterns and add new deterministic producers.
 
@@ -78,6 +90,11 @@ Recovery indicators:
 - `wrong_endpoint`: successful request to the known correct endpoint
 - `summarization_failure`: successful summarization event
 - `migration_failure`: successful migration event
+- `context_pack_empty`: later context pack with non-empty retrieval/memory evidence
+- `context_pack_truncated`: later context pack with `truncated=false`
+- `high_input_tokens`: later model or trajectory event below the high-input threshold
+- `slow_upstream_model`: later model or trajectory event below the slow-upstream threshold
+- `summarizer_shared_upstream`: later config signal where summarization uses a distinct upstream
 
 The builder emits at most `MAX_OPERATIONAL_CONSTRAINTS`, default `5`, in fixed priority order:
 
@@ -85,10 +102,15 @@ The builder emits at most `MAX_OPERATIONAL_CONSTRAINTS`, default `5`, in fixed p
 2. `use_known_endpoint`
 3. `use_known_migration_fix`
 4. `avoid_tool_loop`
-5. `handle_user_interruption`
-6. `handle_summarization_failure`
+5. `fix_context_retrieval`
+6. `reduce_context_bloat`
+7. `separate_summarizer_upstream`
+8. `handle_user_interruption`
+9. `handle_summarization_failure`
 
 Read and Bash loop signals combine into one `avoid_tool_loop` constraint before the cap is evaluated.
+
+The three health constraints are intentionally narrow: empty context packs tell the agent to verify cache warmup and retrieval health, high input tokens or truncation tell it not to expand context further, and shared summarizer upstream tells operators to keep background summarization on the dedicated summarizer endpoint.
 
 Suppression reasons are:
 
@@ -132,6 +154,8 @@ Backfill first applies deterministic bootstrap tagging to historical events unle
 
 Bootstrap tagging and feature persistence are idempotent. Re-running backfill does not create duplicate tags or feature rows.
 
+The main orchestrator runs this backfill automatically as a startup gate when `FEATURE_EXTRACTION_ENABLED=true` and `FEATURE_STARTUP_BACKFILL_ENABLED=true`, which is the default. The HTTP listener is not bound until the feature backfill succeeds, so schema and derived feature state are safe before traffic is accepted. The maintenance command remains available for dry runs and scoped rebuilds. Startup backfill uses `FEATURE_STARTUP_BACKFILL_BATCH_SIZE`, default `500`, and can skip historical tag writes with `FEATURE_STARTUP_SKIP_BOOTSTRAP_TAGGING=true`.
+
 ## Metrics
 
 New metrics:
@@ -149,6 +173,8 @@ Labels are bounded enumerations. User text, IP addresses, filenames, endpoints, 
 ## Feature Flag
 
 `FEATURE_EXTRACTION_ENABLED=false` disables inline extraction and Operational Constraints injection. Existing behavior is preserved. Manual backfill remains available.
+
+`FEATURE_STARTUP_BACKFILL_ENABLED=false` disables only the automatic boot-time feature rebuild. Live tagging and inline feature extraction still run when `FEATURE_EXTRACTION_ENABLED=true`, but deployments should leave startup backfill enabled when they require the database to be fully reconciled before serving requests.
 
 ## Future Policy
 

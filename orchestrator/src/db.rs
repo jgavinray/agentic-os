@@ -304,6 +304,12 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     {
         anyhow::bail!("trajectory_id, attempt_index, and event_role must be written together");
     }
+    let metadata = crate::feature_extraction::annotate_event_metadata(
+        &event.event_type,
+        &event.summary,
+        event.evidence.as_deref(),
+        event.metadata.clone(),
+    );
     let started = std::time::Instant::now();
     let result = async {
         let conn = pool.get().await?;
@@ -319,7 +325,7 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
                 &event.event_type,
                 &event.summary,
                 &event.evidence,
-                &event.metadata,
+                &metadata,
                 &event.correlation_id,
                 &event.parent_event_id,
                 &event.trajectory_id,
