@@ -46,15 +46,41 @@ mod tests {
         //   source_decision_id, context_policy_version
         // - bounded free text: drop_reason_other_detail (max 256)
         let allowed_unbounded_strings: HashSet<&str> = [
+            // Opaque ids
             "decision_id",
             "candidate_id",
             "source_record_id",
-            "source_decision_id",
+            // Metadata strings
             "repo",
             "session_id",
             "trajectory_id",
+            "source_decision_id",
             "context_policy_version",
+            // Bounded free text (256 char limit enforced by CHECK)
             "drop_reason_other_detail",
+            // Enum TEXT columns — bounded by CHECK constraints in the migration
+            // These are enum-backed, not free text
+            "request_route",
+            "task_type",
+            "cache_status",
+            "assembly_status",
+            "source_type",
+            "event_type",
+            "summary_level",
+            "token_cost_bucket",
+            "retrieval_score_bucket",
+            "failure_class",
+            "operational_constraint_type",
+            "context_section",
+            "duplicate_coverage",
+            "deterministic_score_bucket",
+            "drop_reason",
+            "representation_selected",
+            "trajectory_outcome",
+            "validation_result",
+            "request_latency_bucket",
+            "input_token_bucket",
+            "output_token_bucket",
         ]
         .iter()
         .copied()
@@ -131,7 +157,7 @@ mod tests {
 
         fn check_columns(
             name: &str,
-            cols: &[(<&str, &str)],
+            cols: &[(&str, &str)],
             allowed: &HashSet<&str>,
         ) {
             for (col_name, col_type) in cols {
