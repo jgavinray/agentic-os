@@ -15,13 +15,48 @@ pub use enums::*;
 pub use constants::*;
 pub use structs::*;
 
+/// Typed reference to a source record for feature extraction.
+///
+/// Keeps the ledger from depending on the assembler's internal record types —
+/// only bounded fields relevant to feature vectors are exposed.
+#[derive(Debug, Clone)]
+pub struct SourceRecordRef {
+    pub source_type: SourceType,
+    pub source_record_id: String,
+    pub event_type: Option<EventType>,
+    pub estimated_token_cost: i32,
+    pub age_seconds: i32,
+    pub same_repo: bool,
+    pub_same_session: bool,
+    pub same_trajectory: bool,
+    pub context_section: ContextSection,
+    pub estimated_token_cost_bucket: TokenCostBucket,
+    pub failure_class: Option<FailureClass>,
+    pub operational_constraint_type: Option<OperationalConstraintType>,
+    pub duplicate_coverage: DuplicateCoverage,
+}
+
+/// Decision context passed to feature extraction for determining
+/// environment booleans (same_repo, same_session, same_trajectory).
+#[derive(Debug, Clone)]
+pub struct DecisionContext {
+    pub decision_id: String,
+    pub repo: String,
+    pub session_id: Option<String>,
+    pub trajectory_id: Option<String>,
+}
+
 /// Extract bounded feature vector from a candidate.
 ///
 /// Placeholder — body is `unimplemented!()`. The actual implementation
 /// belongs in Phase 3.
+///
+/// Inputs are typed structs (`SourceRecordRef` + `DecisionContext`) rather
+/// than opaque strings so callers cannot pass arbitrary blobs and so the
+/// function signature is self-documenting.
 pub fn extract_candidate_features(
-    _source_record: &str,
-    _decision_context: &str,
+    _source_record: &SourceRecordRef,
+    _decision_context: &DecisionContext,
 ) -> CandidateFeatureVector {
     unimplemented!("feature extraction body is Phase 3")
 }
@@ -270,11 +305,20 @@ mod tests {
             (
                 "FailureClass",
                 vec![
-                    "SyntaxError",
-                    "TypeError",
-                    "ValidationError",
-                    "Timeout",
-                    "ResourceExhausted",
+                    "ToolLoop",
+                    "UserInterruption",
+                    "MissingAuth",
+                    "WrongEndpoint",
+                    "SummarizationFailure",
+                    "MigrationFailure",
+                    "ContextPackEmpty",
+                    "ContextPackTruncated",
+                    "HighInputTokens",
+                    "SlowUpstreamModel",
+                    "EmptyToolUseMessage",
+                    "AbandonedBeforeModel",
+                    "SingleModelAbandonedNoTools",
+                    "SummarizerSharedUpstream",
                     "Unknown",
                 ],
             ),
