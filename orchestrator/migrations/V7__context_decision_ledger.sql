@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS context_decision_candidates (
             'context_pack_empty', 'context_pack_truncated',
             'high_input_tokens', 'slow_upstream_model',
             'empty_tool_use_message', 'abandoned_before_model',
-            'single_model_abandoned_no_tools', 'summarizer_shared_upstream', 'other'
+            'single_model_abandoned_no_tools', 'summarizer_shared_upstream',
+            'unknown'
         )),
     operational_constraint_type  TEXT
         CHECK (operational_constraint_type IN (
