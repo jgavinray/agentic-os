@@ -39,7 +39,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It classifies harness failure traces and quarantines poisoned benchmark artifacts from future context memory while preserving them in the audit log; see [docs/HARNESS_FEEDBACK.md](docs/HARNESS_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -90,6 +90,7 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 - Feature extraction bootstrap and feature-record rebuild run automatically as a startup gate before traffic.
 - Signature backfill runs with `orchestrator-maint backfill-signatures`.
 - Feature extraction backfill can also be run manually with `orchestrator-maint extract-features` for dry-runs or scoped repair.
+- Harness feedback quarantine can be repaired with `orchestrator-maint classify-harness-feedback`.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 
@@ -149,6 +150,12 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `FEATURE_STARTUP_BACKFILL_ENABLED` | `true` | Runs feature bootstrap tagging and feature-record rebuild as a startup gate before serving traffic. |
 | `FEATURE_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup bootstrap metadata updates. |
 | `FEATURE_STARTUP_SKIP_BOOTSTRAP_TAGGING` | `false` | Skips startup historical tag writes and only rebuilds feature records. |
+| `HARNESS_FEEDBACK_STARTUP_BACKFILL_ENABLED` | `true` | Runs best-effort startup harness feedback classification before serving traffic. |
+| `HARNESS_FEEDBACK_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup harness feedback metadata repair. |
+| `HARNESS_FEEDBACK_BACKGROUND_REPAIR_ENABLED` | `true` | Runs conservative periodic harness feedback repair in the background. |
+| `HARNESS_FEEDBACK_REPAIR_INTERVAL_SEC` | `300` | Interval for periodic harness feedback repair. |
+| `HARNESS_FEEDBACK_REPAIR_LOOKBACK_SEC` | `2 * interval`, minimum `60` | Recent event window scanned by periodic harness feedback repair. |
+| `HARNESS_FEEDBACK_REPAIR_BATCH_SIZE` | `500` | Batch size for periodic harness feedback repair. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
 | `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |

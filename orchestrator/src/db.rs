@@ -304,11 +304,17 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     {
         anyhow::bail!("trajectory_id, attempt_index, and event_role must be written together");
     }
-    let metadata = crate::feature_extraction::annotate_event_metadata(
+    let metadata = crate::harness_feedback::annotate_event_metadata(
         &event.event_type,
         &event.summary,
         event.evidence.as_deref(),
         event.metadata.clone(),
+    );
+    let metadata = crate::feature_extraction::annotate_event_metadata(
+        &event.event_type,
+        &event.summary,
+        event.evidence.as_deref(),
+        metadata,
     );
     let started = std::time::Instant::now();
     let result = async {
@@ -340,6 +346,7 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     .await;
     crate::telemetry::record_db_query("insert_event", started.elapsed(), result.is_ok());
     if result.is_ok() {
+        crate::harness_feedback::record_metadata_metrics(&metadata);
         tracing::info!(
             target: "execution_feedback",
             event_type = %event.event_type,
@@ -530,6 +537,7 @@ pub async fn get_events_for_repo(
              WHERE repo = $1
                AND summarized = false
                AND summary_level = 0
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
              ORDER BY created_at DESC
              LIMIT $2",
             &[&repo, &limit],
@@ -566,7 +574,10 @@ pub async fn count_events_for_repo(pool: &Pool, repo: &str) -> Result<i64, anyho
         let conn = pool.get().await?;
         let row = conn
             .query_one(
-                "SELECT count(*)::BIGINT AS count FROM agent_events WHERE repo = $1",
+                "SELECT count(*)::BIGINT AS count
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'",
                 &[&repo],
             )
             .await?;
@@ -660,6 +671,7 @@ async fn get_events_for_repo_by_level(
              WHERE repo = $1
                AND summary_level = $2
                AND event_type NOT IN ('failed_attempt', 'remediation')
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
              ORDER BY created_at DESC
              LIMIT $3",
             &[&repo, &level, &limit],
@@ -685,6 +697,7 @@ async fn get_failure_events_for_repo(
              FROM agent_events
              WHERE repo = $1
                AND event_type IN ('failed_attempt', 'remediation')
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
              ORDER BY created_at DESC
              LIMIT $2",
             &[&repo, &limit],
@@ -709,6 +722,7 @@ async fn get_events_for_repo_by_levels(
              WHERE repo = $1
                AND summarized = false
                AND summary_level = ANY($2)
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
              ORDER BY summary_level DESC, created_at DESC
              LIMIT $3",
             &[&repo, &levels, &limit],
@@ -759,6 +773,7 @@ pub async fn search_events_fts(
                      FROM agent_events
                      WHERE repo = $1
                        AND summarized = false
+                       AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
                  )
                  SELECT id, event_type, summary, created_at
                  FROM docs
@@ -803,6 +818,7 @@ pub async fn hydrate_active_search_hits(
                  FROM agent_events
                  WHERE repo = $1
                    AND summarized = false
+                   AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
                    AND id = ANY($2)",
                 &[&repo, &ids],
             )
@@ -1412,6 +1428,12 @@ pub fn event_from_append_request(
         .as_ref()
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    let metadata = crate::harness_feedback::annotate_event_metadata(
+        &req.event_type,
+        &req.summary,
+        req.evidence.as_deref(),
+        metadata,
+    );
     let metadata = crate::feature_extraction::annotate_event_metadata(
         &req.event_type,
         &req.summary,

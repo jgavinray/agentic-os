@@ -45,6 +45,7 @@ Run it locally with Cargo:
 cd orchestrator
 cargo run --bin orchestrator-maint -- backfill-signatures --dry-run
 cargo run --bin orchestrator-maint -- extract-features --dry-run
+cargo run --bin orchestrator-maint -- classify-harness-feedback --dry-run
 ```
 
 In a packaged deployment, run the built `orchestrator-maint` executable with the same environment as the orchestrator service.
@@ -54,6 +55,7 @@ With the Docker Compose stack in this repo, prefer a one-off container on the sa
 ```bash
 docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features --dry-run
 docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator classify-harness-feedback --dry-run
 ```
 
 If the orchestrator container is already running and the image contains `/usr/local/bin/orchestrator-maint`, this is equivalent:
@@ -66,10 +68,11 @@ Current commands:
 
 - `backfill-signatures`: rewrites historical failed outcome events to carry inline deterministic failure signatures.
 - `extract-features`: bootstrap-tags historical operational events and rebuilds `agent_feature_records`.
+- `classify-harness-feedback`: reclassifies historical events with bounded harness feedback signals and quarantines poisoned benchmark traces from future context memory.
 
 These commands are safe to re-run. Use `--dry-run` first when inspecting a production database.
 
-New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. Startup also runs a full idempotent feature backfill by default before serving traffic, so the CLI is mainly for explicit dry-runs, scoped repair, and manual rebuilds.
+New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. Startup also runs a full idempotent feature backfill by default before serving traffic, and harness feedback repair runs automatically at startup plus periodically in the background. The CLI is mainly for explicit dry-runs, scoped repair, and manual rebuilds.
 
 ## Backup And Restore
 
@@ -150,6 +153,12 @@ Optional:
 | `FEATURE_STARTUP_BACKFILL_ENABLED` | `true` | Runs idempotent feature bootstrap tagging and feature record rebuild as a startup gate before serving traffic when feature extraction is enabled. |
 | `FEATURE_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup bootstrap metadata updates. |
 | `FEATURE_STARTUP_SKIP_BOOTSTRAP_TAGGING` | `false` | Skips startup bootstrap tagging and only rebuilds feature records. Use only after historical tagging is already complete. |
+| `HARNESS_FEEDBACK_STARTUP_BACKFILL_ENABLED` | `true` | Runs best-effort startup harness feedback classification before serving traffic. |
+| `HARNESS_FEEDBACK_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup harness feedback metadata repair. |
+| `HARNESS_FEEDBACK_BACKGROUND_REPAIR_ENABLED` | `true` | Runs conservative periodic harness feedback repair in the background. |
+| `HARNESS_FEEDBACK_REPAIR_INTERVAL_SEC` | `300` | Interval for periodic harness feedback repair. |
+| `HARNESS_FEEDBACK_REPAIR_LOOKBACK_SEC` | `2 * interval`, minimum `60` | Recent event window scanned by periodic harness feedback repair. |
+| `HARNESS_FEEDBACK_REPAIR_BATCH_SIZE` | `500` | Batch size for periodic harness feedback repair. |
 | `FEATURE_WINDOW_SEC` | `3600` | Session fallback grouping window when trajectory lineage is absent. |
 | `CONSTRAINT_FRESHNESS_WINDOW_SEC` | `1800` | Maximum age of detections and recoveries used for active constraints. |
 | `MAX_OPERATIONAL_CONSTRAINTS` | `5` | Maximum constraints emitted by the deterministic builder. |

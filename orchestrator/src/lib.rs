@@ -1,9 +1,11 @@
 pub mod anthropic;
+pub mod context_ledger;
 pub mod db;
 pub mod embedder;
 pub mod execution_feedback;
 pub mod feature_extraction;
 pub mod handlers;
+pub mod harness_feedback;
 pub mod hybrid;
 pub mod logging;
 pub mod migrations;
@@ -15,4 +17,3 @@ pub mod state;
 pub mod summarizer;
 pub mod telemetry;
 pub mod trajectory;
-pub mod context_ledger;
