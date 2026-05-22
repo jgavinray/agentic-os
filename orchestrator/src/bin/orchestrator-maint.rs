@@ -1,4 +1,6 @@
-use orchestrator::{db, execution_feedback, feature_extraction, logging, migrations};
+use orchestrator::{
+    db, execution_feedback, feature_extraction, harness_feedback, logging, migrations,
+};
 use std::env;
 use std::ops::DerefMut;
 use uuid::Uuid;
@@ -77,6 +79,32 @@ async fn run() -> Result<(), anyhow::Error> {
             );
             Ok(())
         }
+        "classify-harness-feedback" => {
+            let opts = HarnessFeedbackOptions::parse(args.collect())?;
+            let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let pool = db::create_pool(&db_url)?;
+            migrations::run(&pool).await?;
+            let report = harness_feedback::run_backfill(
+                &pool,
+                &harness_feedback::BackfillOptions {
+                    repo: opts.repo,
+                    session_id: opts.session_id,
+                    since: opts.since,
+                    dry_run: opts.dry_run,
+                    batch_size: opts.batch_size,
+                },
+            )
+            .await?;
+            println!(
+                "classify-harness-feedback: events_scanned={} updated={} quarantined={} dry_run={} batch_size={}",
+                report.events_scanned,
+                report.updated,
+                report.quarantined,
+                report.dry_run,
+                report.batch_size
+            );
+            Ok(())
+        }
         _ => {
             print_usage();
             anyhow::bail!("unknown command: {command}");
@@ -97,7 +125,7 @@ fn execution_feedback_enabled() -> bool {
 
 fn print_usage() {
     eprintln!(
-        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]"
+        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]"
     );
 }
 
@@ -114,6 +142,75 @@ struct ExtractFeaturesOptions {
     dry_run: bool,
     batch_size: i64,
     skip_bootstrap_tagging: bool,
+}
+
+struct HarnessFeedbackOptions {
+    repo: Option<String>,
+    session_id: Option<String>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    dry_run: bool,
+    batch_size: i64,
+}
+
+impl HarnessFeedbackOptions {
+    fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
+        let mut repo = None;
+        let mut session_id = None;
+        let mut since = None;
+        let mut dry_run = false;
+        let mut batch_size = DEFAULT_BATCH_SIZE;
+        let mut idx = 0usize;
+        while idx < args.len() {
+            match args[idx].as_str() {
+                "--repo" | "–repo" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--repo requires a value");
+                    };
+                    repo = Some(value.clone());
+                    idx += 2;
+                }
+                "--session" | "–session" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--session requires a value");
+                    };
+                    session_id = Some(value.clone());
+                    idx += 2;
+                }
+                "--since" | "–since" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--since requires an RFC3339 timestamp");
+                    };
+                    since = Some(
+                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
+                    );
+                    idx += 2;
+                }
+                "--dry-run" | "–dry-run" => {
+                    dry_run = true;
+                    idx += 1;
+                }
+                "--batch-size" | "–batch-size" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--batch-size requires a positive integer");
+                    };
+                    batch_size = value.parse::<i64>()?;
+                    if batch_size <= 0 {
+                        anyhow::bail!("--batch-size must be positive");
+                    }
+                    idx += 2;
+                }
+                other => anyhow::bail!("unknown option: {other}"),
+            }
+        }
+
+        Ok(Self {
+            repo,
+            session_id,
+            since,
+            dry_run,
+            batch_size,
+        })
+    }
 }
 
 impl ExtractFeaturesOptions {

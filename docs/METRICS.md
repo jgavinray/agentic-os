@@ -65,6 +65,10 @@
 | `feature_extraction_duration_seconds` | histogram | none | Inline feature extraction latency. |
 | `feature_extraction_failures_total` | counter | `stage` | Best-effort feature extraction failures. `stage` is one of `extraction`, `constraint_build`, `persistence`. |
 | `feature_tag_schema_version_unknown_total` | counter | none | Detection tags skipped because their schema version is unknown. |
+| `harness_feedback_signals_total` | counter | `signal_type` | Deterministic harness failure or recovery signals recorded on persisted events. Labels are bounded and never include raw paths, prompts, commands, or user text. |
+| `harness_feedback_quarantined_total` | counter | `reason` | Events marked as excluded from future context memory because their harness trace is likely poisoned or benchmark-only. |
+| `harness_feedback_learning_records_total` | counter | `status` | Structured harness feedback records available for later offline learning analysis. `status` is one of `recorded`, `quarantined`, or `ignored`. |
+| `harness_feedback_repair_runs_total` | counter | `result` | Startup and periodic harness feedback repair runs. `result` is `success` or `failure`. |
 | `process_cpu_seconds_total` | counter | none | Process CPU seconds. |
 | `process_resident_memory_bytes` | gauge | none | Resident memory bytes. |
 | `process_start_time_seconds` | gauge | none | Process start time. |

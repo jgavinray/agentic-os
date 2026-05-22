@@ -376,6 +376,22 @@ fn describe_metrics() {
         "Detection tags skipped due to unknown schema versions."
     );
     describe_counter!(
+        "harness_feedback_signals_total",
+        "Deterministic harness feedback signals recorded on persisted events."
+    );
+    describe_counter!(
+        "harness_feedback_quarantined_total",
+        "Persisted events marked as excluded from future context memory."
+    );
+    describe_counter!(
+        "harness_feedback_learning_records_total",
+        "Harness feedback records available for learning-oriented analysis."
+    );
+    describe_counter!(
+        "harness_feedback_repair_runs_total",
+        "Harness feedback startup and background repair runs by bounded result."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -614,6 +630,18 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         counter!("feature_extraction_failures_total", "stage" => stage).increment(0);
     }
     counter!("feature_tag_schema_version_unknown_total").increment(0);
+    for signal_type in crate::harness_feedback::HARNESS_SIGNAL_TYPES {
+        counter!("harness_feedback_signals_total", "signal_type" => signal_type).increment(0);
+    }
+    for reason in crate::harness_feedback::HARNESS_QUARANTINE_REASONS {
+        counter!("harness_feedback_quarantined_total", "reason" => reason).increment(0);
+    }
+    for status in crate::harness_feedback::HARNESS_LEARNING_STATUSES {
+        counter!("harness_feedback_learning_records_total", "status" => status).increment(0);
+    }
+    for result in ["success", "failure"] {
+        counter!("harness_feedback_repair_runs_total", "result" => result).increment(0);
+    }
 }
 
 pub async fn http_metrics_middleware(req: Request, next: Next) -> Response {
@@ -896,6 +924,30 @@ pub fn record_feature_extraction_failure(stage: &'static str) {
 
 pub fn record_unknown_tag_schema_version() {
     counter!("feature_tag_schema_version_unknown_total").increment(1);
+}
+
+pub fn record_harness_feedback_signal(signal_type: &str) {
+    let signal_type = crate::harness_feedback::bounded_signal_type(signal_type);
+    counter!("harness_feedback_signals_total", "signal_type" => signal_type).increment(1);
+}
+
+pub fn record_harness_feedback_quarantine(reason: &str) {
+    let reason = crate::harness_feedback::bounded_quarantine_reason(reason);
+    counter!("harness_feedback_quarantined_total", "reason" => reason).increment(1);
+}
+
+pub fn record_harness_feedback_learning(status: &str) {
+    let status = crate::harness_feedback::bounded_learning_status(status);
+    counter!("harness_feedback_learning_records_total", "status" => status).increment(1);
+}
+
+pub fn record_harness_feedback_repair_run(result: &'static str) {
+    let result = match result {
+        "success" => "success",
+        "failure" => "failure",
+        _ => "failure",
+    };
+    counter!("harness_feedback_repair_runs_total", "result" => result).increment(1);
 }
 
 fn bounded_feature_failure_class(value: &str) -> &'static str {
