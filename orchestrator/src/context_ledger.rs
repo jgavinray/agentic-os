@@ -1,18 +1,18 @@
-/// Shadow Context Decision Ledger — module root.
-///
-/// This module records deterministic context-pack assembly decisions
-/// for offline learned-ranker training. It does not import assembler
-/// internals; the assembler imports this module's narrow public interface.
-///
-/// Cross-phase invariants from ARCHITECTURE.md apply in full.
+//! Shadow Context Decision Ledger — module root.
+//!
+//! This module records deterministic context-pack assembly decisions
+//! for offline learned-ranker training. It does not import assembler
+//! internals; the assembler imports this module's narrow public interface.
+//!
+//! Cross-phase invariants from ARCHITECTURE.md apply in full.
 
-pub mod enums;
 pub mod constants;
-pub mod structs;
 pub mod enum_hash;
+pub mod enums;
+pub mod structs;
 
-pub use enums::*;
 pub use constants::*;
+pub use enums::*;
 pub use structs::*;
 
 /// Typed reference to a source record for feature extraction.
@@ -27,7 +27,7 @@ pub struct SourceRecordRef {
     pub estimated_token_cost: i32,
     pub age_seconds: i32,
     pub same_repo: bool,
-    pub_same_session: bool,
+    pub same_session: bool,
     pub same_trajectory: bool,
     pub context_section: ContextSection,
     pub estimated_token_cost_bucket: TokenCostBucket,
@@ -74,6 +74,16 @@ mod tests {
     /// architecture allowlist. The allowlist is enumerated explicitly.
     #[test]
     fn schema_privacy_test() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ColumnKind {
+            UnboundedString,
+            BoundedString,
+            ClosedEnum,
+            Integer,
+            BigInt,
+            Boolean,
+        }
+
         // Explicit allowlist per ARCHITECTURE.md privacy rules.
         // Unbounded strings are allowed for these columns:
         // - opaque ids: decision_id, candidate_id, source_record_id
@@ -93,29 +103,6 @@ mod tests {
             "context_policy_version",
             // Bounded free text (256 char limit enforced by CHECK)
             "drop_reason_other_detail",
-            // Enum TEXT columns — bounded by CHECK constraints in the migration
-            // These are enum-backed, not free text
-            "request_route",
-            "task_type",
-            "cache_status",
-            "assembly_status",
-            "source_type",
-            "event_type",
-            "summary_level",
-            "token_cost_bucket",
-            "retrieval_score_bucket",
-            "failure_class",
-            "operational_constraint_type",
-            "context_section",
-            "duplicate_coverage",
-            "deterministic_score_bucket",
-            "drop_reason",
-            "representation_selected",
-            "trajectory_outcome",
-            "validation_result",
-            "request_latency_bucket",
-            "input_token_bucket",
-            "output_token_bucket",
         ]
         .iter()
         .copied()
@@ -123,86 +110,82 @@ mod tests {
 
         // All columns defined in context_decision_envelopes
         // from V7__context_decision_ledger.sql
-        let envelope_cols: Vec<(&str, &str)> = vec![
-            ("decision_id", "TEXT"),
-            ("source_decision_id", "TEXT"),
-            ("repo", "TEXT"),
-            ("session_id", "TEXT"),
-            ("trajectory_id", "TEXT"),
-            ("request_route", "TEXT"),
-            ("task_type", "TEXT"),
-            ("created_at_micros", "BIGINT"),
-            ("context_policy_version", "TEXT"),
-            ("feature_schema_version", "INTEGER"),
-            ("total_token_budget", "INTEGER"),
-            ("candidate_tokens_total", "INTEGER"),
-            ("fixed_overhead_tokens", "INTEGER"),
-            ("final_estimated_context_tokens", "INTEGER"),
-            ("cache_status", "TEXT"),
-            ("candidate_count", "INTEGER"),
-            ("injected_candidate_count", "INTEGER"),
-            ("assembly_duration_micros", "BIGINT"),
-            ("assembly_status", "TEXT"),
+        let envelope_cols: Vec<(&str, ColumnKind)> = vec![
+            ("decision_id", ColumnKind::UnboundedString),
+            ("source_decision_id", ColumnKind::UnboundedString),
+            ("repo", ColumnKind::UnboundedString),
+            ("session_id", ColumnKind::UnboundedString),
+            ("trajectory_id", ColumnKind::UnboundedString),
+            ("request_route", ColumnKind::ClosedEnum),
+            ("task_type", ColumnKind::ClosedEnum),
+            ("created_at_micros", ColumnKind::BigInt),
+            ("context_policy_version", ColumnKind::UnboundedString),
+            ("feature_schema_version", ColumnKind::Integer),
+            ("total_token_budget", ColumnKind::Integer),
+            ("candidate_tokens_total", ColumnKind::Integer),
+            ("fixed_overhead_tokens", ColumnKind::Integer),
+            ("final_estimated_context_tokens", ColumnKind::Integer),
+            ("cache_status", ColumnKind::ClosedEnum),
+            ("candidate_count", ColumnKind::Integer),
+            ("injected_candidate_count", ColumnKind::Integer),
+            ("assembly_duration_micros", ColumnKind::BigInt),
+            ("assembly_status", ColumnKind::ClosedEnum),
         ];
 
         // All columns in context_decision_candidates
-        let candidate_cols: Vec<(&str, &str)> = vec![
-            ("candidate_id", "TEXT"),
-            ("decision_id", "TEXT"),
-            ("source_type", "TEXT"),
-            ("source_record_id", "TEXT"),
-            ("event_type", "TEXT"),
-            ("summary_level", "TEXT"),
-            ("age_seconds", "INTEGER"),
-            ("same_repo", "BOOLEAN"),
-            ("same_session", "BOOLEAN"),
-            ("same_trajectory", "BOOLEAN"),
-            ("estimated_token_cost", "INTEGER"),
-            ("token_cost_bucket", "TEXT"),
-            ("retrieval_score_bucket", "TEXT"),
-            ("failure_class", "TEXT"),
-            ("operational_constraint_type", "TEXT"),
-            ("context_section", "TEXT"),
-            ("duplicate_coverage", "TEXT"),
-            ("deterministic_score_bucket", "TEXT"),
-            ("deterministic_rank", "INTEGER"),
-            ("budget_before_candidate", "INTEGER"),
-            ("budget_after_candidate", "INTEGER"),
-            ("injected", "BOOLEAN"),
-            ("drop_reason", "TEXT"),
-            ("drop_reason_other_detail", "TEXT"),
-            ("representation_selected", "TEXT"),
+        let candidate_cols: Vec<(&str, ColumnKind)> = vec![
+            ("candidate_id", ColumnKind::UnboundedString),
+            ("decision_id", ColumnKind::UnboundedString),
+            ("source_type", ColumnKind::ClosedEnum),
+            ("source_record_id", ColumnKind::UnboundedString),
+            ("event_type", ColumnKind::ClosedEnum),
+            ("summary_level", ColumnKind::ClosedEnum),
+            ("age_seconds", ColumnKind::Integer),
+            ("same_repo", ColumnKind::Boolean),
+            ("same_session", ColumnKind::Boolean),
+            ("same_trajectory", ColumnKind::Boolean),
+            ("estimated_token_cost", ColumnKind::Integer),
+            ("token_cost_bucket", ColumnKind::ClosedEnum),
+            ("retrieval_score_bucket", ColumnKind::ClosedEnum),
+            ("failure_class", ColumnKind::ClosedEnum),
+            ("operational_constraint_type", ColumnKind::ClosedEnum),
+            ("context_section", ColumnKind::ClosedEnum),
+            ("duplicate_coverage", ColumnKind::ClosedEnum),
+            ("deterministic_score_bucket", ColumnKind::ClosedEnum),
+            ("deterministic_rank", ColumnKind::Integer),
+            ("budget_before_candidate", ColumnKind::Integer),
+            ("budget_after_candidate", ColumnKind::Integer),
+            ("injected", ColumnKind::Boolean),
+            ("drop_reason", ColumnKind::ClosedEnum),
+            ("drop_reason_other_detail", ColumnKind::BoundedString),
+            ("representation_selected", ColumnKind::ClosedEnum),
         ];
 
         // All columns in context_decision_outcomes
-        let outcome_cols: Vec<(&str, &str)> = vec![
-            ("decision_id", "TEXT"),
-            ("trajectory_outcome", "TEXT"),
-            ("user_correction_after_decision", "BOOLEAN"),
-            ("retry_after_decision", "BOOLEAN"),
-            ("validation_result", "TEXT"),
-            ("tool_loop_detected_after_decision", "BOOLEAN"),
-            ("request_latency_bucket", "TEXT"),
-            ("input_token_bucket", "TEXT"),
-            ("output_token_bucket", "TEXT"),
-            ("outcome_joined_at_micros", "BIGINT"),
-            ("outcome_window_closed", "BOOLEAN"),
-            ("feature_schema_version", "INTEGER"),
+        let outcome_cols: Vec<(&str, ColumnKind)> = vec![
+            ("decision_id", ColumnKind::UnboundedString),
+            ("trajectory_outcome", ColumnKind::ClosedEnum),
+            ("user_correction_after_decision", ColumnKind::Boolean),
+            ("retry_after_decision", ColumnKind::Boolean),
+            ("validation_result", ColumnKind::ClosedEnum),
+            ("tool_loop_detected_after_decision", ColumnKind::Boolean),
+            ("request_latency_bucket", ColumnKind::ClosedEnum),
+            ("input_token_bucket", ColumnKind::ClosedEnum),
+            ("output_token_bucket", ColumnKind::ClosedEnum),
+            ("outcome_joined_at_micros", ColumnKind::BigInt),
+            ("outcome_window_closed", ColumnKind::Boolean),
+            ("feature_schema_version", ColumnKind::Integer),
         ];
 
-        fn check_columns(
-            name: &str,
-            cols: &[(&str, &str)],
-            allowed: &HashSet<&str>,
-        ) {
-            for (col_name, col_type) in cols {
-                // TEXT = unbounded string; everything else is
-                // primitive or handled differently.
-                if *col_type == "TEXT"
-                    && !allowed.contains(*col_name)
-                {
+        fn check_columns(name: &str, cols: &[(&str, ColumnKind)], allowed: &HashSet<&str>) {
+            for (col_name, col_kind) in cols {
+                let string_kind = matches!(
+                    col_kind,
+                    ColumnKind::UnboundedString | ColumnKind::BoundedString
+                );
+                if string_kind && !allowed.contains(*col_name) {
                     panic!(
-                        "{}: column '{}' is unbounded TEXT but is not in the privacy allowlist",
+                        "{}: column '{}' is a string field but is not in the privacy allowlist",
                         name, col_name
                     );
                 }
@@ -210,16 +193,8 @@ mod tests {
         }
 
         check_columns("envelopes", &envelope_cols, &allowed_unbounded_strings);
-        check_columns(
-            "candidates",
-            &candidate_cols,
-            &allowed_unbounded_strings,
-        );
-        check_columns(
-            "outcomes",
-            &outcome_cols,
-            &allowed_unbounded_strings,
-        );
+        check_columns("candidates", &candidate_cols, &allowed_unbounded_strings);
+        check_columns("outcomes", &outcome_cols, &allowed_unbounded_strings);
     }
 
     /// Test 2: Enum-version-bump test.
@@ -231,221 +206,17 @@ mod tests {
     /// `FEATURE_SCHEMA_VERSION` and update the hash file.
     #[test]
     fn enum_version_bump_test() {
-        // Define every enum and its variants here. If this list drifts
-        // from the actual enum definitions, the test fails.
-        let all_enums: Vec<(&str, Vec<&str>)> = vec![
-            (
-                "RequestRoute",
-                vec!["ChatCompletions", "Messages", "Unknown"],
-            ),
-            (
-                "TaskType",
-                vec![
-                    "Debug",
-                    "Feature",
-                    "Refactor",
-                    "Architecture",
-                    "Deploy",
-                    "Unknown",
-                ],
-            ),
-            (
-                "CacheStatus",
-                vec!["Miss", "HitFresh", "HitStale", "Bypass", "Unknown"],
-            ),
-            (
-                "AssemblyStatus",
-                vec!["Success", "Partial", "Failed", "Unknown"],
-            ),
-            (
-                "SourceType",
-                vec![
-                    "RawEvent",
-                    "Summary",
-                    "FailureHistory",
-                    "OperationalConstraint",
-                    "RetrievalHit",
-                    "FeatureRecord",
-                    "Unknown",
-                ],
-            ),
-            (
-                "EventType",
-                vec![
-                    "UserMessage",
-                    "AssistantMessage",
-                    "ToolCall",
-                    "ToolResult",
-                    "Error",
-                    "Summary",
-                    "Checkpoint",
-                    "Unknown",
-                ],
-            ),
-            (
-                "SummaryLevel",
-                vec!["None", "Compact", "Full", "RolledUp", "Unknown"],
-            ),
-            (
-                "TokenCostBucket",
-                vec![
-                    "Bucket0_50",
-                    "Bucket51_200",
-                    "Bucket201_500",
-                    "Bucket501_1000",
-                    "Bucket1001_2000",
-                    "Bucket2001Plus",
-                    "Unknown",
-                ],
-            ),
-            (
-                "RetrievalScoreBucket",
-                vec!["None", "Q1", "Q2", "Q3", "Q4", "Unknown"],
-            ),
-            (
-                "FailureClass",
-                vec![
-                    "ToolLoop",
-                    "UserInterruption",
-                    "MissingAuth",
-                    "WrongEndpoint",
-                    "SummarizationFailure",
-                    "MigrationFailure",
-                    "ContextPackEmpty",
-                    "ContextPackTruncated",
-                    "HighInputTokens",
-                    "SlowUpstreamModel",
-                    "EmptyToolUseMessage",
-                    "AbandonedBeforeModel",
-                    "SingleModelAbandonedNoTools",
-                    "SummarizerSharedUpstream",
-                    "Unknown",
-                ],
-            ),
-            (
-                "OperationalConstraintType",
-                vec![
-                    "TokenBudget",
-                    "LatencyTarget",
-                    "RetryCap",
-                    "SessionLimit",
-                    "Unknown",
-                ],
-            ),
-            (
-                "ContextSection",
-                vec![
-                    "RecentEvents",
-                    "SessionSummary",
-                    "RepoSummary",
-                    "ProjectSummary",
-                    "FailureHistory",
-                    "OperationalConstraints",
-                    "Unknown",
-                ],
-            ),
-            (
-                "DuplicateCoverage",
-                vec!["None", "Partial", "Full", "Unknown"],
-            ),
-            (
-                "DeterministicScoreBucket",
-                vec![
-                    "VeryLow",
-                    "Low",
-                    "Medium",
-                    "High",
-                    "VeryHigh",
-                    "Unknown",
-                ],
-            ),
-            (
-                "DropReason",
-                vec![
-                    "PriorityCap",
-                    "TokenBudget",
-                    "Duplicate",
-                    "Stale",
-                    "LowRelevance",
-                    "SectionDisabled",
-                    "Recovered",
-                    "Superseded",
-                    "Other",
-                    "Unknown",
-                ],
-            ),
-            (
-                "RepresentationSelected",
-                vec!["None", "Compact", "Full", "Unknown"],
-            ),
-            (
-                "TrajectoryOutcome",
-                vec![
-                    "Succeeded",
-                    "Unresolved",
-                    "Abandoned",
-                    "Reverted",
-                    "Unknown",
-                ],
-            ),
-            (
-                "ValidationResult",
-                vec!["Passed", "Failed", "NotRun", "Unknown"],
-            ),
-            (
-                "RequestLatencyBucket",
-                vec![
-                    "Bucket0_500ms",
-                    "Bucket500ms_1s",
-                    "Bucket1s_3s",
-                    "Bucket3s_10s",
-                    "Bucket10sPlus",
-                    "Unknown",
-                ],
-            ),
-            (
-                "InputTokenBucket",
-                vec![
-                    "Bucket0_1000",
-                    "Bucket1000_4000",
-                    "Bucket4000_8000",
-                    "Bucket8000_32000",
-                    "Bucket32000Plus",
-                    "Unknown",
-                ],
-            ),
-            (
-                "OutputTokenBucket",
-                vec![
-                    "Bucket0_128",
-                    "Bucket128_512",
-                    "Bucket512_2048",
-                    "Bucket2048_8192",
-                    "Bucket8192Plus",
-                    "Unknown",
-                ],
-            ),
-        ];
-
-        // Compute a simple hash string by concatenating all enum
-        // names and their variants.
-        let hash_input: String = all_enums
+        // Consume the canonical enum inventory from enums.rs. If any
+        // enum or variant changes, this test fails until
+        // FEATURE_SCHEMA_VERSION and ENUM_VARIANT_HASH are updated.
+        let hash_input: String = enums::enum_inventory()
             .iter()
-            .map(|(name, variants)| {
-                format!("{}:{}", name, variants.join(","))
-            })
+            .map(|(name, variants)| format!("{}:{}", name, variants.join(",")))
             .collect::<Vec<_>>()
             .join("\n");
 
         // Compare against the checked-in hash file constant.
         let checked_in = enum_hash::ENUM_VARIANT_HASH;
-
-        // The placeholder value always differs — after the developer
-        // runs the test once, they should update enum_hash.rs with
-        // the computed hash and set FEATURE_SCHEMA_VERSION=1.
-        if checked_in == "placeholder" {
-            return;
-        }
 
         // Use std::hash for a simple 64-bit fingerprint.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

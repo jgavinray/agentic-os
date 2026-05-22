@@ -1,7 +1,6 @@
 /// In-memory structs mirroring the three ledger tables field-for-field,
 /// plus the DecisionBundle envelope + candidates composite and the
 /// CandidateFeatureVector feature record.
-
 use super::enums::*;
 
 /// Mirror of `context_decision_envelopes`.
