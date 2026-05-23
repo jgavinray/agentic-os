@@ -525,6 +525,22 @@ pub struct AppendEventRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct HarnessGuardrailRequest {
+    pub event_type: Option<String>,
+    pub summary: Option<String>,
+    pub evidence: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HarnessGuardrailResponse {
+    pub action: String,
+    pub reason: String,
+    pub should_stop: bool,
+    pub signals: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ContextPackRequest {
     pub repo: String,
     pub task: String,

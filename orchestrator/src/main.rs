@@ -236,6 +236,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/v1/validations", post(handlers::validations))
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
+        .route("/harness/guardrail", post(handlers::harness_guardrail))
         .route("/context/pack", post(handlers::context_pack))
         .route("/cache/stats", get(handlers::cache_stats))
         .route("/metrics", get(handlers::metrics))

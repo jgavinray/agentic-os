@@ -392,6 +392,10 @@ fn describe_metrics() {
         "Harness feedback startup and background repair runs by bounded result."
     );
     describe_counter!(
+        "harness_guardrail_decisions_total",
+        "Deterministic runtime guardrail decisions by bounded action and reason."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -420,6 +424,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         "/v1/models",
         "/sessions/start",
         "/events/append",
+        "/harness/guardrail",
         "/v1/validations",
         "/context/pack",
         "/search",
@@ -641,6 +646,16 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     }
     for result in ["success", "failure"] {
         counter!("harness_feedback_repair_runs_total", "result" => result).increment(0);
+    }
+    for action in crate::harness_feedback::HARNESS_GUARDRAIL_ACTIONS {
+        for reason in crate::harness_feedback::HARNESS_GUARDRAIL_REASONS {
+            counter!(
+                "harness_guardrail_decisions_total",
+                "action" => action,
+                "reason" => reason
+            )
+            .increment(0);
+        }
     }
 }
 
@@ -948,6 +963,17 @@ pub fn record_harness_feedback_repair_run(result: &'static str) {
         _ => "failure",
     };
     counter!("harness_feedback_repair_runs_total", "result" => result).increment(1);
+}
+
+pub fn record_harness_guardrail_decision(action: &str, reason: &str) {
+    let action = crate::harness_feedback::bounded_guardrail_action(action);
+    let reason = crate::harness_feedback::bounded_guardrail_reason(reason);
+    counter!(
+        "harness_guardrail_decisions_total",
+        "action" => action,
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 fn bounded_feature_failure_class(value: &str) -> &'static str {
