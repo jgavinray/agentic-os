@@ -347,6 +347,21 @@ pub async fn insert_event(pool: &Pool, event: &AgentEvent) -> Result<(), anyhow:
     crate::telemetry::record_db_query("insert_event", started.elapsed(), result.is_ok());
     if result.is_ok() {
         crate::harness_feedback::record_metadata_metrics(&metadata);
+        let classification_event = AgentEvent {
+            metadata,
+            ..event.clone()
+        };
+        if let Err(e) =
+            crate::request_classification::classify_and_persist_event(pool, &classification_event)
+                .await
+        {
+            tracing::warn!(
+                target: "request_classification",
+                event_id = %event.id,
+                event_type = %event.event_type,
+                "failed to persist request classification for new event: {e}"
+            );
+        }
         tracing::info!(
             target: "execution_feedback",
             event_type = %event.event_type,

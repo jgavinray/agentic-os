@@ -490,6 +490,8 @@ pub struct AppState {
     pub sampling_config: crate::sampling::SamplingConfig,
     /// Request-level sampling policy hook. Defaults to a no-op implementation.
     pub sampling_policy: Arc<dyn crate::sampling::SamplingPolicy>,
+    /// Feature-flagged request classification live policy. Disabled by default.
+    pub request_live_policy_config: crate::request_classification::LivePolicyConfig,
     /// Prometheus scrape handle.
     pub prometheus: metrics_exporter_prometheus::PrometheusHandle,
     /// JSON compatibility snapshot for legacy metrics callers.

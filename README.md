@@ -1,6 +1,6 @@
 # agentic-os
 
-A local-first agent memory orchestrator for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, summarization, and Anthropic tool-use passthrough through LiteLLM.
+A local-first agent memory orchestrator for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, deterministic pre-LLM request classification, summarization, and Anthropic tool-use passthrough through LiteLLM.
 
 ## What This Solves
 
@@ -12,7 +12,7 @@ agentic-os makes that workflow observable. It records structured engineering mem
 
 - It helps agents resume work with relevant prior decisions, failures, and remediations instead of starting cold every turn.
 - It preserves validation outcomes, failure signatures, patches, retries, sampling parameters, and token usage as queryable memory.
-- It reconstructs the lifecycle of a user intent from request through context, model calls, tools, validations, patches, and final result.
+- It reconstructs the lifecycle of a user intent from request through context, request classification, model calls, tools, validations, patches, and final result.
 - It stays local-first and deliberately avoids learned routing, scoring, graph databases, autonomous retry policy, or prompt-body archival in the capture layer.
 
 ```
@@ -39,7 +39,7 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It classifies harness failure traces and quarantines poisoned benchmark artifacts from future context memory while preserving them in the audit log; see [docs/HARNESS_FEEDBACK.md](docs/HARNESS_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It classifies request events before model dispatch into bounded intent, domain, risk, complexity, route, and response-contract labels; see [docs/RequestClassification/README.md](docs/RequestClassification/README.md). It classifies harness failure traces and quarantines poisoned benchmark artifacts from future context memory while preserving them in the audit log; see [docs/HARNESS_FEEDBACK.md](docs/HARNESS_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
@@ -87,10 +87,12 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 
 - Exactly one orchestrator process may own a Postgres database.
 - Schema migrations are embedded in `orchestrator/migrations/`.
+- Request classification backfill runs automatically as a startup gate before feature extraction and traffic serving.
 - Feature extraction bootstrap and feature-record rebuild run automatically as a startup gate before traffic.
 - Signature backfill runs with `orchestrator-maint backfill-signatures`.
 - Feature extraction backfill can also be run manually with `orchestrator-maint extract-features` for dry-runs or scoped repair.
 - Harness feedback quarantine can be repaired with `orchestrator-maint classify-harness-feedback`.
+- Request classification can be repaired with `orchestrator-maint classify-requests`; route/risk summaries are available with `orchestrator-maint request-classification-report`.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 
@@ -146,6 +148,10 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `TRAJECTORY_IDLE_TIMEOUT_SEC` | `600` | Idle duration after which an open trajectory is finalized as unresolved. |
 | `FAILURE_HISTORY_TOKEN_BUDGET` | `1000` | Token budget for Failure History context. |
 | `FEATURE_EXTRACTION_ENABLED` | `true` | Enables deterministic feature extraction and Operational Constraints context. |
+| `REQUEST_CLASSIFICATION_STARTUP_BACKFILL_ENABLED` | `true` | Runs request classification backfill as a startup gate before feature extraction and traffic. |
+| `REQUEST_CLASSIFICATION_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup request classification backfill. |
+| `REQUEST_CLASSIFICATION_LIVE_POLICY_ENABLED` | `false` | Enables narrow live enforcement for high-confidence deterministic request policy cases. Disabled by default; shadow classification still runs. |
+| `REQUEST_CLASSIFICATION_POLICY_VERSION` | `v1` | Live request policy version. Unsupported versions bypass live enforcement. |
 | `BACKGROUND_WORK_CONCURRENCY` | `4` | Max concurrent best-effort derived background jobs such as cache refresh, feature extraction, and Qdrant indexing. |
 | `FEATURE_STARTUP_BACKFILL_ENABLED` | `true` | Runs feature bootstrap tagging and feature-record rebuild as a startup gate before serving traffic. |
 | `FEATURE_STARTUP_BACKFILL_BATCH_SIZE` | `500` | Batch size for startup bootstrap metadata updates. |

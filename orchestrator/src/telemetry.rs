@@ -396,6 +396,42 @@ fn describe_metrics() {
         "Deterministic runtime guardrail decisions by bounded action and reason."
     );
     describe_counter!(
+        "request_classification_backfill_runs_total",
+        "Request classification startup and operator backfill runs by bounded result."
+    );
+    describe_counter!(
+        "request_classifications_written_total",
+        "Request classification persistence attempts by bounded result."
+    );
+    describe_counter!(
+        "request_classification_unknown_labels_total",
+        "Request classification rows with bounded unknown labels by field."
+    );
+    describe_counter!(
+        "request_classifications_total",
+        "Request classifications by bounded intent, domain, and route."
+    );
+    describe_counter!(
+        "request_route_recommendations_total",
+        "Shadow route recommendations by bounded route."
+    );
+    describe_counter!(
+        "request_risk_flags_total",
+        "Request classification risk flags by bounded risk."
+    );
+    describe_counter!(
+        "request_complexity_total",
+        "Request classification complexity by bounded complexity."
+    );
+    describe_counter!(
+        "request_live_policy_actions_total",
+        "Feature-flagged live request policy actions by bounded action and reason."
+    );
+    describe_counter!(
+        "request_live_policy_bypassed_total",
+        "Requests bypassing live request policy by bounded reason."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -656,6 +692,94 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
             )
             .increment(0);
         }
+    }
+    for result in ["success", "failure"] {
+        counter!("request_classification_backfill_runs_total", "result" => result).increment(0);
+    }
+    for result in ["inserted", "skipped", "dry_run", "error"] {
+        counter!("request_classifications_written_total", "result" => result).increment(0);
+    }
+    for field in [
+        "intent",
+        "domain",
+        "artifact_type",
+        "complexity",
+        "recommended_route",
+        "response_contract",
+    ] {
+        counter!("request_classification_unknown_labels_total", "field" => field).increment(0);
+    }
+    let inventory = crate::request_classification::enum_inventory();
+    let routes = inventory
+        .iter()
+        .find(|(name, _)| *name == "RecommendedRoute")
+        .map(|(_, values)| *values)
+        .unwrap_or(&[]);
+    let risks = inventory
+        .iter()
+        .find(|(name, _)| *name == "RequestRisk")
+        .map(|(_, values)| *values)
+        .unwrap_or(&[]);
+    let complexities = inventory
+        .iter()
+        .find(|(name, _)| *name == "RequestComplexity")
+        .map(|(_, values)| *values)
+        .unwrap_or(&[]);
+    let intents = inventory
+        .iter()
+        .find(|(name, _)| *name == "RequestIntent")
+        .map(|(_, values)| *values)
+        .unwrap_or(&[]);
+    let domains = inventory
+        .iter()
+        .find(|(name, _)| *name == "RequestDomain")
+        .map(|(_, values)| *values)
+        .unwrap_or(&[]);
+    for intent in intents {
+        for domain in domains {
+            for route in routes {
+                counter!(
+                    "request_classifications_total",
+                    "intent" => *intent,
+                    "domain" => *domain,
+                    "route" => *route
+                )
+                .increment(0);
+            }
+        }
+    }
+    for route in routes {
+        counter!("request_route_recommendations_total", "route" => *route).increment(0);
+    }
+    for risk in risks {
+        counter!("request_risk_flags_total", "risk" => *risk).increment(0);
+    }
+    for complexity in complexities {
+        counter!("request_complexity_total", "complexity" => *complexity).increment(0);
+    }
+    for action in [
+        "ask_clarification",
+        "refuse_or_guardrail",
+        "web_required",
+        "deterministic_template",
+    ] {
+        for reason in [
+            "unsafe_security",
+            "objective_risk",
+            "external_current_info_required",
+            "missing_target_context",
+            "l0_trivial",
+        ] {
+            counter!(
+                "request_live_policy_actions_total",
+                "action" => action,
+                "reason" => reason
+            )
+            .increment(0);
+        }
+    }
+    for reason in ["disabled", "shadow_only", "unsupported_policy_version"] {
+        counter!("request_live_policy_bypassed_total", "reason" => reason).increment(0);
     }
 }
 
@@ -974,6 +1098,83 @@ pub fn record_harness_guardrail_decision(action: &str, reason: &str) {
         "reason" => reason
     )
     .increment(1);
+}
+
+pub fn record_request_classification_backfill_run(result: &'static str) {
+    let result = match result {
+        "success" => "success",
+        "failure" => "failure",
+        _ => "failure",
+    };
+    counter!("request_classification_backfill_runs_total", "result" => result).increment(1);
+}
+
+pub fn record_request_classification_write(result: &str) {
+    let result = match result {
+        "inserted" => "inserted",
+        "skipped" => "skipped",
+        "dry_run" => "dry_run",
+        "error" => "error",
+        _ => "error",
+    };
+    counter!("request_classifications_written_total", "result" => result).increment(1);
+}
+
+pub fn record_request_classification_unknown_label(field: &str) {
+    let field = match field {
+        "intent" => "intent",
+        "domain" => "domain",
+        "artifact_type" => "artifact_type",
+        "complexity" => "complexity",
+        "recommended_route" => "recommended_route",
+        "response_contract" => "response_contract",
+        _ => "response_contract",
+    };
+    counter!("request_classification_unknown_labels_total", "field" => field).increment(1);
+}
+
+pub fn record_request_classification(intent: &str, domain: &str, route: &str) {
+    let intent = crate::request_classification::bounded_intent(intent);
+    let domain = crate::request_classification::bounded_domain(domain);
+    let route = crate::request_classification::bounded_route(route);
+    counter!(
+        "request_classifications_total",
+        "intent" => intent,
+        "domain" => domain,
+        "route" => route
+    )
+    .increment(1);
+}
+
+pub fn record_request_route_recommendation(route: &str) {
+    let route = crate::request_classification::bounded_route(route);
+    counter!("request_route_recommendations_total", "route" => route).increment(1);
+}
+
+pub fn record_request_risk_flag(risk: &str) {
+    let risk = crate::request_classification::bounded_risk(risk);
+    counter!("request_risk_flags_total", "risk" => risk).increment(1);
+}
+
+pub fn record_request_complexity(complexity: &str) {
+    let complexity = crate::request_classification::bounded_complexity(complexity);
+    counter!("request_complexity_total", "complexity" => complexity).increment(1);
+}
+
+pub fn record_request_live_policy_action(action: &str, reason: &str) {
+    let action = crate::request_classification::bounded_live_policy_action(action);
+    let reason = crate::request_classification::bounded_live_policy_reason(reason);
+    counter!(
+        "request_live_policy_actions_total",
+        "action" => action,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
+pub fn record_request_live_policy_bypass(reason: &str) {
+    let reason = crate::request_classification::bounded_live_policy_bypass(reason);
+    counter!("request_live_policy_bypassed_total", "reason" => reason).increment(1);
 }
 
 fn bounded_feature_failure_class(value: &str) -> &'static str {
