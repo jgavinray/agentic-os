@@ -34,6 +34,60 @@ Phase 4 records shadow route recommendations without changing live behavior.
 
 Phase 5 promotes only high-confidence deterministic routes into live policy.
 
+## Runtime Behavior
+
+Request classification is deterministic and rebuildable. `agent_events` remains
+the source of truth; `agent_request_classifications` stores derived structured
+rows only.
+
+On orchestrator startup, classification backfill runs after migrations and
+harness feedback repair, before feature extraction and before the HTTP listener
+binds. The backfill is idempotent for each `(event_id,
+classification_schema_version, routing_policy_version)` tuple.
+
+New classifiable events are also classified inline when they are inserted.
+
+Classifiable events are:
+
+- `user_message`
+- events with `event_role = 'request'`
+- request-shaped `context_pack` events
+
+Live policy is disabled by default. When
+`REQUEST_CLASSIFICATION_LIVE_POLICY_ENABLED=true`, only objective high-confidence
+routes can affect responses:
+
+- `refuse_or_guardrail`
+- `web_required`
+- `ask_clarification`
+- `deterministic_template`
+
+Small-model, strong-model, and tool-required recommendations remain shadow-only.
+
+## Operator Commands
+
+```bash
+orchestrator-maint classify-requests \
+  [--repo REPO] \
+  [--session SESSION_ID] \
+  [--since TIMESTAMP] \
+  [--dry-run] \
+  [--batch-size N]
+
+orchestrator-maint request-classification-report \
+  [--repo REPO] \
+  [--since TIMESTAMP]
+```
+
+## Environment
+
+```text
+REQUEST_CLASSIFICATION_STARTUP_BACKFILL_ENABLED=true
+REQUEST_CLASSIFICATION_STARTUP_BACKFILL_BATCH_SIZE=500
+REQUEST_CLASSIFICATION_LIVE_POLICY_ENABLED=false
+REQUEST_CLASSIFICATION_POLICY_VERSION=v1
+```
+
 ## Non-Goals
 
 - No learned classifier in the critical path.

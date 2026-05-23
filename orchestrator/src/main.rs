@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use orchestrator::{
     db, embedder, feature_extraction, handlers, harness_feedback, logging, migrations, qdrant,
-    rate_limit, sampling, sentiment, state, summarizer, telemetry,
+    rate_limit, request_classification, sampling, sentiment, state, summarizer, telemetry,
 };
 use std::env;
 use std::sync::Arc;
@@ -199,11 +199,13 @@ async fn main() -> Result<(), anyhow::Error> {
         background_work: Arc::new(tokio::sync::Semaphore::new(background_work_concurrency)),
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
+        request_live_policy_config: request_classification::live_policy_config_from_env(),
         prometheus,
         metrics,
     });
 
     run_startup_harness_feedback_backfill(&state).await;
+    run_startup_request_classification_backfill(&state).await?;
     run_startup_feature_backfill(&state).await?;
 
     if summarizer_enabled {
@@ -362,6 +364,55 @@ async fn run_startup_feature_backfill(state: &AppState) -> Result<(), anyhow::Er
         persisted_records = report.persisted_records,
         elapsed_ms = started.elapsed().as_millis(),
         "startup feature backfill completed"
+    );
+    Ok(())
+}
+
+async fn run_startup_request_classification_backfill(
+    state: &AppState,
+) -> Result<(), anyhow::Error> {
+    if !request_classification::request_classification_startup_backfill_enabled() {
+        tracing::info!(
+            target: "request_classification",
+            "startup request classification backfill disabled by REQUEST_CLASSIFICATION_STARTUP_BACKFILL_ENABLED=false"
+        );
+        return Ok(());
+    }
+
+    let batch_size = request_classification::request_classification_startup_batch_size();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        target: "request_classification",
+        batch_size,
+        "startup request classification backfill started"
+    );
+    let report = request_classification::run_backfill(
+        &state.pool,
+        &request_classification::BackfillOptions {
+            repo: None,
+            session_id: None,
+            since: None,
+            dry_run: false,
+            batch_size,
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            target: "request_classification",
+            "startup request classification backfill failed; refusing to serve traffic: {e}"
+        );
+        e
+    })?;
+
+    tracing::info!(
+        target: "request_classification",
+        events_scanned = report.events_scanned,
+        inserted = report.inserted,
+        updated = report.updated,
+        skipped = report.skipped,
+        elapsed_ms = started.elapsed().as_millis(),
+        "startup request classification backfill completed"
     );
     Ok(())
 }

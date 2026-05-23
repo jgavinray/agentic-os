@@ -1,5 +1,6 @@
 use orchestrator::{
     db, execution_feedback, feature_extraction, harness_feedback, logging, migrations,
+    request_classification,
 };
 use std::env;
 use std::ops::DerefMut;
@@ -105,6 +106,49 @@ async fn run() -> Result<(), anyhow::Error> {
             );
             Ok(())
         }
+        "classify-requests" => {
+            let opts = RequestClassificationOptions::parse(args.collect())?;
+            let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let pool = db::create_pool(&db_url)?;
+            migrations::run(&pool).await?;
+            let report = request_classification::run_backfill(
+                &pool,
+                &request_classification::BackfillOptions {
+                    repo: opts.repo,
+                    session_id: opts.session_id,
+                    since: opts.since,
+                    dry_run: opts.dry_run,
+                    batch_size: opts.batch_size,
+                },
+            )
+            .await?;
+            println!(
+                "classify-requests: events_scanned={} inserted={} updated={} skipped={} dry_run={} batch_size={}",
+                report.events_scanned,
+                report.inserted,
+                report.updated,
+                report.skipped,
+                report.dry_run,
+                report.batch_size
+            );
+            Ok(())
+        }
+        "request-classification-report" => {
+            let opts = RequestClassificationReportOptions::parse(args.collect())?;
+            let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let pool = db::create_pool(&db_url)?;
+            migrations::run(&pool).await?;
+            let report = request_classification::request_classification_report(
+                &pool,
+                &request_classification::ReportOptions {
+                    repo: opts.repo,
+                    since: opts.since,
+                },
+            )
+            .await?;
+            print_request_classification_report(&report);
+            Ok(())
+        }
         _ => {
             print_usage();
             anyhow::bail!("unknown command: {command}");
@@ -125,7 +169,7 @@ fn execution_feedback_enabled() -> bool {
 
 fn print_usage() {
     eprintln!(
-        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]"
+        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
     );
 }
 
@@ -150,6 +194,19 @@ struct HarnessFeedbackOptions {
     since: Option<chrono::DateTime<chrono::Utc>>,
     dry_run: bool,
     batch_size: i64,
+}
+
+struct RequestClassificationOptions {
+    repo: Option<String>,
+    session_id: Option<String>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    dry_run: bool,
+    batch_size: i64,
+}
+
+struct RequestClassificationReportOptions {
+    repo: Option<String>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl HarnessFeedbackOptions {
@@ -210,6 +267,120 @@ impl HarnessFeedbackOptions {
             dry_run,
             batch_size,
         })
+    }
+}
+
+impl RequestClassificationOptions {
+    fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
+        let mut repo = None;
+        let mut session_id = None;
+        let mut since = None;
+        let mut dry_run = false;
+        let mut batch_size = DEFAULT_BATCH_SIZE;
+        let mut idx = 0usize;
+        while idx < args.len() {
+            match args[idx].as_str() {
+                "--repo" | "–repo" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--repo requires a value");
+                    };
+                    repo = Some(value.clone());
+                    idx += 2;
+                }
+                "--session" | "–session" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--session requires a value");
+                    };
+                    session_id = Some(value.clone());
+                    idx += 2;
+                }
+                "--since" | "–since" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--since requires an RFC3339 timestamp");
+                    };
+                    since = Some(
+                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
+                    );
+                    idx += 2;
+                }
+                "--dry-run" | "–dry-run" => {
+                    dry_run = true;
+                    idx += 1;
+                }
+                "--batch-size" | "–batch-size" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--batch-size requires a positive integer");
+                    };
+                    batch_size = value.parse::<i64>()?;
+                    if batch_size <= 0 {
+                        anyhow::bail!("--batch-size must be positive");
+                    }
+                    idx += 2;
+                }
+                other => anyhow::bail!("unknown option: {other}"),
+            }
+        }
+
+        Ok(Self {
+            repo,
+            session_id,
+            since,
+            dry_run,
+            batch_size,
+        })
+    }
+}
+
+impl RequestClassificationReportOptions {
+    fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
+        let mut repo = None;
+        let mut since = None;
+        let mut idx = 0usize;
+        while idx < args.len() {
+            match args[idx].as_str() {
+                "--repo" | "–repo" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--repo requires a value");
+                    };
+                    repo = Some(value.clone());
+                    idx += 2;
+                }
+                "--since" | "–since" => {
+                    let Some(value) = args.get(idx + 1) else {
+                        anyhow::bail!("--since requires an RFC3339 timestamp");
+                    };
+                    since = Some(
+                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
+                    );
+                    idx += 2;
+                }
+                other => anyhow::bail!("unknown option: {other}"),
+            }
+        }
+
+        Ok(Self { repo, since })
+    }
+}
+
+fn print_request_classification_report(
+    report: &request_classification::RequestClassificationReport,
+) {
+    println!("request-classification-report:");
+    println!("by_route:");
+    for row in &report.by_route {
+        println!("  {} {}", row.label, row.count);
+    }
+    println!("top_risk_flags:");
+    for row in &report.top_risk_flags {
+        println!("  {} {}", row.label, row.count);
+    }
+    println!("unknown_label_counts:");
+    for row in &report.unknown_label_counts {
+        println!("  {} {}", row.label, row.count);
+    }
+    println!("repeated_guardrail_sessions:");
+    for row in &report.repeated_guardrail_sessions {
+        println!("  {} {}", row.session_id, row.count);
     }
 }
 
