@@ -11,6 +11,7 @@ pub mod logging;
 pub mod migrations;
 pub mod qdrant;
 pub mod rate_limit;
+pub mod request_classification;
 pub mod sampling;
 pub mod sentiment;
 pub mod state;
