@@ -696,7 +696,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     for result in ["success", "failure"] {
         counter!("request_classification_backfill_runs_total", "result" => result).increment(0);
     }
-    for result in ["inserted", "skipped", "dry_run", "error"] {
+    for result in ["inserted", "updated", "skipped", "dry_run", "error"] {
         counter!("request_classifications_written_total", "result" => result).increment(0);
     }
     for field in [
@@ -1096,6 +1096,7 @@ pub fn record_request_classification_backfill_run(result: &'static str) {
 pub fn record_request_classification_write(result: &str) {
     let result = match result {
         "inserted" => "inserted",
+        "updated" => "updated",
         "skipped" => "skipped",
         "dry_run" => "dry_run",
         "error" => "error",

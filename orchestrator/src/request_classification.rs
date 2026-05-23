@@ -227,6 +227,8 @@ pub struct BackfillOptions {
     pub session_id: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub dry_run: bool,
+    pub repair: bool,
+    pub repair_stale: bool,
     pub batch_size: i64,
 }
 
@@ -243,6 +245,7 @@ pub struct BackfillReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistOutcome {
     Inserted,
+    Updated,
     Skipped,
 }
 
@@ -250,6 +253,7 @@ impl PersistOutcome {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Inserted => "inserted",
+            Self::Updated => "updated",
             Self::Skipped => "skipped",
         }
     }
@@ -542,6 +546,103 @@ pub async fn persist_classification(
     result
 }
 
+pub async fn update_classification_if_changed(
+    pool: &Pool,
+    classification: &RequestClassification,
+) -> Result<PersistOutcome, anyhow::Error> {
+    let result = async {
+        let conn = pool.get().await?;
+        let secondary_domains = classification
+            .secondary_domains
+            .iter()
+            .map(|domain| domain.as_str().to_string())
+            .collect::<Vec<_>>();
+        let risk = classification
+            .risk
+            .iter()
+            .map(|risk| risk.as_str().to_string())
+            .collect::<Vec<_>>();
+        let affected = conn
+            .execute(
+                "UPDATE agent_request_classifications
+                 SET
+                    repo = $2,
+                    session_id = $3,
+                    trajectory_id = $4,
+                    event_created_at = $5,
+                    classified_at = $6,
+                    classifier_source = $9,
+                    intent = $10,
+                    domain = $11,
+                    secondary_domains = $12,
+                    artifact_type = $13,
+                    risk = $14,
+                    complexity = $15,
+                    recommended_route = $16,
+                    response_contract = $17,
+                    features = $18
+                 WHERE event_id = $1
+                   AND classification_schema_version = $7
+                   AND routing_policy_version = $8
+                   AND (
+                       repo IS DISTINCT FROM $2
+                       OR session_id IS DISTINCT FROM $3
+                       OR trajectory_id IS DISTINCT FROM $4
+                       OR event_created_at IS DISTINCT FROM $5
+                       OR classified_at IS DISTINCT FROM $6
+                       OR classifier_source IS DISTINCT FROM $9
+                       OR intent IS DISTINCT FROM $10
+                       OR domain IS DISTINCT FROM $11
+                       OR secondary_domains IS DISTINCT FROM $12
+                       OR artifact_type IS DISTINCT FROM $13
+                       OR risk IS DISTINCT FROM $14
+                       OR complexity IS DISTINCT FROM $15
+                       OR recommended_route IS DISTINCT FROM $16
+                       OR response_contract IS DISTINCT FROM $17
+                       OR features IS DISTINCT FROM $18
+                   )",
+                &[
+                    &classification.event_id,
+                    &classification.repo,
+                    &classification.session_id,
+                    &classification.trajectory_id,
+                    &classification.event_created_at,
+                    &classification.classified_at,
+                    &classification.classification_schema_version,
+                    &classification.routing_policy_version,
+                    &classification.classifier_source,
+                    &classification.intent.as_str(),
+                    &classification.domain.as_str(),
+                    &secondary_domains,
+                    &classification.artifact_type.as_str(),
+                    &risk,
+                    &classification.complexity.as_str(),
+                    &classification.recommended_route.as_str(),
+                    &classification.response_contract.as_str(),
+                    &classification.features,
+                ],
+            )
+            .await?;
+        Ok::<PersistOutcome, anyhow::Error>(if affected == 1 {
+            PersistOutcome::Updated
+        } else {
+            PersistOutcome::Skipped
+        })
+    }
+    .await;
+
+    match &result {
+        Ok(outcome) => {
+            crate::telemetry::record_request_classification_write(outcome.as_str());
+            if matches!(outcome, PersistOutcome::Updated) {
+                record_classification_metrics(classification);
+            }
+        }
+        Err(_) => crate::telemetry::record_request_classification_write("error"),
+    }
+    result
+}
+
 pub async fn run_backfill(
     pool: &Pool,
     opts: &BackfillOptions,
@@ -576,25 +677,36 @@ async fn run_backfill_inner(
             break;
         }
 
-        for (event, already_classified) in rows {
+        for row in rows {
             report.events_scanned += 1;
-            last_created_at = Some(event.created_at);
-            last_id = Some(event.id.clone());
+            last_created_at = Some(row.event.created_at);
+            last_id = Some(row.event.id.clone());
 
-            if already_classified {
+            let should_repair = opts.repair || (opts.repair_stale && row.needs_stale_repair);
+            if row.already_classified && !should_repair {
                 report.skipped += 1;
                 continue;
             }
 
-            let classification = classify_request_event(&event);
+            let classification = classify_request_event(&row.event);
             if opts.dry_run {
-                report.inserted += 1;
+                if row.already_classified {
+                    report.updated += 1;
+                } else {
+                    report.inserted += 1;
+                }
                 crate::telemetry::record_request_classification_write("dry_run");
                 continue;
             }
 
-            match persist_classification(pool, &classification).await? {
+            let outcome = if row.already_classified {
+                update_classification_if_changed(pool, &classification).await?
+            } else {
+                persist_classification(pool, &classification).await?
+            };
+            match outcome {
                 PersistOutcome::Inserted => report.inserted += 1,
+                PersistOutcome::Updated => report.updated += 1,
                 PersistOutcome::Skipped => report.skipped += 1,
             }
         }
@@ -609,7 +721,7 @@ async fn load_classification_batch(
     batch_size: i64,
     last_created_at: Option<DateTime<Utc>>,
     last_id: Option<&str>,
-) -> Result<Vec<(crate::db::AgentEvent, bool)>, anyhow::Error> {
+) -> Result<Vec<ClassificationBatchRow>, anyhow::Error> {
     let conn = pool.get().await?;
     let last_id = last_id.map(str::to_string);
     let rows = conn
@@ -630,7 +742,18 @@ async fn load_classification_batch(
                 e.event_role,
                 e.created_at,
                 e.summary_level,
-                c.event_id IS NOT NULL AS already_classified
+                c.event_id IS NOT NULL AS already_classified,
+                (
+                    c.event_id IS NOT NULL
+                    AND coalesce(
+                        CASE
+                            WHEN (c.features->>'char_count') ~ '^[0-9]+$'
+                            THEN (c.features->>'char_count')::INTEGER
+                            ELSE NULL
+                        END,
+                        -1
+                    ) = 0
+                ) AS needs_stale_repair
              FROM agent_events e
              LEFT JOIN agent_request_classifications c
                ON c.event_id = e.id
@@ -689,9 +812,19 @@ async fn load_classification_batch(
                 created_at: row.get("created_at"),
                 summary_level: row.get("summary_level"),
             };
-            (event, row.get("already_classified"))
+            ClassificationBatchRow {
+                event,
+                already_classified: row.get("already_classified"),
+                needs_stale_repair: row.get("needs_stale_repair"),
+            }
         })
         .collect())
+}
+
+struct ClassificationBatchRow {
+    event: crate::db::AgentEvent,
+    already_classified: bool,
+    needs_stale_repair: bool,
 }
 
 pub async fn request_classification_report(
@@ -2038,6 +2171,19 @@ mod tests {
         assert_eq!(row.response_contract, ResponseContract::Unknown);
         assert_eq!(row.features["char_count"], 0);
         assert_eq!(row.features["estimated_tokens"], 0);
+    }
+
+    #[test]
+    fn non_empty_generic_requests_use_safe_fallback_labels() {
+        let row = classify_request_event(&event("e-generic", "Can you help with this?", None));
+
+        assert_eq!(row.intent, RequestIntent::Explain);
+        assert_eq!(row.domain, RequestDomain::Generic);
+        assert_eq!(row.artifact_type, RequestArtifactType::PlainText);
+        assert_eq!(row.risk, vec![RequestRisk::None]);
+        assert_ne!(row.complexity, RequestComplexity::Unknown);
+        assert_ne!(row.recommended_route, RecommendedRoute::Unknown);
+        assert_ne!(row.response_contract, ResponseContract::Unknown);
     }
 
     #[test]
