@@ -29,6 +29,13 @@ The classifier consumes structured metadata first, such as
 for known harness failure signatures observed in benchmark runs, including:
 
 - misspelled `context_ledger` paths
+- requested-path versus actual-path mismatches
+- poisoned path attempts using known bad spellings
+- false read/edit success claims involving poisoned paths
+- final success claims with zero changed files in structured harness metadata
+- missing required validations in structured harness metadata
+- continued tool use after explicit stop or do-not-retry instructions
+- self-correction after a stop/path violation
 - failed reads or edits
 - GateGuard/fact-forcing blocks and recovery failures
 - forbidden Bash fallback
@@ -54,6 +61,7 @@ Quarantine reasons are bounded:
 - `repeated_invalid_path`
 - `fake_success_claim`
 - `tool_recovery_failed`
+- `contract_violation`
 - `patch_invalid`
 - `manual_quarantine`
 - `memory_poison_indicator`
@@ -81,6 +89,23 @@ Runtime controls:
 - `HARNESS_FEEDBACK_REPAIR_INTERVAL_SEC` default `300`
 - `HARNESS_FEEDBACK_REPAIR_LOOKBACK_SEC` default `2 * interval`, minimum `60`
 - `HARNESS_FEEDBACK_REPAIR_BATCH_SIZE` default `500`
+
+## Runtime Guardrail
+
+Clients that can see tool intent before execution can call
+`POST /harness/guardrail` with the same `event_type`, `summary`, `evidence`,
+and structured `metadata` shape used for event ingestion. The response is a
+bounded deterministic decision:
+
+- `allow`: no known hard violation
+- `warn`: recordable signal, but not a hard stop
+- `block`: do not execute or accept the claimed completion
+- `terminate`: stop the current benchmark/session attempt
+
+The orchestrator also attaches the same decision under
+`metadata.harness_guardrail` when a persisted event triggers a non-allow
+decision. This keeps enforcement decisions observable without adding raw paths
+or free-form model text as metric labels.
 
 ## Learning
 
