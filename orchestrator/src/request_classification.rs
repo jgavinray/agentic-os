@@ -429,6 +429,10 @@ pub fn classify_request_text(
 }
 
 pub fn is_classifiable_request_event(event: &crate::db::AgentEvent) -> bool {
+    if !has_request_text(event) {
+        return false;
+    }
+
     event.event_type == "user_message"
         || event.event_role.as_deref() == Some("request")
         || (event.event_type == "context_pack"
@@ -635,6 +639,7 @@ async fn load_classification_batch(
              WHERE ($3::TEXT IS NULL OR e.repo = $3)
                AND ($4::TEXT IS NULL OR e.session_id = $4)
                AND ($5::TIMESTAMPTZ IS NULL OR e.created_at >= $5)
+               AND length(btrim(coalesce(e.summary, '') || E'\n' || coalesce(e.evidence, ''))) > 0
                AND (
                    e.event_type = 'user_message'
                    OR e.event_role = 'request'
@@ -1026,6 +1031,10 @@ fn event_text(event: &crate::db::AgentEvent) -> String {
         Some(evidence) => format!("{}\n{}", event.summary, evidence),
         None => event.summary.clone(),
     }
+}
+
+fn has_request_text(event: &crate::db::AgentEvent) -> bool {
+    !event_text(event).trim().is_empty()
 }
 
 fn metadata_key_text(value: &Value) -> String {
@@ -2050,6 +2059,15 @@ mod tests {
     fn classifiable_request_event_selection_is_bounded() {
         let user_event = event("e-user", "hello", None);
         assert!(is_classifiable_request_event(&user_event));
+
+        let empty_user_event = event("e-empty-user", "", None);
+        assert!(!is_classifiable_request_event(&empty_user_event));
+
+        let whitespace_user_event = event("e-whitespace-user", " \n\t ", None);
+        assert!(!is_classifiable_request_event(&whitespace_user_event));
+
+        let evidence_only_event = event("e-evidence-only", "", Some("hello from evidence"));
+        assert!(is_classifiable_request_event(&evidence_only_event));
 
         let mut request_role = event("e-role", "hello", None);
         request_role.event_type = "checkpoint".to_string();

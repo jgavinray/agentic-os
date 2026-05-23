@@ -725,29 +725,13 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         .find(|(name, _)| *name == "RequestComplexity")
         .map(|(_, values)| *values)
         .unwrap_or(&[]);
-    let intents = inventory
-        .iter()
-        .find(|(name, _)| *name == "RequestIntent")
-        .map(|(_, values)| *values)
-        .unwrap_or(&[]);
-    let domains = inventory
-        .iter()
-        .find(|(name, _)| *name == "RequestDomain")
-        .map(|(_, values)| *values)
-        .unwrap_or(&[]);
-    for intent in intents {
-        for domain in domains {
-            for route in routes {
-                counter!(
-                    "request_classifications_total",
-                    "intent" => *intent,
-                    "domain" => *domain,
-                    "route" => *route
-                )
-                .increment(0);
-            }
-        }
-    }
+    counter!(
+        "request_classifications_total",
+        "intent" => "unknown",
+        "domain" => "unknown",
+        "route" => "unknown"
+    )
+    .increment(0);
     for route in routes {
         counter!("request_route_recommendations_total", "route" => *route).increment(0);
     }
