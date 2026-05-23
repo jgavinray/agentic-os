@@ -762,7 +762,7 @@ async fn load_classification_batch(
              WHERE ($3::TEXT IS NULL OR e.repo = $3)
                AND ($4::TEXT IS NULL OR e.session_id = $4)
                AND ($5::TIMESTAMPTZ IS NULL OR e.created_at >= $5)
-               AND length(btrim(coalesce(e.summary, '') || E'\n' || coalesce(e.evidence, ''))) > 0
+               AND length(btrim(coalesce(e.summary, '') || coalesce(e.evidence, ''), E' \t\n\r')) > 0
                AND (
                    e.event_type = 'user_message'
                    OR e.event_role = 'request'
@@ -2224,6 +2224,14 @@ mod tests {
         maintenance.event_type = "summary".to_string();
         maintenance.event_role = None;
         assert!(!is_classifiable_request_event(&maintenance));
+    }
+
+    #[test]
+    fn backfill_sql_does_not_treat_separator_newline_as_request_text() {
+        let source = include_str!("request_classification.rs");
+
+        assert!(source.contains("btrim(coalesce(e.summary, '') || coalesce(e.evidence, '')"));
+        assert!(!source.contains("btrim(coalesce(e.summary, '') || E'\\n'"));
     }
 
     #[test]
