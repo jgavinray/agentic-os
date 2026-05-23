@@ -393,6 +393,8 @@ async fn run_startup_request_classification_backfill(
             session_id: None,
             since: None,
             dry_run: false,
+            repair: false,
+            repair_stale: true,
             batch_size,
         },
     )

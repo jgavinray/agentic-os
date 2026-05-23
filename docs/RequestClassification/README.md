@@ -72,12 +72,17 @@ orchestrator-maint classify-requests \
   [--session SESSION_ID] \
   [--since TIMESTAMP] \
   [--dry-run] \
+  [--repair] \
   [--batch-size N]
 
 orchestrator-maint request-classification-report \
   [--repo REPO] \
   [--since TIMESTAMP]
 ```
+
+Use `--repair` to recompute already-classified rows after deterministic rules
+change. Startup backfill also repairs obviously stale rows where stored features
+show `char_count = 0` but the current source event has request text.
 
 ## Environment
 

@@ -92,7 +92,7 @@ Operational procedures live in [docs/OPERATIONS.md](docs/OPERATIONS.md). Highlig
 - Signature backfill runs with `orchestrator-maint backfill-signatures`.
 - Feature extraction backfill can also be run manually with `orchestrator-maint extract-features` for dry-runs or scoped repair.
 - Harness feedback quarantine can be repaired with `orchestrator-maint classify-harness-feedback`.
-- Request classification can be repaired with `orchestrator-maint classify-requests`; route/risk summaries are available with `orchestrator-maint request-classification-report`.
+- Request classification can be inserted with `orchestrator-maint classify-requests` and repaired with `orchestrator-maint classify-requests --repair`; route/risk summaries are available with `orchestrator-maint request-classification-report`.
 - Backups run with `scripts/backup.sh`; restores run with `scripts/restore.sh`.
 - Metrics are documented in [docs/METRICS.md](docs/METRICS.md), with a dashboard at [docs/grafana/agentic-os.json](docs/grafana/agentic-os.json).
 

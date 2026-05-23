@@ -118,6 +118,8 @@ async fn run() -> Result<(), anyhow::Error> {
                     session_id: opts.session_id,
                     since: opts.since,
                     dry_run: opts.dry_run,
+                    repair: opts.repair,
+                    repair_stale: opts.repair,
                     batch_size: opts.batch_size,
                 },
             )
@@ -169,7 +171,7 @@ fn execution_feedback_enabled() -> bool {
 
 fn print_usage() {
     eprintln!(
-        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
+        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--repair] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
     );
 }
 
@@ -201,6 +203,7 @@ struct RequestClassificationOptions {
     session_id: Option<String>,
     since: Option<chrono::DateTime<chrono::Utc>>,
     dry_run: bool,
+    repair: bool,
     batch_size: i64,
 }
 
@@ -276,6 +279,7 @@ impl RequestClassificationOptions {
         let mut session_id = None;
         let mut since = None;
         let mut dry_run = false;
+        let mut repair = false;
         let mut batch_size = DEFAULT_BATCH_SIZE;
         let mut idx = 0usize;
         while idx < args.len() {
@@ -307,6 +311,10 @@ impl RequestClassificationOptions {
                     dry_run = true;
                     idx += 1;
                 }
+                "--repair" | "–repair" => {
+                    repair = true;
+                    idx += 1;
+                }
                 "--batch-size" | "–batch-size" => {
                     let Some(value) = args.get(idx + 1) else {
                         anyhow::bail!("--batch-size requires a positive integer");
@@ -326,6 +334,7 @@ impl RequestClassificationOptions {
             session_id,
             since,
             dry_run,
+            repair,
             batch_size,
         })
     }
