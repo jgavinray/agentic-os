@@ -115,7 +115,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
-      API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001
+      API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001;sk-agent-clean-002,agent-os-clean-002
       DEFAULT_MODEL: qwen36-27b
       DEFAULT_TASK: engineering
       SUMMARIZER_ENABLED: "${SUMMARIZER_ENABLED:-true}"
