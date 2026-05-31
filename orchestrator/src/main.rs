@@ -40,7 +40,7 @@ async fn main() -> Result<(), anyhow::Error> {
         })
         .filter(|(t, _)| !t.is_empty())
         .collect();
-    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-27b".to_string());
+    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
     let summarizer_url = env::var("SUMMARIZER_BASE_URL")
         .unwrap_or_else(|_| litellm_url.clone())
         .trim_end_matches('/')

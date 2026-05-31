@@ -3264,7 +3264,7 @@ mod tests {
             "model": "claude-opus-4-7",
             "messages": [{"role": "user", "content": "hi"}]
         });
-        let default_model = "qwen36-27b";
+        let default_model = "qwen36-35b-heretic";
         req["model"] = Value::String(default_model.to_string());
         assert_eq!(req["model"].as_str().unwrap(), default_model);
     }
@@ -3277,7 +3277,7 @@ mod tests {
             "claude-opus-4-7",
             "gpt-4-turbo",
         ];
-        let default_model = "qwen36-27b";
+        let default_model = "qwen36-35b-heretic";
         for client_model in client_models {
             let mut req = json!({
                 "model": client_model,
