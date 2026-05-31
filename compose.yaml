@@ -92,7 +92,7 @@ services:
       - "-tb"
       - "${SUMMARIZER_THREADS_BATCH:-16}"
       - "-ngl"
-      - "${SUMMARIZER_GPU_LAYERS:-99}"
+      - "${SUMMARIZER_GPU_LAYERS:-0}"
       - "--parallel"
       - "${SUMMARIZER_PARALLEL:-1}"
 
