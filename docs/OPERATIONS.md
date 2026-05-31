@@ -129,7 +129,7 @@ Optional:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
-| `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
+| `DEFAULT_MODEL` | `qwen36-27b` | Canonical model sent to LiteLLM. |
 | `DEFAULT_TASK` | `engineering` | Task label when no header is provided. |
 | `SUMMARIZER_ENABLED` | `true` | Enables the background summarizer loop. |
 | `SUMMARIZER_BASE_URL` | Compose: `http://summarizer:8080/v1`; otherwise `LITELLM_URL` | OpenAI-compatible summarizer endpoint. |

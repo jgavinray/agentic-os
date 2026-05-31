@@ -95,6 +95,14 @@ Invalid validator types are rejected. Validation payloads include `validator_nam
 
 Patch payloads include `files_touched`, `lines_added`, `lines_removed`, `patch_applied`, and `patch_reverted`.
 
+## Tool Mediation Lineage
+
+Tool menu shaping metadata is attached to request and model-response metadata when `TOOL_MEDIATION_ENABLED=true`.
+
+The `/tools/authorize` endpoint can also write `tool_authorization_decision` events when the client supplies `session_id`. If the client supplies `trajectory_id` and `attempt_index`, the decision event participates in the trajectory using `event_role=tool_call`.
+
+This keeps canonical-tool preference decisions, such as denying `Bash("cat README.md")` when `Read` is available, reconstructable from the same event chain without adding a new storage backend or event-role enum.
+
 ## Trajectory Result
 
 At completion, agentic-os writes exactly one `trajectory_result` event per `trajectory_id`. Idempotency is enforced by a partial unique index on `agent_events(trajectory_id)` where `event_role='trajectory_result'`.

@@ -1,6 +1,6 @@
 # agentic-os
 
-A local-first agent memory orchestrator for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, deterministic pre-LLM request classification, summarization, and Anthropic tool-use passthrough through LiteLLM.
+A local-first agent observability and orchestration substrate for LLM clients. It provides OpenAI-compatible and Anthropic-compatible proxy endpoints, persistent engineering memory, semantic and full-text recall, automated context packing, deterministic pre-LLM request classification, deterministic tool mediation, summarization, and Anthropic tool-use passthrough through LiteLLM.
 
 ## What This Solves
 
@@ -13,6 +13,7 @@ agentic-os makes that workflow observable. It records structured engineering mem
 - It helps agents resume work with relevant prior decisions, failures, and remediations instead of starting cold every turn.
 - It preserves validation outcomes, failure signatures, patches, retries, sampling parameters, and token usage as queryable memory.
 - It reconstructs the lifecycle of a user intent from request through context, request classification, model calls, tools, validations, patches, and final result.
+- It mediates client-provided tools so the model sees safer canonical choices, and clients can ask agentic-os to authorize tool calls before execution.
 - It stays local-first and deliberately avoids learned routing, scoring, graph databases, autonomous retry policy, or prompt-body archival in the capture layer.
 
 ```
@@ -39,11 +40,11 @@ curl localhost:8088/health/ready
 
 ## Architecture
 
-The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It classifies request events before model dispatch into bounded intent, domain, risk, complexity, route, and response-contract labels; see [docs/RequestClassification/README.md](docs/RequestClassification/README.md). It classifies harness failure traces and quarantines poisoned benchmark artifacts from future context memory while preserving them in the audit log; see [docs/HARNESS_FEEDBACK.md](docs/HARNESS_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
+The orchestrator is a single-node control plane. It also captures deterministic engineering outcomes such as tool results, test runs, lint failures, patch outcomes, remediations, and inline failure signatures as first-class memory events; see [docs/EXECUTION_FEEDBACK.md](docs/EXECUTION_FEEDBACK.md). It extracts compact operational feature rows and injects bounded corrective guardrails as Operational Constraints; see [docs/FEATURE_EXTRACTION.md](docs/FEATURE_EXTRACTION.md). It classifies request events before model dispatch into bounded intent, domain, risk, complexity, route, and response-contract labels; see [docs/RequestClassification/README.md](docs/RequestClassification/README.md). It mediates client-provided tools through deterministic menu shaping and pre-execution authorization; see [docs/TOOL_MEDIATION.md](docs/TOOL_MEDIATION.md). It classifies harness failure traces and quarantines poisoned benchmark artifacts from future context memory while preserving them in the audit log; see [docs/HARNESS_FEEDBACK.md](docs/HARNESS_FEEDBACK.md). It captures chat sampling parameters for future outcome-aware routing; see [docs/SAMPLING_PARAMETERS.md](docs/SAMPLING_PARAMETERS.md). It groups request, context, model, tool, validation, patch, remediation, and result events into deterministic trajectories; see [docs/TRAJECTORIES.md](docs/TRAJECTORIES.md). Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the endpoint surface, memory model, retrieval pipeline, summarizer loop, cache behavior, and startup order.
 
 | Component | Role | Port |
 | --- | --- | --- |
-| Rust Orchestrator | Authenticated API frontend, context compiler, memory coordinator, LiteLLM proxy | 8088 |
+| Rust Orchestrator | Authenticated API frontend, context compiler, memory coordinator, tool mediator, LiteLLM proxy | 8088 |
 | PostgreSQL | Durable sessions, events, summaries, errors, token usage, migration history | 5432 |
 | Qdrant | Vector memory for semantic recall | 6333-6334 |
 | LiteLLM | Model routing and OpenAI/Anthropic-compatible upstream API | 4000 |
@@ -64,6 +65,7 @@ All endpoints except health checks require `Authorization: Bearer <key>`.
 | `/v1/validations` | POST | Submit a structured validation report for deterministic execution feedback. |
 | `/sessions/start` | POST | Create an explicit memory session. |
 | `/events/append` | POST | Store a memory event and best-effort vector index it. |
+| `/tools/authorize` | POST | Authorize a pending tool call before execution and return canonical-tool guidance when denied. |
 | `/context/pack` | POST | Return a layered context pack for a repo/task. |
 | `/cache/stats` | GET | Return context cache size and TTL. |
 | `/metrics` | GET | Prometheus exposition format. |
@@ -80,6 +82,10 @@ API_KEYS=sk-work,work;sk-project,project-alpha
 ```
 
 `Bearer sk-work` routes to the `work` namespace. `x-agent-repo` and `x-agent-task` can override the repo/task per request.
+
+## Tool Authorization
+
+Set `TOOL_MEDIATION_ENABLED=true` to enable deterministic tool-menu shaping on proxied model requests and the `/tools/authorize` pre-execution hook endpoint. Clients that support tool hooks should call the endpoint before executing a pending tool call, using the same bearer API key as the model proxy. See [docs/TOOL_MEDIATION.md](docs/TOOL_MEDIATION.md) for the request schema, response contract, and adapter responsibilities.
 
 ## Operations
 
@@ -123,7 +129,7 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `LITELLM_KEY` | required | LiteLLM API key. |
 | `LITELLM_SALT_KEY` | required | LiteLLM salt key. |
 | `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
-| `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
+| `DEFAULT_MODEL` | `qwen36-27b` | Canonical model sent to LiteLLM. |
 | `DEFAULT_TASK` | `engineering` | Task label when no header is present. |
 | `EMBED_MODEL_PATH` | required | Local ONNX embedder path. Compose sets this to `/data/models/embed`. |
 | `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model path for negative feedback detection. |
@@ -168,6 +174,7 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET` | `300` | Token budget for Operational Constraints context. |
 | `SAMPLING_CAPTURE_ENABLED` | `true` | Captures requested and forwarded chat sampling parameters in event metadata. |
 | `SAMPLING_OVERRIDE_ENABLED` | `false` | Enables the sampling override hook. Requires sampling capture to stay enabled. |
+| `TOOL_MEDIATION_ENABLED` | `true` | Enables deterministic tool menu shaping and `/tools/authorize` decisions for client-provided tools. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference refill rate. |
 | `RATE_LIMIT_BURST` | `30` | Per-key inference burst. |
 | `ALLOWED_ORIGINS` | `*` | CORS origin policy. |
