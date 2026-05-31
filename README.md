@@ -129,7 +129,7 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `LITELLM_KEY` | required | LiteLLM API key. |
 | `LITELLM_SALT_KEY` | required | LiteLLM salt key. |
 | `API_KEYS` | `agent-os,agentic-os` | Semicolon-delimited `token,namespace` entries. |
-| `DEFAULT_MODEL` | `qwen36-27b` | Canonical model sent to LiteLLM. |
+| `DEFAULT_MODEL` | `qwen36-35b-heretic` | Canonical model sent to LiteLLM. |
 | `DEFAULT_TASK` | `engineering` | Task label when no header is present. |
 | `EMBED_MODEL_PATH` | required | Local ONNX embedder path. Compose sets this to `/data/models/embed`. |
 | `SENTIMENT_MODEL_PATH` | unset | Optional local sentiment model path for negative feedback detection. |
