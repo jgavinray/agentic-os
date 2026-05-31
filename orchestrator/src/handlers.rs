@@ -131,6 +131,22 @@ fn live_policy_decision_response(
     decision
 }
 
+fn merge_request_metadata(parts: impl IntoIterator<Item = Option<Value>>) -> Option<Value> {
+    let mut merged = serde_json::Map::new();
+    for part in parts.into_iter().flatten() {
+        if let Some(object) = part.as_object() {
+            for (key, value) in object {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(Value::Object(merged))
+    }
+}
+
 fn live_policy_openai_body(
     decision: &crate::request_classification::LivePolicyDecision,
     user_content: &str,
@@ -598,6 +614,102 @@ pub async fn harness_guardrail(
             .collect(),
     })
     .into_response()
+}
+
+#[tracing::instrument(name = "handler.authorize_tool", skip(state, headers, req), fields(tool = %req.tool_name))]
+pub async fn authorize_tool(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<crate::tool_mediation::ToolAuthorizeRequest>,
+) -> Response {
+    let Some((_caller_token, namespace)) = authenticate(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    };
+
+    let response = crate::tool_mediation::authorize_tool_call(&req, state.tool_mediation_enabled);
+    telemetry::record_tool_authorization(&state.metrics, &response);
+    persist_tool_authorization_event(&state, &namespace, &req, &response);
+    axum::Json(response).into_response()
+}
+
+fn persist_tool_authorization_event(
+    state: &AppState,
+    namespace: &str,
+    req: &crate::tool_mediation::ToolAuthorizeRequest,
+    response: &crate::tool_mediation::ToolAuthorizeResponse,
+) {
+    if !state.tool_mediation_enabled {
+        return;
+    }
+    let Some(session_id) = req.session_id.clone() else {
+        return;
+    };
+    let repo = req.repo.clone().unwrap_or_else(|| namespace.to_string());
+    let task = req
+        .task
+        .clone()
+        .unwrap_or_else(|| state.default_task.clone());
+    let mut metadata = response.metadata(req);
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("tool_arguments".to_string(), req.arguments.clone());
+        object.insert(
+            "available_tools".to_string(),
+            serde_json::json!(req.available_tools),
+        );
+    }
+    let trajectory_id = state
+        .trajectory_capture_enabled
+        .then_some(req.trajectory_id)
+        .flatten();
+    let attempt_index = trajectory_id.map(|_| req.attempt_index.unwrap_or(1));
+    let event_role =
+        trajectory_id.map(|_| crate::trajectory::EventRole::ToolCall.as_str().to_string());
+    let event = AppendEventRequest {
+        session_id: session_id.clone(),
+        repo: repo.clone(),
+        actor: Some("tool_mediator".to_string()),
+        event_type: "tool_authorization_decision".to_string(),
+        summary: format!(
+            "tool authorization {} reason={} tool={}",
+            response.decision, response.reason, response.attempted_tool
+        ),
+        evidence: None,
+        metadata: Some(metadata),
+        correlation_id: trajectory_id,
+        parent_event_id: req.parent_event_id,
+        trajectory_id,
+        attempt_index,
+        event_role,
+        task: Some(task.clone()),
+        error_type: None,
+        error_description: None,
+    };
+    let state_bg = state.clone();
+    spawn_bounded_background(state, "tool_authorization_event", async move {
+        match db::append_event_from_request(
+            &state_bg.pool,
+            &state_bg.embedder,
+            &state_bg.qdrant_url,
+            &event,
+        )
+        .await
+        {
+            Ok((_event_id, _indexed)) => {
+                spawn_feature_extraction(&state_bg, &repo, &session_id, event.trajectory_id);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    repo = %repo,
+                    task = %task,
+                    "failed to persist tool authorization event: {e}"
+                );
+            }
+        }
+    });
 }
 
 #[tracing::instrument(name = "handler.validations", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
@@ -2099,13 +2211,21 @@ pub async fn chat_completions(
         state.sampling_config,
         state.sampling_policy.as_ref(),
     );
-    let request_metadata = sampling_audit.as_ref().map(|audit| {
+    let sampling_metadata = sampling_audit.as_ref().map(|audit| {
         audit.metadata(
             "/v1/chat/completions",
             &requested_model,
             &state.default_model,
         )
     });
+    let tool_mediation_metadata = if state.tool_mediation_enabled {
+        let outcome = crate::tool_mediation::shape_openai_request(&mut req, &user_content);
+        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        Some(outcome.metadata())
+    } else {
+        None
+    };
+    let request_metadata = merge_request_metadata([sampling_metadata, tool_mediation_metadata]);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
             Ok(session_id) => Some(session_id),
@@ -2508,6 +2628,14 @@ pub async fn messages(
     req["model"] = Value::String(state.default_model.clone());
     enforce_min_max_tokens(&mut req);
     normalize_response_content_types(&mut req);
+    let tool_mediation_metadata = if state.tool_mediation_enabled {
+        let outcome = crate::tool_mediation::shape_anthropic_request(&mut req, &user_content);
+        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        Some(outcome.metadata())
+    } else {
+        None
+    };
+    let request_metadata = merge_request_metadata([tool_mediation_metadata]);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
             Ok(session_id) => Some(session_id),
@@ -2526,7 +2654,15 @@ pub async fn messages(
     };
     let request_event_id =
         if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-            persist_request_event(&state, session_id, &repo, &user_content, trajectory, None).await
+            persist_request_event(
+                &state,
+                session_id,
+                &repo,
+                &user_content,
+                trajectory,
+                request_metadata.clone(),
+            )
+            .await
         } else {
             None
         };
@@ -2554,6 +2690,7 @@ pub async fn messages(
             model,
             namespace,
             correlation_id,
+            request_metadata,
             session_id,
             trajectory,
             request_event_id,
@@ -2646,7 +2783,7 @@ pub async fn messages(
             output_tokens,
             Some(started.elapsed().as_millis() as i64),
             crate::trajectory::model_finish_reason(&val),
-            None,
+            request_metadata.clone(),
             context_pack_id,
             Some(trajectory),
         );
@@ -2714,6 +2851,7 @@ async fn handle_streaming_anthropic(
     model: String,
     namespace: String,
     correlation_id: Option<uuid::Uuid>,
+    request_metadata: Option<Value>,
     session_id: Option<String>,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     request_event_id: Option<uuid::Uuid>,
@@ -2828,7 +2966,7 @@ async fn handle_streaming_anthropic(
                     output_tokens,
                     Some(started.elapsed().as_millis() as i64),
                     None,
-                    None,
+                    request_metadata.clone(),
                     context_pack_id,
                     Some(trajectory),
                 );
@@ -3126,7 +3264,7 @@ mod tests {
             "model": "claude-opus-4-7",
             "messages": [{"role": "user", "content": "hi"}]
         });
-        let default_model = "qwen36-35b-heretic";
+        let default_model = "qwen36-27b";
         req["model"] = Value::String(default_model.to_string());
         assert_eq!(req["model"].as_str().unwrap(), default_model);
     }
@@ -3139,7 +3277,7 @@ mod tests {
             "claude-opus-4-7",
             "gpt-4-turbo",
         ];
-        let default_model = "qwen36-35b-heretic";
+        let default_model = "qwen36-27b";
         for client_model in client_models {
             let mut req = json!({
                 "model": client_model,

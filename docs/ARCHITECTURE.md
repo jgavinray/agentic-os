@@ -1,6 +1,6 @@
 # Architecture
 
-agentic-os is a single-node Rust orchestrator that fronts LiteLLM-compatible model APIs and adds durable engineering memory. It stores structured state in Postgres, vector recall in Qdrant, and builds context packs that are injected into proxied model requests.
+agentic-os is a single-node Rust orchestrator that fronts LiteLLM-compatible model APIs and adds durable engineering memory, trajectory observability, and deterministic tool mediation. It stores structured state in Postgres, vector recall in Qdrant, and builds context packs that are injected into proxied model requests.
 
 ## Public Endpoints
 
@@ -14,8 +14,11 @@ All endpoints except `/health`, `/health/live`, and `/health/ready` require `Aut
 | `/v1/models` | GET | Proxies LiteLLM `/models`; falls back to the configured default model when LiteLLM cannot return JSON. |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat endpoint. It derives namespace/task, injects memory context, forwards to LiteLLM, streams when requested, and persists user/assistant exchanges. |
 | `/v1/messages` | POST | Anthropic-compatible messages passthrough. It keeps Anthropic format, injects memory into `system`, forwards to LiteLLM `/messages`, and persists exchanges. |
+| `/v1/validations` | POST | Captures structured validation, patch, remediation, and failure feedback as execution events. |
+| `/tools/authorize` | POST | Authorizes a pending client tool call before execution. Denials return a bounded reason and canonical preferred tool guidance. |
 | `/sessions/start` | POST | Creates an explicit agent session for a repo/task/actor. |
 | `/events/append` | POST | Inserts a memory event in Postgres and best-effort indexes it in Qdrant. |
+| `/harness/guardrail` | POST | Evaluates deterministic harness/runtime guardrail metadata before or around tool execution. |
 | `/context/pack` | POST | Builds or returns a cached layered context pack for a repo/task. |
 | `/cache/stats` | GET | Returns in-process context cache size and TTL. |
 | `/metrics` | GET | Returns Prometheus text exposition. |
@@ -44,6 +47,12 @@ Qdrant stores vectors for events in the `agent_events` collection. Qdrant indexi
 Trajectory capture groups one user intent and its downstream context pack, model response, tools, validations, patches, remediations, failures, and final result using the existing event log. A request starts a new `trajectory_id`; follow-on events inherit it. Context packs are written before the model response they inform, and the model response stores the `context_pack_id` back-reference.
 
 Completion writes one idempotent `trajectory_result` event with bounded statuses: `succeeded`, `abandoned`, `unresolved`, or `reverted`. `TRAJECTORY_CAPTURE_ENABLED=false` disables trajectory metadata, result emission, the idle sweep, and trajectory metrics. See [TRAJECTORIES.md](TRAJECTORIES.md).
+
+## Tool Mediation
+
+Tool mediation is deterministic infrastructure between request classification and eventual full orchestration. In the current proxy mode, the client still owns tool execution and supplies the tool menu. When `TOOL_MEDIATION_ENABLED=true`, agentic-os maps those tool names into bounded capabilities, detects simple tool intent, and shapes the OpenAI or Anthropic `tools` array before forwarding the request. For example, if a request is a file-read intent and the client supplied both `Read` and `Bash`, the orchestrator hides `Bash` for that model call so the model sees the canonical read capability.
+
+Runtime enforcement uses `/tools/authorize`, which is mounted by the same orchestrator process and protected by the same bearer API keys as other non-health endpoints. Clients with pre-tool hooks can submit a pending tool call before execution. If a shell command is a canonical-tool fallback, such as `cat README.md` while `Read` is available, agentic-os returns `decision=deny`, `reason=prefer_canonical_tool`, and replacement guidance. The client still decides how to feed that denial back into its tool loop unless agentic-os later runs in broker or full orchestrator mode. See [TOOL_MEDIATION.md](TOOL_MEDIATION.md).
 
 ## Retrieval Pipeline
 
@@ -95,6 +104,7 @@ On boot the orchestrator:
 4. Runs embedded refinery migrations.
 5. Initializes the Qdrant collection.
 6. Loads local embedder and optional sentiment models.
-7. Starts the summarizer loop and HTTP server.
+7. Starts trajectory idle sweep when enabled.
+8. Starts the summarizer loop and HTTP server.
 
 The single-writer lock means exactly one orchestrator process may own a given Postgres database.

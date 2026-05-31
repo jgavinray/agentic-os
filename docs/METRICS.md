@@ -70,6 +70,17 @@
 | `harness_feedback_learning_records_total` | counter | `status` | Structured harness feedback records available for later offline learning analysis. `status` is one of `recorded`, `quarantined`, or `ignored`. |
 | `harness_feedback_repair_runs_total` | counter | `result` | Startup and periodic harness feedback repair runs. `result` is `success` or `failure`. |
 | `harness_guardrail_decisions_total` | counter | `action`, `reason` | Deterministic runtime guardrail decisions for preflight checks and persisted non-allow events. `action` is one of `allow`, `warn`, `block`, `terminate`; `reason` is bounded and never includes raw paths or prompts. |
+| `request_classification_backfill_runs_total` | counter | `result` | Startup and operator request-classification backfill runs. |
+| `request_classifications_written_total` | counter | `result` | Request classification persistence outcomes. |
+| `request_classification_unknown_labels_total` | counter | `field` | Request classification rows containing bounded `unknown` labels. |
+| `request_classifications_total` | counter | `intent`, `domain`, `route` | Request classifications by bounded deterministic labels. |
+| `request_route_recommendations_total` | counter | `route` | Shadow route recommendations. |
+| `request_risk_flags_total` | counter | `risk` | Request risk flags. |
+| `request_complexity_total` | counter | `complexity` | Request complexity labels. |
+| `request_live_policy_actions_total` | counter | `action`, `reason` | Feature-flagged live request policy actions. |
+| `request_live_policy_bypassed_total` | counter | `reason` | Requests bypassing live request policy. |
+| `tool_mediation_decisions_total` | counter | `decision`, `reason` | Tool menu shaping and tool-call authorization decisions. `decision` is one of `allow`, `deny`, `shape`, `pass`, `unknown`; `reason` is one of `prefer_canonical_tool`, `no_tools`, `not_applicable`, `disabled`, `unknown`. |
+| `tool_mediation_tools_total` | counter | `action`, `capability` | Tools observed by mediation. `action` is one of `offered`, `allowed`, `hidden`, `denied`, `unknown`; `capability` is one of `file_read`, `text_search`, `file_list`, `file_edit`, `validation`, `publishing`, `shell`, `unknown`. |
 | `process_cpu_seconds_total` | counter | none | Process CPU seconds. |
 | `process_resident_memory_bytes` | gauge | none | Resident memory bytes. |
 | `process_start_time_seconds` | gauge | none | Process start time. |

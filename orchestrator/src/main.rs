@@ -40,8 +40,7 @@ async fn main() -> Result<(), anyhow::Error> {
         })
         .filter(|(t, _)| !t.is_empty())
         .collect();
-    let default_model =
-        env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
+    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-27b".to_string());
     let summarizer_url = env::var("SUMMARIZER_BASE_URL")
         .unwrap_or_else(|_| litellm_url.clone())
         .trim_end_matches('/')
@@ -107,6 +106,14 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap_or(state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET);
     let feature_extraction_enabled =
         orchestrator::feature_extraction::feature_extraction_enabled_from_env();
+    let tool_mediation_enabled = env::var("TOOL_MEDIATION_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
     let summarizer_enabled = env::var("SUMMARIZER_ENABLED")
         .map(|v| {
             !matches!(
@@ -200,6 +207,7 @@ async fn main() -> Result<(), anyhow::Error> {
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
         request_live_policy_config: request_classification::live_policy_config_from_env(),
+        tool_mediation_enabled,
         prometheus,
         metrics,
     });
@@ -236,6 +244,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/messages", post(handlers::messages))
         .route("/v1/validations", post(handlers::validations))
+        .route("/tools/authorize", post(handlers::authorize_tool))
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/harness/guardrail", post(handlers::harness_guardrail))

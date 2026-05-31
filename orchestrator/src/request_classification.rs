@@ -1635,8 +1635,6 @@ fn classify_intent(features: &RequestFeatures, lower: &str, event_type: &str) ->
     } else if features.contains_error_words || features.has_stack_trace || features.has_test_failure
     {
         RequestIntent::Debug
-    } else if contains_any(lower, &["explain", "help me understand", "what is", "why "]) {
-        RequestIntent::Explain
     } else {
         RequestIntent::Explain
     }
@@ -1824,10 +1822,7 @@ fn recommend_route(
         )
     }) {
         RecommendedRoute::RefuseOrGuardrail
-    } else if risks
-        .iter()
-        .any(|risk| *risk == RequestRisk::ExternalCurrentInfoRequired)
-    {
+    } else if risks.contains(&RequestRisk::ExternalCurrentInfoRequired) {
         RecommendedRoute::WebRequired
     } else if matches!(
         intent,

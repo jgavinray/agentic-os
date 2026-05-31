@@ -67,6 +67,8 @@ pub struct MetricsSnapshot {
     pub trajectory_input_tokens: u64,
     pub trajectory_output_tokens: u64,
     pub trajectory_features: u64,
+    pub tool_mediation_decisions: u64,
+    pub tool_mediation_tools: u64,
     pub feature_extraction_failures: u64,
     pub feature_tag_schema_version_unknown: u64,
 }
@@ -432,6 +434,14 @@ fn describe_metrics() {
         "Requests bypassing live request policy by bounded reason."
     );
     describe_counter!(
+        "tool_mediation_decisions_total",
+        "Deterministic tool menu and tool-call decisions by bounded decision and reason."
+    );
+    describe_counter!(
+        "tool_mediation_tools_total",
+        "Tools observed by deterministic mediation by bounded action and capability."
+    );
+    describe_counter!(
         "process_cpu_seconds_total",
         "CPU seconds consumed by this process."
     );
@@ -461,6 +471,7 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
         "/sessions/start",
         "/events/append",
         "/harness/guardrail",
+        "/tools/authorize",
         "/v1/validations",
         "/context/pack",
         "/search",
@@ -764,6 +775,41 @@ pub fn prime_metrics(registry: &MetricsRegistry, default_model: &str, sentiment_
     }
     for reason in ["disabled", "shadow_only", "unsupported_policy_version"] {
         counter!("request_live_policy_bypassed_total", "reason" => reason).increment(0);
+    }
+    for decision in ["allow", "deny", "shape", "pass", "unknown"] {
+        for reason in [
+            "prefer_canonical_tool",
+            "no_tools",
+            "not_applicable",
+            "disabled",
+            "unknown",
+        ] {
+            counter!(
+                "tool_mediation_decisions_total",
+                "decision" => decision,
+                "reason" => reason
+            )
+            .increment(0);
+        }
+    }
+    for action in ["offered", "allowed", "hidden", "denied", "unknown"] {
+        for capability in [
+            "file_read",
+            "text_search",
+            "file_list",
+            "file_edit",
+            "validation",
+            "publishing",
+            "shell",
+            "unknown",
+        ] {
+            counter!(
+                "tool_mediation_tools_total",
+                "action" => action,
+                "capability" => capability
+            )
+            .increment(0);
+        }
     }
 }
 
@@ -1160,6 +1206,63 @@ pub fn record_request_live_policy_action(action: &str, reason: &str) {
 pub fn record_request_live_policy_bypass(reason: &str) {
     let reason = crate::request_classification::bounded_live_policy_bypass(reason);
     counter!("request_live_policy_bypassed_total", "reason" => reason).increment(1);
+}
+
+pub fn record_tool_menu_outcome(
+    registry: &MetricsRegistry,
+    outcome: &crate::tool_mediation::ToolMenuOutcome,
+) {
+    let decision = crate::tool_mediation::bounded_decision(outcome.decision);
+    let reason = crate::tool_mediation::bounded_reason(outcome.reason);
+    counter!(
+        "tool_mediation_decisions_total",
+        "decision" => decision,
+        "reason" => reason
+    )
+    .increment(1);
+    registry.inner.write().unwrap().tool_mediation_decisions += 1;
+    for capability in outcome.offered_capabilities() {
+        record_tool_mediation_tool(registry, "offered", capability);
+    }
+    for capability in outcome.allowed_capabilities() {
+        record_tool_mediation_tool(registry, "allowed", capability);
+    }
+    for capability in outcome.hidden_capabilities() {
+        record_tool_mediation_tool(registry, "hidden", capability);
+    }
+}
+
+pub fn record_tool_authorization(
+    registry: &MetricsRegistry,
+    response: &crate::tool_mediation::ToolAuthorizeResponse,
+) {
+    let decision = crate::tool_mediation::bounded_decision(response.decision);
+    let reason = crate::tool_mediation::bounded_reason(response.reason);
+    counter!(
+        "tool_mediation_decisions_total",
+        "decision" => decision,
+        "reason" => reason
+    )
+    .increment(1);
+    registry.inner.write().unwrap().tool_mediation_decisions += 1;
+    let action = if response.decision == "deny" {
+        "denied"
+    } else {
+        "allowed"
+    };
+    record_tool_mediation_tool(registry, action, response.capability);
+}
+
+fn record_tool_mediation_tool(registry: &MetricsRegistry, action: &str, capability: &str) {
+    let action = crate::tool_mediation::bounded_tool_action(action);
+    let capability = crate::tool_mediation::bounded_capability(capability);
+    counter!(
+        "tool_mediation_tools_total",
+        "action" => action,
+        "capability" => capability
+    )
+    .increment(1);
+    registry.inner.write().unwrap().tool_mediation_tools += 1;
 }
 
 fn bounded_feature_failure_class(value: &str) -> &'static str {
