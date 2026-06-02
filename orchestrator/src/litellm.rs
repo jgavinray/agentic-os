@@ -461,6 +461,24 @@ pub fn context_pack_hash(context: &str) -> String {
     format!("{digest:x}")
 }
 
+pub fn context_prefix_hashes(context: &str) -> (Option<String>, Option<String>) {
+    let (stable_prefix, dynamic_tail) = split_context_prefix_tail(context);
+    (
+        (!stable_prefix.is_empty()).then(|| context_pack_hash(stable_prefix)),
+        (!dynamic_tail.is_empty()).then(|| context_pack_hash(dynamic_tail)),
+    )
+}
+
+fn split_context_prefix_tail(context: &str) -> (&str, &str) {
+    if let Some(idx) = context.find("\nRepository: ") {
+        context.split_at(idx + 1)
+    } else if context.starts_with("Repository: ") {
+        ("", context)
+    } else {
+        (context, "")
+    }
+}
+
 pub fn add_agentic_os_metadata(req: &mut Value, attempt: &LiteLlmCallAttempt) {
     if !req.get("metadata").is_some_and(Value::is_object) {
         req["metadata"] = json!({});
@@ -564,6 +582,15 @@ mod tests {
         let c = context_pack_hash("alpha\nbeta!");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn context_prefix_hashes_split_stable_artifacts_from_dynamic_tail() {
+        let context = "== Stable Context Artifacts ==\n[repo:service_topology:active]\nmodel\n\nRepository: r\nTask: t\n";
+        let (stable, dynamic) = context_prefix_hashes(context);
+        assert!(stable.is_some());
+        assert!(dynamic.is_some());
+        assert_ne!(stable, dynamic);
     }
 
     #[test]
