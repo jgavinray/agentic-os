@@ -49,7 +49,7 @@ services:
       DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
       LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY must be set in .env - generate with: openssl rand -hex 32}"
       STORE_MODEL_IN_DB: "True"
-      AGENTIC_STRONG_PREFIX_CANARY_API_BASE: "${AGENTIC_STRONG_PREFIX_CANARY_API_BASE:-http://host.docker.internal:8001/v1}"
+      AGENTIC_STRONG_PREFIX_CANARY_API_BASE: "${AGENTIC_STRONG_PREFIX_CANARY_API_BASE:-http://192.168.0.33:8000/v1}"
       AGENTIC_STRONG_PREFIX_CANARY_API_KEY: "${AGENTIC_STRONG_PREFIX_CANARY_API_KEY:-local-key}"
     volumes:
       - ./litellm-config.yaml:/app/config.yaml:ro
@@ -117,8 +117,8 @@ services:
       QDRANT_URL: http://qdrant:6333
       LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
-      API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001;sk-agent-clean-002,agent-os-clean-002
-      DEFAULT_MODEL: qwen36-27b
+      API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001;sk-agent-clean-002,agent-os-clean-002;sk-crusoe,crusoe
+      DEFAULT_MODEL: qwen36-35b-a3b
       DEFAULT_TASK: engineering
       SUMMARIZER_ENABLED: "${SUMMARIZER_ENABLED:-true}"
       SUMMARIZER_BASE_URL: "${SUMMARIZER_BASE_URL:-http://summarizer:8080/v1}"
