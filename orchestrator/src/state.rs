@@ -6,8 +6,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Minimum max_tokens for proxied completion requests.
-pub const MIN_MAX_TOKENS: u64 = 8192;
+/// Default max_tokens for proxied completion requests when the client omits it.
+pub const DEFAULT_MAX_TOKENS: u64 = 8192;
+
+/// Maximum max_tokens this backend can safely serve for Claude Code traffic.
+pub const MAX_MAX_TOKENS: u64 = 8192;
 
 /// Default max_tokens used by the internal summarizer — summaries are short.
 pub const SUMMARIZER_MAX_TOKENS: u64 = 384;
@@ -492,6 +495,10 @@ pub struct AppState {
     pub sampling_policy: Arc<dyn crate::sampling::SamplingPolicy>,
     /// Feature-flagged request classification live policy. Disabled by default.
     pub request_live_policy_config: crate::request_classification::LivePolicyConfig,
+    /// Enables allowlist-only routing to the prefix-cache canary backend.
+    pub prefix_cache_canary_enabled: bool,
+    /// Namespaces allowed to route agentic/strong calls to the prefix-cache canary.
+    pub prefix_cache_canary_namespace_allowlist: HashSet<String>,
     /// Enables deterministic tool menu shaping and tool-call authorization.
     pub tool_mediation_enabled: bool,
     /// Prometheus scrape handle.

@@ -147,6 +147,10 @@ Rate limiting applies per API key to `/v1/chat/completions` and `/v1/messages`. 
 | `SUMMARIZER_CTX_SIZE` | `4096` | Context window for the llama.cpp summarizer service. |
 | `SUMMARIZER_GPU_LAYERS` | `0` | GPU layers for the llama.cpp summarizer service. Set higher when running a GPU image/runtime. |
 | `SUMMARIZER_PARALLEL` | `1` | Concurrent llama.cpp slots for the summarizer service. Keep low to protect foreground work. |
+| `AGENTIC_STRONG_PREFIX_CANARY_API_BASE` | `http://host.docker.internal:8001/v1` | OpenAI-compatible backend base URL for the disabled-by-default prefix-cache canary LiteLLM alias. |
+| `AGENTIC_STRONG_PREFIX_CANARY_API_KEY` | `local-key` | API key for the prefix-cache canary backend. |
+| `PREFIX_CACHE_CANARY_ENABLED` | `false` | Enables namespace-allowlisted routing from `agentic/strong` to `agentic/strong-prefix-canary`. |
+| `PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST` | unset | Comma-separated namespaces eligible for canary routing. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |

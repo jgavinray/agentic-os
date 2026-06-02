@@ -8,7 +8,7 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const HTTP_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
@@ -1575,8 +1575,8 @@ fn process_metrics() -> ProcessMetrics {
     #[cfg(not(target_os = "linux"))]
     {
         ProcessMetrics {
-            start_time_seconds: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+            start_time_seconds: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or_default(),
             ..Default::default()
