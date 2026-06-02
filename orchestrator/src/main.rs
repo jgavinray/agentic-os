@@ -268,6 +268,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/events/append", post(handlers::append_event))
         .route("/harness/guardrail", post(handlers::harness_guardrail))
         .route("/context/pack", post(handlers::context_pack))
+        .route("/context/artifacts", get(handlers::context_artifacts))
         .route("/cache/stats", get(handlers::cache_stats))
         .route("/metrics", get(handlers::metrics))
         .route("/metrics/json", get(handlers::metrics_json))

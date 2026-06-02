@@ -134,6 +134,20 @@ pub struct FailureHistoryItem {
     pub remediation: Option<AgentEvent>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ContextCompilerLedgerEntry {
+    pub id: Uuid,
+    pub repo: String,
+    pub artifact_type: String,
+    pub candidate_source: String,
+    pub candidate_id: Option<String>,
+    pub decision: String,
+    pub reason: String,
+    pub artifact_id: Option<Uuid>,
+    pub metadata: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ── Connection pool ────────────────────────────────────────────
 
 pub fn create_pool(database_url: &str) -> Result<Pool, anyhow::Error> {
@@ -481,6 +495,55 @@ pub async fn get_active_context_artifacts(
     result
 }
 
+pub async fn get_context_artifacts_for_repo(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<crate::context_artifacts::ContextArtifact>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, repo, scope, artifact_type, status, content_raw, content_compact,
+                        content_rendered, content_hash, invalidation_key, source_event_ids,
+                        source_file_paths, token_estimate
+                 FROM context_artifacts
+                 WHERE repo = $1
+                 ORDER BY updated_at DESC
+                 LIMIT $2",
+                &[&repo, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::context_artifacts::ContextArtifact {
+                id: row.get("id"),
+                repo: row.get("repo"),
+                scope: row.get("scope"),
+                artifact_type: row.get("artifact_type"),
+                status: row.get("status"),
+                content_raw: row.get("content_raw"),
+                content_compact: row.get("content_compact"),
+                content_rendered: row.get("content_rendered"),
+                content_hash: row.get("content_hash"),
+                invalidation_key: row.get("invalidation_key"),
+                source_event_ids: row.get("source_event_ids"),
+                source_file_paths: row.get("source_file_paths"),
+                token_estimate: row.get("token_estimate"),
+            })
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "get_context_artifacts_for_repo",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
+
 pub async fn get_recent_instruction_candidates(
     pool: &Pool,
     repo: &str,
@@ -549,6 +612,94 @@ pub async fn get_recent_instruction_candidates(
     .await;
     crate::telemetry::record_db_query(
         "get_recent_instruction_candidates",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
+
+pub async fn insert_context_compiler_ledger_entry(
+    pool: &Pool,
+    repo: &str,
+    artifact_type: &str,
+    candidate_source: &str,
+    candidate_id: Option<&str>,
+    decision: &str,
+    reason: &str,
+    artifact_id: Option<Uuid>,
+    metadata: serde_json::Value,
+) -> Result<(), anyhow::Error> {
+    let started = std::time::Instant::now();
+    let id = Uuid::new_v4();
+    let result = async {
+        let conn = pool.get().await?;
+        conn.execute(
+            "INSERT INTO context_compiler_ledger
+             (id, repo, artifact_type, candidate_source, candidate_id, decision,
+              reason, artifact_id, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &id,
+                &repo,
+                &artifact_type,
+                &candidate_source,
+                &candidate_id,
+                &decision,
+                &reason,
+                &artifact_id,
+                &metadata,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "insert_context_compiler_ledger_entry",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
+
+pub async fn get_context_compiler_ledger(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<ContextCompilerLedgerEntry>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, repo, artifact_type, candidate_source, candidate_id, decision,
+                        reason, artifact_id, metadata, created_at
+                 FROM context_compiler_ledger
+                 WHERE repo = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2",
+                &[&repo, &limit],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ContextCompilerLedgerEntry {
+                id: row.get("id"),
+                repo: row.get("repo"),
+                artifact_type: row.get("artifact_type"),
+                candidate_source: row.get("candidate_source"),
+                candidate_id: row.get("candidate_id"),
+                decision: row.get("decision"),
+                reason: row.get("reason"),
+                artifact_id: row.get("artifact_id"),
+                metadata: row.get("metadata"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "get_context_compiler_ledger",
         started.elapsed(),
         result.is_ok(),
     );
@@ -1419,6 +1570,58 @@ pub async fn get_failure_history_for_signatures(
     }
     .await;
     crate::telemetry::record_db_query("get_failure_history", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn get_recent_failure_history(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<FailureHistoryItem>, anyhow::Error> {
+    if limit <= 0 {
+        return Ok(vec![]);
+    }
+
+    let started = std::time::Instant::now();
+    let result = async {
+        let outcome_event_types = crate::execution_feedback::FAILURE_OUTCOME_EVENT_TYPES.to_vec();
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata,
+                        correlation_id, parent_event_id, trajectory_id, attempt_index,
+                        event_role, created_at, summary_level
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND event_type = ANY($2)
+                   AND metadata->>'success' = 'false'
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+                &[&repo, &outcome_event_types, &limit],
+            )
+            .await?;
+
+        let failures = rows_to_events(rows);
+        let mut items = Vec::new();
+        for failure in failures {
+            let signature = event_payload_str(&failure, "signature").unwrap_or("unknown");
+            let category = event_payload_str(&failure, "signature_category").unwrap_or("unknown");
+            let remediation = remediation_for_failure(pool, &failure, signature).await?;
+            items.push(FailureHistoryItem {
+                signature: signature.to_string(),
+                category: category.to_string(),
+                failure,
+                remediation,
+            });
+        }
+        Ok(items)
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "get_recent_failure_history",
+        started.elapsed(),
+        result.is_ok(),
+    );
     result
 }
 

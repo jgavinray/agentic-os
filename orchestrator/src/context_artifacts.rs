@@ -157,6 +157,75 @@ pub fn active_instruction_artifact(
     )
 }
 
+pub fn failure_history_artifact(
+    repo: String,
+    items: &[crate::db::FailureHistoryItem],
+) -> Option<ContextArtifact> {
+    let items = items
+        .iter()
+        .filter(|item| item.remediation.is_some())
+        .take(5)
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::new();
+    let mut compact_lines = Vec::new();
+    let mut source_event_ids = Vec::new();
+    for item in &items {
+        let remediation = item.remediation.as_ref()?;
+        rendered.push_str(&format!(
+            "- resolved failure [{}]: {}\n  remediation: {}\n",
+            item.category,
+            truncate_line(&item.failure.summary, 220),
+            truncate_line(&remediation.summary, 220),
+        ));
+        compact_lines.push(format!(
+            "Resolved {} failure with remediation: {}",
+            item.category,
+            truncate_line(&remediation.summary, 160)
+        ));
+        source_event_ids.push(item.failure.id.clone());
+        source_event_ids.push(remediation.id.clone());
+    }
+
+    let raw = serde_json::json!({
+        "source": "agent_events",
+        "items": items
+            .iter()
+            .map(|item| serde_json::json!({
+                "signature": item.signature,
+                "category": item.category,
+                "failure": item.failure.payload(),
+                "remediation": item.remediation.as_ref().map(crate::db::AgentEvent::payload),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    source_event_ids.sort();
+    source_event_ids.dedup();
+    let source_event_ids_json = serde_json::json!(source_event_ids);
+    let invalidation_key = stable_hash(&serde_json::json!({
+        "artifact_type": "failure_history",
+        "source_event_ids": source_event_ids_json,
+        "items": raw["items"],
+    }));
+
+    Some(
+        ContextArtifact::new(
+            repo,
+            "repo",
+            "failure_history",
+            Some(raw.to_string()),
+            compact_lines.join(" "),
+            rendered,
+            invalidation_key,
+            serde_json::json!([]),
+        )
+        .with_source_event_ids(source_event_ids_json),
+    )
+}
+
 pub fn render_artifacts(artifacts: &[ContextArtifact]) -> String {
     if artifacts.is_empty() {
         return String::new();
@@ -203,6 +272,11 @@ fn normalize_instruction(text: &str) -> String {
         .chars()
         .take(320)
         .collect()
+}
+
+fn truncate_line(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim().replace('\n', " ");
+    trimmed.chars().take(max_chars).collect()
 }
 
 fn stable_hash(value: &serde_json::Value) -> String {
@@ -256,5 +330,60 @@ mod tests {
         assert_eq!(artifact.artifact_type, "active_instruction");
         assert_eq!(artifact.source_event_ids, serde_json::json!(["event-1"]));
         assert!(artifact.content_rendered.contains("Snowflake"));
+    }
+
+    #[test]
+    fn failure_history_artifact_promotes_resolved_failures() {
+        let failure = test_event(
+            "failure-1",
+            "validation_result",
+            "cargo check failed with type mismatch",
+            serde_json::json!({"payload": {"signature": "sig-1", "signature_category": "compile"}}),
+        );
+        let remediation = test_event(
+            "remediation-1",
+            "remediation",
+            "changed generic bound to match caller",
+            serde_json::json!({"payload": {"signature": "sig-1"}}),
+        );
+        let item = crate::db::FailureHistoryItem {
+            signature: "sig-1".to_string(),
+            category: "compile".to_string(),
+            failure,
+            remediation: Some(remediation),
+        };
+
+        let artifact = failure_history_artifact("agentic-os".to_string(), &[item]).unwrap();
+        assert_eq!(artifact.artifact_type, "failure_history");
+        assert!(artifact.content_rendered.contains("resolved failure"));
+        assert_eq!(
+            artifact.source_event_ids,
+            serde_json::json!(["failure-1", "remediation-1"])
+        );
+    }
+
+    fn test_event(
+        id: &str,
+        event_type: &str,
+        summary: &str,
+        metadata: serde_json::Value,
+    ) -> crate::db::AgentEvent {
+        crate::db::AgentEvent {
+            id: id.to_string(),
+            session_id: "session-1".to_string(),
+            repo: "agentic-os".to_string(),
+            actor: "agent".to_string(),
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            evidence: None,
+            metadata,
+            correlation_id: None,
+            parent_event_id: None,
+            trajectory_id: None,
+            attempt_index: None,
+            event_role: None,
+            created_at: chrono::Utc::now(),
+            summary_level: 0,
+        }
     }
 }
