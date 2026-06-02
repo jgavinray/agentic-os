@@ -1,7 +1,7 @@
 model_list:
-  - model_name: qwen36-27b
+  - model_name: qwen36-35b-a3b
     litellm_params:
-      model: openai/qwen36-27b
+      model: openai/qwen36-35b-a3b
       api_base: http://192.168.0.33:8000/v1
       api_key: local-key
       extra_body:
@@ -11,7 +11,7 @@ model_list:
       stream_timeout: 300
   - model_name: agentic/strong-prefix-canary
     litellm_params:
-      model: openai/qwen36-27b
+      model: openai/qwen36-35b-a3b
       api_base: os.environ/AGENTIC_STRONG_PREFIX_CANARY_API_BASE
       api_key: os.environ/AGENTIC_STRONG_PREFIX_CANARY_API_KEY
       extra_body:
@@ -21,7 +21,7 @@ model_list:
       stream_timeout: 300
     model_info:
       id: agentic-strong-prefix-canary
-      base_model: qwen36-27b
+      base_model: qwen36-35b-a3b
       mode: chat
       input_cost_per_token: 0
       output_cost_per_token: 0
