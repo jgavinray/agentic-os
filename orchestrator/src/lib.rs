@@ -7,6 +7,7 @@ pub mod feature_extraction;
 pub mod handlers;
 pub mod harness_feedback;
 pub mod hybrid;
+pub mod litellm;
 pub mod logging;
 pub mod migrations;
 pub mod qdrant;

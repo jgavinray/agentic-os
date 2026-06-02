@@ -40,7 +40,8 @@ async fn main() -> Result<(), anyhow::Error> {
         })
         .filter(|(t, _)| !t.is_empty())
         .collect();
-    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
+    let default_model =
+        env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
     let summarizer_url = env::var("SUMMARIZER_BASE_URL")
         .unwrap_or_else(|_| litellm_url.clone())
         .trim_end_matches('/')
@@ -114,6 +115,22 @@ async fn main() -> Result<(), anyhow::Error> {
             )
         })
         .unwrap_or(true);
+    let prefix_cache_canary_enabled = env::var("PREFIX_CACHE_CANARY_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false);
+    let prefix_cache_canary_namespace_allowlist =
+        env::var("PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect();
     let summarizer_enabled = env::var("SUMMARIZER_ENABLED")
         .map(|v| {
             !matches!(
@@ -207,6 +224,8 @@ async fn main() -> Result<(), anyhow::Error> {
         sampling_config,
         sampling_policy: Arc::new(sampling::NoOpSamplingPolicy),
         request_live_policy_config: request_classification::live_policy_config_from_env(),
+        prefix_cache_canary_enabled,
+        prefix_cache_canary_namespace_allowlist,
         tool_mediation_enabled,
         prometheus,
         metrics,

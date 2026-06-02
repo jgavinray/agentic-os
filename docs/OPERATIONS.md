@@ -22,6 +22,14 @@ Stored cache entries are keyed by `repo:task:event_count`; limit overrides becom
 
 Trajectory request events are still durably inserted into Postgres before forwarding, but their Qdrant indexing runs as background best-effort work.
 
+## Prefix-Cache Canary
+
+The prefix-cache canary is off by default. Set `PREFIX_CACHE_CANARY_ENABLED=true` and put exact namespaces in `PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST` to route only those namespaces from `agentic/strong` to `agentic/strong-prefix-canary`. There is no random split or global rollout in this path.
+
+LiteLLM exact response cache and model-server prefix/KV cache are different systems. agentic-os can emit cache policy and context stability facts, and LiteLLM can emit gateway/model facts, but agentic-os does not manage KV cache on the backend. The canary alias should point at a backend such as vLLM, SGLang, or TensorRT-LLM with prefix caching enabled.
+
+Judge prefix-cache ROI with repeated `context_pack_hash` values. Primary metric is p95 `first_token_ms` reduction. Secondary checks are p50 `first_token_ms`, p95 `total_latency_ms`, provider cache read/created token counters, output tokens, error rate, fallback count, and backend GPU throughput when available. Exact response-cache hit rate is separate from provider prefix-cache hit rate.
+
 ## Migrations
 
 Schema migrations are embedded with refinery from `orchestrator/migrations/`. The first migration is the baseline schema. On legacy databases created by the old bootstrap DDL, the orchestrator detects the existing tables and marks the baseline as applied without rerunning it.
@@ -144,6 +152,10 @@ Optional:
 | `SUMMARIZER_CTX_SIZE` | `4096` | Context window for the llama.cpp summarizer service. |
 | `SUMMARIZER_GPU_LAYERS` | `0` | GPU layers for the llama.cpp summarizer service. |
 | `SUMMARIZER_PARALLEL` | `1` | Concurrent llama.cpp slots for the summarizer service. Keep low to protect foreground work. |
+| `AGENTIC_STRONG_PREFIX_CANARY_API_BASE` | `http://host.docker.internal:8001/v1` | OpenAI-compatible backend base URL for the disabled-by-default prefix-cache canary LiteLLM alias. |
+| `AGENTIC_STRONG_PREFIX_CANARY_API_KEY` | `local-key` | API key for the prefix-cache canary backend. |
+| `PREFIX_CACHE_CANARY_ENABLED` | `false` | Enables namespace-allowlisted routing from `agentic/strong` to `agentic/strong-prefix-canary`. |
+| `PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST` | unset | Comma-separated namespaces eligible for canary routing. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |

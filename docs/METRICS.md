@@ -87,3 +87,11 @@
 | `process_open_fds` | gauge | none | Open file descriptors. |
 
 Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM, summarizer upstream, and streaming buckets span 100 ms to 10 min, database/Qdrant/feature extraction buckets span 1 ms to 5 s, embedder/sentiment buckets span 1 ms to 5 s, and token buckets span 16 to 32768 tokens.
+
+## LiteLLM Call Ledger
+
+`litellm_call_ledger` stores one row per attempted LiteLLM call. It records terminal status, TTFT (`first_token_ms`), total latency, route policy, cache policy, provider cache token counters, and `context_pack_hash`. It does not store raw prompts or raw responses.
+
+Use repeated `context_pack_hash` values to compare normal traffic with `agentic/strong-prefix-canary` traffic. Prefix-cache ROI should be judged primarily by p95 `first_token_ms` reduction, then p50 TTFT, p95 total latency, provider cache read/created tokens, output tokens, error rate, fallback count, and backend throughput if the model server exposes it.
+
+LiteLLM exact response-cache hit rate is separate from provider prefix/KV cache hit rate. agentic-os records policy and context facts; it does not manage backend KV cache.

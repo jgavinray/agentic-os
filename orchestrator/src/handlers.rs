@@ -27,10 +27,21 @@ fn bearer_token(headers: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
+fn provided_api_token(headers: &HeaderMap) -> &str {
+    let bearer = bearer_token(headers);
+    if !bearer.is_empty() {
+        return bearer;
+    }
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
 // Returns the (token, namespace) pair if auth passes; None otherwise.
 // Constant-time comparison prevents timing-based key recovery.
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
-    let provided = bearer_token(headers).as_bytes();
+    let provided = provided_api_token(headers).as_bytes();
     for (token, namespace) in &state.api_keys {
         let expected = token.as_bytes();
         if expected.len() == provided.len() && expected.ct_eq(provided).into() {
@@ -1473,9 +1484,9 @@ fn anthropic_error(
 
 /// BUG-4: Append context to an existing client system message rather than inserting
 /// a new one at position 0, which would demote the harness's carefully-tuned prompt.
-/// Ensure the request asks for at least `MIN_MAX_TOKENS` output tokens.
-/// Anthropic requires `max_tokens`; OpenAI treats it as optional. We floor
-/// whatever the client sent so reasoning models don't get starved mid-response.
+/// Ensure the request has a backend-safe max_tokens value.
+/// Anthropic requires `max_tokens`; OpenAI treats it as optional. Default omitted
+/// values, respect explicit small values, and cap oversized values.
 /// Normalise Responses API content types in message history before forwarding to LiteLLM.
 /// LiteLLM may return `"type": "output_text"` in assistant turns; if the client replays
 /// those turns in a subsequent request, some LiteLLM routing paths reject them. Convert
@@ -1494,11 +1505,69 @@ fn normalize_response_content_types(req: &mut Value) {
     }
 }
 
-fn enforce_min_max_tokens(req: &mut Value) {
-    let current = req.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    if current < MIN_MAX_TOKENS {
-        req["max_tokens"] = Value::from(MIN_MAX_TOKENS);
+fn sanitize_anthropic_litellm_request(req: &mut Value) {
+    if let Some(obj) = req.as_object_mut() {
+        // LiteLLM's Anthropic adapter forwards extended-thinking fields to
+        // OpenAI-compatible local backends as unsupported Responses API params
+        // such as `max_output_tokens`, which causes vLLM to return 500s.
+        obj.remove("thinking");
+        obj.remove("max_output_tokens");
+        obj.remove("reasoning_effort");
+        obj.remove("context_management");
     }
+}
+
+fn enforce_min_max_tokens(req: &mut Value) {
+    let requested = req.get("max_tokens").and_then(|v| v.as_u64());
+    let effective = requested
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .clamp(1, MAX_MAX_TOKENS);
+    let requested_for_log = requested.unwrap_or(0);
+    if requested_for_log != effective {
+        tracing::warn!(
+            requested_max_tokens = requested_for_log,
+            effective_max_tokens = effective,
+            default_max_tokens = DEFAULT_MAX_TOKENS,
+            max_max_tokens = MAX_MAX_TOKENS,
+            "clamped max_tokens for backend capacity"
+        );
+    }
+    req["max_tokens"] = Value::from(effective);
+}
+
+fn number_after_marker(text: &str, marker: &str) -> Option<u64> {
+    let start = text.find(marker)? + marker.len();
+    let digits: String = text[start..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+fn context_window_retry_max_tokens(error_body: &str) -> Option<u64> {
+    let max_context = number_after_marker(error_body, "maximum context length is")?;
+    let requested_output = number_after_marker(error_body, "requested")?;
+    let input_tokens = number_after_marker(error_body, "prompt contains at least")?;
+    let remaining = max_context.checked_sub(input_tokens)?;
+    if remaining == 0 || remaining >= requested_output {
+        return None;
+    }
+    // Leave a little space because vLLM reports "at least" for prompt tokens.
+    Some(remaining.saturating_sub(256).max(1).min(MAX_MAX_TOKENS))
+}
+
+fn set_max_tokens(req: &mut Value, max_tokens: u64) {
+    req["max_tokens"] = Value::from(max_tokens);
+}
+
+fn litellm_route(state: &AppState, namespace: &str) -> crate::litellm::RouteSelection {
+    crate::litellm::route_for_namespace(
+        &state.default_model,
+        namespace,
+        state.prefix_cache_canary_enabled,
+        &state.prefix_cache_canary_namespace_allowlist,
+    )
 }
 
 fn inject_system_context(payload: &mut Value, context: &str) {
@@ -1548,7 +1617,7 @@ async fn pack_context_into_anthropic_req(
     task: &str,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     parent_event_id: Option<uuid::Uuid>,
-) -> Option<uuid::Uuid> {
+) -> (Option<uuid::Uuid>, Option<String>) {
     let task_category = crate::state::TaskCategory::from_task(task);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
     let cached =
@@ -1563,8 +1632,9 @@ async fn pack_context_into_anthropic_req(
         &cached.stats,
         task_config.char_budget / 4,
     );
+    let context_pack_hash = Some(crate::litellm::context_pack_hash(&cached.context));
     inject_system_context_anthropic(req, &cached.context);
-    context_pack_id
+    (context_pack_id, context_pack_hash)
 }
 
 /// Extract assistant text from an Anthropic-format response for persistence.
@@ -2073,7 +2143,7 @@ async fn pack_context_into_req(
     task: &str,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     parent_event_id: Option<uuid::Uuid>,
-) -> Option<uuid::Uuid> {
+) -> (Option<uuid::Uuid>, Option<String>) {
     if req.get("model").is_none() {
         req["model"] = Value::String(state.default_model.clone());
     }
@@ -2091,8 +2161,9 @@ async fn pack_context_into_req(
         &cached.stats,
         task_config.char_budget / 4,
     );
+    let context_pack_hash = Some(crate::litellm::context_pack_hash(&cached.context));
     inject_system_context(req, &cached.context);
-    context_pack_id
+    (context_pack_id, context_pack_hash)
 }
 
 /// POST the OpenAI request to LiteLLM and return the raw response JSON.
@@ -2100,10 +2171,11 @@ async fn pack_context_into_req(
 async fn dispatch_non_streaming_raw(
     state: &AppState,
     openai_req: &Value,
+    finalizer: &crate::litellm::LiteLlmCallFinalizer,
 ) -> Result<(Value, u64), Response> {
     let url = format!("{}/chat/completions", state.litellm_url);
     let started = std::time::Instant::now();
-    match state
+    let response = match state
         .http
         .post(&url)
         .bearer_auth(&state.litellm_key)
@@ -2111,38 +2183,21 @@ async fn dispatch_non_streaming_raw(
         .send()
         .await
     {
-        Ok(r) => {
-            let status = r.status();
-            telemetry::record_upstream_litellm(
-                "chat_completions",
-                started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            if !status.is_success() {
-                telemetry::record_upstream_litellm_error(
-                    "chat_completions",
-                    telemetry::upstream_error_kind(status),
-                );
-            }
-            let latency_ms = started.elapsed().as_millis() as u64;
-            r.json::<Value>()
-                .await
-                .map(|value| (value, latency_ms))
-                .map_err(|_| {
-                    telemetry::record_upstream_litellm_error("chat_completions", "parse");
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
-                    )
-                        .into_response()
-                })
-        }
+        Ok(r) => Ok(r),
         Err(e) => {
             telemetry::record_upstream_litellm("chat_completions", started.elapsed(), "error");
             telemetry::record_upstream_litellm_error(
                 "chat_completions",
                 telemetry::reqwest_error_kind(&e),
             );
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::NetworkError,
+                    Some(telemetry::reqwest_error_kind(&e)),
+                    Some(&e.to_string()),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
             Err((
                 StatusCode::BAD_GATEWAY,
                 axum::Json(
@@ -2151,7 +2206,60 @@ async fn dispatch_non_streaming_raw(
             )
                 .into_response())
         }
+    }?;
+
+    let status = response.status();
+    telemetry::record_upstream_litellm(
+        "chat_completions",
+        started.elapsed(),
+        &status.as_u16().to_string(),
+    );
+    if !status.is_success() {
+        telemetry::record_upstream_litellm_error(
+            "chat_completions",
+            telemetry::upstream_error_kind(status),
+        );
     }
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let value = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(e) => {
+            telemetry::record_upstream_litellm_error("chat_completions", "parse");
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::ParseError,
+                    Some("parse"),
+                    Some(&e.to_string()),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"error": "litellm_parse_error"})),
+            )
+                .into_response());
+        }
+    };
+    if !status.is_success() {
+        finalizer
+            .finalize(
+                crate::litellm::TerminalStatus::HttpError,
+                Some(telemetry::upstream_error_kind(status)),
+                Some("upstream returned non-success status"),
+                crate::litellm::ProviderCacheCounters::from_value(&value),
+            )
+            .await;
+        return Err((status, axum::Json(value)).into_response());
+    }
+    finalizer
+        .finalize(
+            crate::litellm::TerminalStatus::Success,
+            None,
+            None,
+            crate::litellm::ProviderCacheCounters::from_value(&value),
+        )
+        .await;
+    Ok((value, latency_ms))
 }
 
 #[tracing::instrument(name = "handler.chat_completions", skip(state, headers, payload))]
@@ -2203,7 +2311,8 @@ pub async fn chat_completions(
     }
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
-    req["model"] = Value::String(state.default_model.clone());
+    let route = litellm_route(&state, &namespace);
+    req["model"] = Value::String(route.routed_model.clone());
     enforce_min_max_tokens(&mut req);
     let sampling_audit = crate::sampling::capture_and_maybe_override(
         &payload,
@@ -2215,7 +2324,7 @@ pub async fn chat_completions(
         audit.metadata(
             "/v1/chat/completions",
             &requested_model,
-            &state.default_model,
+            &route.routed_model,
         )
     });
     let tool_mediation_metadata = if state.tool_mediation_enabled {
@@ -2256,7 +2365,7 @@ pub async fn chat_completions(
         } else {
             None
         };
-    let context_pack_id = pack_context_into_req(
+    let (context_pack_id, context_pack_hash) = pack_context_into_req(
         &state,
         &mut req,
         session_id.as_deref(),
@@ -2269,6 +2378,22 @@ pub async fn chat_completions(
     let correlation_id = trajectory
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
+    let cache_policy = crate::litellm::exact_cache_decision("chat_completions", &req, false);
+    let attempt = crate::litellm::new_attempt(
+        request_event_id,
+        trajectory.map(|trajectory| trajectory.trajectory_id),
+        context_pack_id,
+        namespace.clone(),
+        repo.clone(),
+        task.clone(),
+        "chat_completions",
+        requested_model.clone(),
+        &route,
+        cache_policy,
+        context_pack_hash.clone(),
+    );
+    crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
+    let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
     if is_stream {
         return handle_streaming(
@@ -2285,12 +2410,13 @@ pub async fn chat_completions(
             request_event_id,
             context_pack_id,
             user_content,
+            finalizer,
         )
         .await;
     }
 
     // ── Non-streaming ───────────────────────────────────────────
-    match dispatch_non_streaming_raw(&state, &req).await {
+    match dispatch_non_streaming_raw(&state, &req, &finalizer).await {
         Ok((val, latency_ms)) => {
             let usage = TokenUsage::from_openai_value(&val);
             telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
@@ -2402,10 +2528,11 @@ async fn handle_streaming(
     request_event_id: Option<uuid::Uuid>,
     context_pack_id: Option<uuid::Uuid>,
     user_content: String,
+    mut finalizer: crate::litellm::LiteLlmCallFinalizer,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
 
-    let started = std::time::Instant::now();
+    let started = finalizer.attempt_mut().started_at;
     let upstream = match state
         .http_stream
         .post(&url)
@@ -2435,6 +2562,14 @@ async fn handle_streaming(
                 "chat_completions",
                 telemetry::reqwest_error_kind(&e),
             );
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::NetworkError,
+                    Some(telemetry::reqwest_error_kind(&e)),
+                    Some(&e.to_string()),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
             return (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(
@@ -2445,32 +2580,74 @@ async fn handle_streaming(
         }
     };
 
+    if !upstream.status().is_success() {
+        let status = upstream.status();
+        telemetry::record_upstream_litellm_error(
+            "chat_completions",
+            telemetry::upstream_error_kind(status),
+        );
+        let body = upstream.text().await.unwrap_or_default();
+        finalizer
+            .finalize(
+                crate::litellm::TerminalStatus::HttpError,
+                Some(telemetry::upstream_error_kind(status)),
+                Some("upstream returned non-success status"),
+                crate::litellm::ProviderCacheCounters::default(),
+            )
+            .await;
+        return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+    }
+
     let bytes_stream = upstream.bytes_stream();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let acc_clone = accumulated.clone();
+    let mut stream_finalizer = finalizer;
 
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
         let mut stream_metrics = telemetry::StreamTracker::new("chat_completions", started);
         let mut tx_opt = Some(done_tx);
+        let mut first_seen = false;
+        let mut first_token_at = None;
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(b) => {
-                    stream_metrics.first_token();
+                    if !first_seen && crate::litellm::sse_chunk_has_non_empty_data(&b) {
+                        first_seen = true;
+                        first_token_at = Some(std::time::Instant::now());
+                        stream_finalizer.attempt_mut().first_token_at = first_token_at;
+                        stream_metrics.first_token();
+                    }
                     if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
                     stream_metrics.fail("upstream_error");
+                    stream_finalizer
+                        .finalize(
+                            crate::litellm::TerminalStatus::StreamError,
+                            Some("upstream_error"),
+                            Some(&e.to_string()),
+                            crate::litellm::ProviderCacheCounters::default(),
+                        )
+                        .await;
                     yield Err(std::io::Error::other(e));
                     return;
                 }
             }
         }
         stream_metrics.finish();
+        let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
+        let raw = String::from_utf8_lossy(&data);
+        let counters = crate::litellm::provider_counters_from_sse(&raw);
+        let mut done_finalizer = stream_finalizer.clone();
+        done_finalizer.attempt_mut().first_token_at = first_token_at;
+        done_finalizer.attempt_mut().completed_at = Some(std::time::Instant::now());
+        done_finalizer
+            .finalize(crate::litellm::TerminalStatus::Success, None, None, counters)
+            .await;
         if let Some(tx) = tx_opt.take() {
-            let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
             let _ = tx.send(data);
         }
     };
@@ -2625,9 +2802,11 @@ pub async fn messages(
 
     // Stay in Anthropic format — no translation.
     let mut req = payload;
-    req["model"] = Value::String(state.default_model.clone());
+    let route = litellm_route(&state, &namespace);
+    req["model"] = Value::String(route.routed_model.clone());
     enforce_min_max_tokens(&mut req);
     normalize_response_content_types(&mut req);
+    sanitize_anthropic_litellm_request(&mut req);
     let tool_mediation_metadata = if state.tool_mediation_enabled {
         let outcome = crate::tool_mediation::shape_anthropic_request(&mut req, &user_content);
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
@@ -2666,7 +2845,7 @@ pub async fn messages(
         } else {
             None
         };
-    let context_pack_id = pack_context_into_anthropic_req(
+    let (context_pack_id, context_pack_hash) = pack_context_into_anthropic_req(
         &state,
         &mut req,
         session_id.as_deref(),
@@ -2679,6 +2858,23 @@ pub async fn messages(
     let correlation_id = trajectory
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
+    let cache_policy = crate::litellm::exact_cache_decision("messages", &req, false);
+    let attempt = crate::litellm::new_attempt(
+        request_event_id,
+        trajectory.map(|trajectory| trajectory.trajectory_id),
+        context_pack_id,
+        namespace.clone(),
+        repo.clone(),
+        task.clone(),
+        "messages",
+        model.clone(),
+        &route,
+        cache_policy,
+        context_pack_hash.clone(),
+    );
+    crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
+    let mut finalizer =
+        crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
     if is_stream {
         return handle_streaming_anthropic(
@@ -2695,6 +2891,7 @@ pub async fn messages(
             trajectory,
             request_event_id,
             context_pack_id,
+            finalizer,
         )
         .await;
     }
@@ -2728,6 +2925,14 @@ pub async fn messages(
         Err(e) => {
             telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
             telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::NetworkError,
+                    Some(telemetry::reqwest_error_kind(&e)),
+                    Some(&e.to_string()),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -2736,11 +2941,19 @@ pub async fn messages(
         }
     };
 
-    let status = upstream_resp.status();
-    let val: Value = match upstream_resp.json().await {
+    let mut status = upstream_resp.status();
+    let mut val: Value = match upstream_resp.json().await {
         Ok(v) => v,
         Err(_) => {
             telemetry::record_upstream_litellm_error("messages", "parse");
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::ParseError,
+                    Some("parse"),
+                    Some("invalid upstream response"),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -2750,8 +2963,121 @@ pub async fn messages(
     };
 
     if !status.is_success() {
+        let error_body = val.to_string();
+        if let Some(retry_max_tokens) = context_window_retry_max_tokens(&error_body) {
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::HttpError,
+                    Some(telemetry::upstream_error_kind(status)),
+                    Some("upstream returned non-success status"),
+                    crate::litellm::ProviderCacheCounters::from_value(&val),
+                )
+                .await;
+            tracing::warn!(
+                retry_max_tokens,
+                upstream_status = status.as_u16(),
+                "retrying messages request with reduced max_tokens after context window error"
+            );
+            set_max_tokens(&mut req, retry_max_tokens);
+            let retry_attempt = crate::litellm::new_attempt(
+                request_event_id,
+                trajectory.map(|trajectory| trajectory.trajectory_id),
+                context_pack_id,
+                namespace.clone(),
+                repo.clone(),
+                task.clone(),
+                "messages",
+                model.clone(),
+                &route,
+                crate::litellm::exact_cache_decision("messages", &req, false),
+                context_pack_hash.clone(),
+            );
+            crate::litellm::add_agentic_os_metadata(&mut req, &retry_attempt);
+            finalizer =
+                crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), retry_attempt)
+                    .await;
+            let retry_started = std::time::Instant::now();
+            let retry_resp = match state
+                .http
+                .post(&url)
+                .bearer_auth(&state.litellm_key)
+                .json(&req)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    telemetry::record_upstream_litellm(
+                        "messages",
+                        retry_started.elapsed(),
+                        "error",
+                    );
+                    telemetry::record_upstream_litellm_error(
+                        "messages",
+                        telemetry::reqwest_error_kind(&e),
+                    );
+                    finalizer
+                        .finalize(
+                            crate::litellm::TerminalStatus::NetworkError,
+                            Some(telemetry::reqwest_error_kind(&e)),
+                            Some(&e.to_string()),
+                            crate::litellm::ProviderCacheCounters::default(),
+                        )
+                        .await;
+                    return anthropic_error(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "upstream LiteLLM retry failed",
+                    );
+                }
+            };
+            status = retry_resp.status();
+            telemetry::record_upstream_litellm(
+                "messages",
+                retry_started.elapsed(),
+                &status.as_u16().to_string(),
+            );
+            val = match retry_resp.json().await {
+                Ok(v) => v,
+                Err(_) => {
+                    telemetry::record_upstream_litellm_error("messages", "parse");
+                    finalizer
+                        .finalize(
+                            crate::litellm::TerminalStatus::ParseError,
+                            Some("parse"),
+                            Some("invalid upstream retry response"),
+                            crate::litellm::ProviderCacheCounters::default(),
+                        )
+                        .await;
+                    return anthropic_error(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "invalid upstream retry response",
+                    );
+                }
+            };
+        }
+    }
+
+    if !status.is_success() {
+        finalizer
+            .finalize(
+                crate::litellm::TerminalStatus::HttpError,
+                Some(telemetry::upstream_error_kind(status)),
+                Some("upstream returned non-success status"),
+                crate::litellm::ProviderCacheCounters::from_value(&val),
+            )
+            .await;
         return (status, axum::Json(val)).into_response();
     }
+    finalizer
+        .finalize(
+            crate::litellm::TerminalStatus::Success,
+            None,
+            None,
+            crate::litellm::ProviderCacheCounters::from_value(&val),
+        )
+        .await;
 
     let usage = TokenUsage::from_openai_value(&val);
     telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
@@ -2856,11 +3182,13 @@ async fn handle_streaming_anthropic(
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     request_event_id: Option<uuid::Uuid>,
     context_pack_id: Option<uuid::Uuid>,
+    mut finalizer: crate::litellm::LiteLlmCallFinalizer,
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
+    let mut req = req;
 
-    let started = std::time::Instant::now();
-    let upstream = match state
+    let started = finalizer.attempt_mut().started_at;
+    let mut upstream = match state
         .http_stream
         .post(&url)
         .bearer_auth(&state.litellm_key)
@@ -2886,6 +3214,14 @@ async fn handle_streaming_anthropic(
         Err(e) => {
             telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
             telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::NetworkError,
+                    Some(telemetry::reqwest_error_kind(&e)),
+                    Some(&e.to_string()),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
             return anthropic_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -2894,41 +3230,207 @@ async fn handle_streaming_anthropic(
         }
     };
 
-    if !upstream.status().is_success() {
-        return anthropic_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            format!("upstream returned {}", upstream.status()),
-        );
+    let upstream_status = upstream.status();
+    if !upstream_status.is_success() {
+        let body = upstream.text().await.unwrap_or_else(|e| {
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": format!("failed to read upstream error body: {e}")
+                }
+            })
+            .to_string()
+        });
+        if let Some(retry_max_tokens) = context_window_retry_max_tokens(&body) {
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::HttpError,
+                    Some(telemetry::upstream_error_kind(upstream_status)),
+                    Some("upstream returned non-success status"),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
+            tracing::warn!(
+                retry_max_tokens,
+                upstream_status = upstream_status.as_u16(),
+                "retrying streaming messages request with reduced max_tokens after context window error"
+            );
+            set_max_tokens(&mut req, retry_max_tokens);
+            let prior_attempt = finalizer.attempt_mut().clone();
+            let route = crate::litellm::RouteSelection {
+                routed_model: prior_attempt.routed_model.clone(),
+                selected_route: prior_attempt
+                    .selected_route
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                selection_reason: prior_attempt
+                    .selection_reason
+                    .clone()
+                    .unwrap_or_else(|| "default_model".to_string()),
+                policy_version: prior_attempt
+                    .policy_version
+                    .clone()
+                    .unwrap_or_else(|| "default-routing-v1".to_string()),
+            };
+            let retry_attempt = crate::litellm::new_attempt(
+                request_event_id,
+                trajectory.map(|trajectory| trajectory.trajectory_id),
+                context_pack_id,
+                namespace.clone(),
+                repo.clone(),
+                task.clone(),
+                "messages",
+                model.clone(),
+                &route,
+                crate::litellm::exact_cache_decision("messages", &req, false),
+                prior_attempt.context_pack_hash.clone(),
+            );
+            crate::litellm::add_agentic_os_metadata(&mut req, &retry_attempt);
+            finalizer =
+                crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), retry_attempt)
+                    .await;
+            let retry_started = std::time::Instant::now();
+            upstream = match state
+                .http_stream
+                .post(&url)
+                .bearer_auth(&state.litellm_key)
+                .json(&req)
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    let status = r.status();
+                    telemetry::record_upstream_litellm(
+                        "messages",
+                        retry_started.elapsed(),
+                        &status.as_u16().to_string(),
+                    );
+                    r
+                }
+                Err(e) => {
+                    telemetry::record_upstream_litellm(
+                        "messages",
+                        retry_started.elapsed(),
+                        "error",
+                    );
+                    telemetry::record_upstream_litellm_error(
+                        "messages",
+                        telemetry::reqwest_error_kind(&e),
+                    );
+                    finalizer
+                        .finalize(
+                            crate::litellm::TerminalStatus::NetworkError,
+                            Some(telemetry::reqwest_error_kind(&e)),
+                            Some(&e.to_string()),
+                            crate::litellm::ProviderCacheCounters::default(),
+                        )
+                        .await;
+                    return anthropic_error(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        format!("upstream retry unreachable: {e}"),
+                    );
+                }
+            };
+            if upstream.status().is_success() {
+                // Continue below with the successful retry stream.
+            } else {
+                let retry_status = upstream.status();
+                let retry_body = upstream.text().await.unwrap_or_else(|e| {
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("failed to read upstream retry error body: {e}")
+                        }
+                    })
+                    .to_string()
+                });
+                finalizer
+                    .finalize(
+                        crate::litellm::TerminalStatus::HttpError,
+                        Some(telemetry::upstream_error_kind(retry_status)),
+                        Some("upstream returned non-success status"),
+                        crate::litellm::ProviderCacheCounters::default(),
+                    )
+                    .await;
+                return (
+                    retry_status,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    retry_body,
+                )
+                    .into_response();
+            }
+        } else {
+            finalizer
+                .finalize(
+                    crate::litellm::TerminalStatus::HttpError,
+                    Some(telemetry::upstream_error_kind(upstream_status)),
+                    Some("upstream returned non-success status"),
+                    crate::litellm::ProviderCacheCounters::default(),
+                )
+                .await;
+            return (
+                upstream_status,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response();
+        }
     }
 
     let bytes_stream = upstream.bytes_stream();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     let accumulated = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let acc_clone = accumulated.clone();
+    let mut stream_finalizer = finalizer;
 
     // Proxy bytes verbatim — LiteLLM already returns Anthropic SSE format.
     let tapped = async_stream::stream! {
         tokio::pin!(bytes_stream);
         let mut stream_metrics = telemetry::StreamTracker::new("messages", started);
         let mut tx_opt = Some(done_tx);
+        let mut first_seen = false;
+        let mut first_token_at = None;
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(b) => {
-                    stream_metrics.first_token();
+                    if !first_seen && crate::litellm::sse_chunk_has_non_empty_data(&b) {
+                        first_seen = true;
+                        first_token_at = Some(std::time::Instant::now());
+                        stream_finalizer.attempt_mut().first_token_at = first_token_at;
+                        stream_metrics.first_token();
+                    }
                     if let Ok(mut g) = acc_clone.lock() { g.extend_from_slice(&b); }
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
                 Err(e) => {
                     stream_metrics.fail("upstream_error");
+                    stream_finalizer
+                        .finalize(
+                            crate::litellm::TerminalStatus::StreamError,
+                            Some("upstream_error"),
+                            Some(&e.to_string()),
+                            crate::litellm::ProviderCacheCounters::default(),
+                        )
+                        .await;
                     yield Err(std::io::Error::other(e));
                     return;
                 }
             }
         }
         stream_metrics.finish();
+        let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
+        let raw = String::from_utf8_lossy(&data);
+        let counters = crate::litellm::provider_counters_from_sse(&raw);
+        let mut done_finalizer = stream_finalizer.clone();
+        done_finalizer.attempt_mut().first_token_at = first_token_at;
+        done_finalizer.attempt_mut().completed_at = Some(std::time::Instant::now());
+        done_finalizer
+            .finalize(crate::litellm::TerminalStatus::Success, None, None, counters)
+            .await;
         if let Some(tx) = tx_opt.take() {
-            let data = acc_clone.lock().map(|g| g.clone()).unwrap_or_default();
             let _ = tx.send(data);
         }
     };
@@ -3038,6 +3540,27 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    // ── Auth headers ──────────────────────────────────────────────────
+
+    #[test]
+    fn provided_api_token_accepts_bearer_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer sk-test".parse().expect("valid header"),
+        );
+
+        assert_eq!(provided_api_token(&headers), "sk-test");
+    }
+
+    #[test]
+    fn provided_api_token_accepts_anthropic_x_api_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "sk-test".parse().expect("valid header"));
+
+        assert_eq!(provided_api_token(&headers), "sk-test");
+    }
 
     // ── inject_system_context ──────────────────────────────────────────
 
@@ -3290,6 +3813,66 @@ mod tests {
                 "client model '{client_model}' was not replaced"
             );
         }
+    }
+
+    #[test]
+    fn anthropic_sanitize_removes_local_backend_incompatible_params() {
+        let mut req = json!({
+            "model": "qwen36-27b",
+            "max_tokens": 1024,
+            "max_output_tokens": 1024,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "reasoning_effort": "high",
+            "context_management": {"edits": []},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        sanitize_anthropic_litellm_request(&mut req);
+
+        assert!(req.get("thinking").is_none());
+        assert!(req.get("max_output_tokens").is_none());
+        assert!(req.get("reasoning_effort").is_none());
+        assert!(req.get("context_management").is_none());
+        assert_eq!(req["max_tokens"], json!(1024));
+        assert_eq!(req["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn max_tokens_clamp_respects_explicit_small_values() {
+        let mut req = json!({
+            "model": "qwen36-27b",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        enforce_min_max_tokens(&mut req);
+
+        assert_eq!(req["max_tokens"], json!(1));
+    }
+
+    #[test]
+    fn max_tokens_clamp_defaults_missing_values() {
+        let mut req = json!({
+            "model": "qwen36-27b",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        enforce_min_max_tokens(&mut req);
+
+        assert_eq!(req["max_tokens"], json!(DEFAULT_MAX_TOKENS));
+    }
+
+    #[test]
+    fn max_tokens_clamp_caps_oversized_values() {
+        let mut req = json!({
+            "model": "qwen36-27b",
+            "max_tokens": MAX_MAX_TOKENS + 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        enforce_min_max_tokens(&mut req);
+
+        assert_eq!(req["max_tokens"], json!(MAX_MAX_TOKENS));
     }
 
     #[test]

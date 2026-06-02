@@ -49,6 +49,8 @@ services:
       DATABASE_URL: postgresql://agent:agentpass@postgres:5432/agentstack
       LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:?LITELLM_SALT_KEY must be set in .env - generate with: openssl rand -hex 32}"
       STORE_MODEL_IN_DB: "True"
+      AGENTIC_STRONG_PREFIX_CANARY_API_BASE: "${AGENTIC_STRONG_PREFIX_CANARY_API_BASE:-http://host.docker.internal:8001/v1}"
+      AGENTIC_STRONG_PREFIX_CANARY_API_KEY: "${AGENTIC_STRONG_PREFIX_CANARY_API_KEY:-local-key}"
     volumes:
       - ./litellm-config.yaml:/app/config.yaml:ro
     command:
@@ -132,6 +134,8 @@ services:
       EMBED_MODEL_PATH: /data/models/embed
       SENTIMENT_MODEL_PATH: /data/models/sentiment
       SENTIMENT_THRESHOLD: "${SENTIMENT_THRESHOLD:-0.70}"
+      PREFIX_CACHE_CANARY_ENABLED: "${PREFIX_CACHE_CANARY_ENABLED:-false}"
+      PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST: "${PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST:-}"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O- http://localhost:8088/health || false"]
       interval: 5s
