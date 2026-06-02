@@ -224,6 +224,8 @@ pub fn context_pack_event(
         "trajectory_id": trajectory.trajectory_id,
         "attempt_index": trajectory.attempt_index,
         "total_context_tokens": stats.context_tokens_estimate,
+        "stable_prefix_hash": stats.stable_prefix_hash,
+        "dynamic_tail_hash": stats.dynamic_tail_hash,
         "retrieved_event_ids": stats.retrieved_event_ids,
         "retrieval_strategy": "layered_rrf_decay",
         "semantic_hits": stats.retrieval_semantic_hits,

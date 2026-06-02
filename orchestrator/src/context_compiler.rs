@@ -31,9 +31,12 @@ impl<'a> ContextCompiler<'a> {
     }
 
     pub async fn compile(&self, request: CompilerRequest) -> CompilerOutput {
-        let mut artifacts = vec![compile_service_topology(&request)];
+        let mut artifacts = vec![
+            compile_service_topology(&request),
+            compile_repo_map(&request),
+        ];
 
-        if let Some(artifact) = artifacts.first() {
+        for artifact in &artifacts {
             record_ledger(
                 self.pool,
                 &request.repo,
@@ -41,7 +44,7 @@ impl<'a> ContextCompiler<'a> {
                 "runtime_config",
                 None,
                 "included",
-                "service topology is always included for stack awareness",
+                "static compiler artifact included for stack and repo awareness",
                 serde_json::json!({}),
             )
             .await;
@@ -52,16 +55,40 @@ impl<'a> ContextCompiler<'a> {
                 if let Some(artifact) =
                     context_artifacts::active_instruction_artifact(request.repo.clone(), &events)
                 {
+                    let included_event_ids = artifact_source_event_ids(&artifact);
+                    let mut seen_subjects = std::collections::HashSet::new();
                     for event in &events {
+                        let text = event
+                            .evidence
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or(&event.summary);
+                        let subject = context_artifacts::instruction_subject(text);
+                        let is_first_subject = seen_subjects.insert(subject);
+                        let included = included_event_ids.contains(&event.id);
+                        let (decision, reason) = if included && is_first_subject {
+                            (
+                                "included",
+                                "promoted newest explicit user instruction for this subject",
+                            )
+                        } else {
+                            (
+                                "superseded",
+                                "newer explicit user instruction for this subject was promoted",
+                            )
+                        };
                         record_ledger(
                             self.pool,
                             &request.repo,
                             &artifact,
                             "agent_events",
                             Some(&event.id),
-                            "included",
-                            "promoted recent explicit user instruction into active instruction artifact",
-                            serde_json::json!({"event_type": event.event_type}),
+                            decision,
+                            reason,
+                            serde_json::json!({
+                                "event_type": event.event_type,
+                                "subject": subject,
+                            }),
                         )
                         .await;
                     }
@@ -157,6 +184,23 @@ fn compile_service_topology(request: &CompilerRequest) -> ContextArtifact {
         summarizer_url: request.runtime.summarizer_url.clone(),
         summarizer_model: request.runtime.summarizer_model.clone(),
     })
+}
+
+fn compile_repo_map(request: &CompilerRequest) -> ContextArtifact {
+    context_artifacts::repo_map_artifact(context_artifacts::RepoMapInput {
+        repo: request.repo.clone(),
+    })
+}
+
+fn artifact_source_event_ids(artifact: &ContextArtifact) -> std::collections::HashSet<String> {
+    artifact
+        .source_event_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 async fn record_ledger(

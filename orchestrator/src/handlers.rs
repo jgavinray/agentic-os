@@ -1266,6 +1266,9 @@ async fn get_or_build_cached_context_inner(
     stats.truncated = context.contains("[truncated:");
     stats.context_chars = context.len();
     stats.context_tokens_estimate = db::estimate_tokens(&context);
+    let (stable_prefix_hash, dynamic_tail_hash) = crate::litellm::context_prefix_hashes(&context);
+    stats.stable_prefix_hash = stable_prefix_hash;
+    stats.dynamic_tail_hash = dynamic_tail_hash;
     stats.cache_hit = false;
 
     let cached = CachedContext {

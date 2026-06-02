@@ -78,6 +78,8 @@ pub struct ContextPackStats {
     pub build_ms: u64,
     pub context_chars: usize,
     pub context_tokens_estimate: usize,
+    pub stable_prefix_hash: Option<String>,
+    pub dynamic_tail_hash: Option<String>,
     pub l0_items_injected: usize,
     pub l1_items_injected: usize,
     pub l2_items_injected: usize,

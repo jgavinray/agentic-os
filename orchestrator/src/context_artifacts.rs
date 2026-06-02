@@ -29,6 +29,11 @@ pub struct ServiceTopologyInput {
     pub summarizer_model: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct RepoMapInput {
+    pub repo: String,
+}
+
 impl ContextArtifact {
     pub fn new(
         repo: String,
@@ -110,6 +115,72 @@ pub fn service_topology_artifact(input: ServiceTopologyInput) -> ContextArtifact
         rendered,
         invalidation_key,
         serde_json::json!(["compose.yaml", "litellm-config.yaml"]),
+    )
+}
+
+pub fn repo_map_artifact(input: RepoMapInput) -> ContextArtifact {
+    let modules = [
+        (
+            "orchestrator/src/handlers.rs",
+            "HTTP/API handlers, context injection, request persistence",
+        ),
+        (
+            "orchestrator/src/context_compiler.rs",
+            "central compiler orchestration and artifact promotion",
+        ),
+        (
+            "orchestrator/src/context_artifacts.rs",
+            "typed working-knowledge artifact builders",
+        ),
+        (
+            "orchestrator/src/db.rs",
+            "Postgres memory ledger, context queries, artifact storage",
+        ),
+        ("orchestrator/src/qdrant.rs", "semantic event index access"),
+        (
+            "orchestrator/src/summarizer.rs",
+            "background event summarization",
+        ),
+        (
+            "orchestrator/src/execution_feedback.rs",
+            "failure signatures and remediation events",
+        ),
+        (
+            "orchestrator/src/feature_extraction.rs",
+            "operational constraints and derived features",
+        ),
+        (
+            "orchestrator/src/litellm.rs",
+            "LiteLLM routing metadata and call ledger",
+        ),
+        ("compose.yaml", "local stack service wiring"),
+        ("litellm-config.yaml", "model routing configuration"),
+    ];
+    let rendered = modules
+        .iter()
+        .map(|(path, role)| format!("- {path}: {role}\n"))
+        .collect::<String>();
+    let compact = "Orchestrator modules: handlers, compiler, artifacts, db, qdrant, summarizer, execution feedback, feature extraction, LiteLLM routing.".to_string();
+    let raw = serde_json::json!({
+        "modules": modules
+            .iter()
+            .map(|(path, role)| serde_json::json!({"path": path, "role": role}))
+            .collect::<Vec<_>>(),
+    });
+    let source_file_paths = serde_json::json!(modules
+        .iter()
+        .map(|(path, _)| path.to_string())
+        .collect::<Vec<_>>());
+    let invalidation_key = stable_hash(&raw);
+    ContextArtifact::new(
+        input.repo,
+        "repo",
+        "repo_map",
+        Some(raw.to_string()),
+        compact,
+        rendered,
+        invalidation_key,
+        source_file_paths,
     )
 }
 
@@ -243,13 +314,18 @@ pub fn render_artifacts(artifacts: &[ContextArtifact]) -> String {
 
 fn active_instruction_lines(events: &[crate::db::AgentEvent]) -> Vec<String> {
     let mut lines = Vec::new();
-    for event in events.iter().rev() {
+    let mut subjects = std::collections::HashSet::new();
+    for event in events {
         let text = event
             .evidence
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&event.summary)
             .trim();
+        let subject = instruction_subject(text);
+        if !subjects.insert(subject) {
+            continue;
+        }
         let normalized = normalize_instruction(text);
         if normalized.is_empty() || lines.iter().any(|line| line == &normalized) {
             continue;
@@ -260,6 +336,28 @@ fn active_instruction_lines(events: &[crate::db::AgentEvent]) -> Vec<String> {
         }
     }
     lines
+}
+
+pub fn instruction_subject(text: &str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("model") || lower.contains("snowflake") || lower.contains("embedding") {
+        "model"
+    } else if lower.contains("config") || lower.contains("default") || lower.contains("explicit") {
+        "configuration"
+    } else if lower.contains("tool")
+        || lower.contains("python")
+        || lower.contains("perl")
+        || lower.contains("git apply")
+        || lower.contains("apply_patch")
+    {
+        "tooling"
+    } else if lower.contains("total recall") || lower.contains("memory") {
+        "memory"
+    } else if lower.contains("commit") || lower.contains("push") {
+        "git"
+    } else {
+        "general"
+    }
 }
 
 fn normalize_instruction(text: &str) -> String {
@@ -306,6 +404,16 @@ mod tests {
     }
 
     #[test]
+    fn repo_map_artifact_names_core_modules() {
+        let artifact = repo_map_artifact(RepoMapInput {
+            repo: "agentic-os".to_string(),
+        });
+        assert_eq!(artifact.artifact_type, "repo_map");
+        assert!(artifact.content_rendered.contains("context_compiler.rs"));
+        assert!(artifact.content_rendered.contains("db.rs"));
+    }
+
+    #[test]
     fn active_instruction_artifact_is_bounded_and_provenanced() {
         let mut event = crate::db::AgentEvent {
             id: "event-1".to_string(),
@@ -330,6 +438,25 @@ mod tests {
         assert_eq!(artifact.artifact_type, "active_instruction");
         assert_eq!(artifact.source_event_ids, serde_json::json!(["event-1"]));
         assert!(artifact.content_rendered.contains("Snowflake"));
+    }
+
+    #[test]
+    fn active_instruction_artifact_keeps_newest_instruction_per_subject() {
+        let old = test_event(
+            "old",
+            "user_message",
+            "Use the old embedding model.",
+            serde_json::json!({}),
+        );
+        let new = test_event(
+            "new",
+            "user_message",
+            "Use the Snowflake embedding model.",
+            serde_json::json!({}),
+        );
+        let artifact = active_instruction_artifact("agentic-os".to_string(), &[new, old]).unwrap();
+        assert!(artifact.content_rendered.contains("Snowflake"));
+        assert!(!artifact.content_rendered.contains("old embedding"));
     }
 
     #[test]
