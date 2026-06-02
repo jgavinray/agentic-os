@@ -1,0 +1,35 @@
+services:
+  total-recall:
+    # Required: point this at a Total Recall source that supports
+    # embedding.model_path and Snowflake/snowflake-arctic-embed-l-v2.0.
+    # Local validation example:
+    #   TOTAL_RECALL_BUILD_CONTEXT=./total-recall docker compose -f compose.total-recall.yaml up --build
+    build:
+      context: ${TOTAL_RECALL_BUILD_CONTEXT:?Set TOTAL_RECALL_BUILD_CONTEXT to a Total Recall source that includes Snowflake model_path support}
+    container_name: agent-total-recall
+    restart: unless-stopped
+    command:
+      - "--config"
+      - "/data/config.yaml"
+      - "serve"
+      - "--transport"
+      - "http"
+      - "--port"
+      - "8811"
+      - "--host"
+      - "0.0.0.0"
+    ports:
+      - "${TOTAL_RECALL_PORT:-8811}:8811"
+    volumes:
+      - ./total-recall-config.yaml:/data/config.yaml:ro
+      - ./data/total-recall:/data/memory
+      - ./models/embed:/data/models/embed:ro
+      - ./data/total-recall-logs:/data/logs
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8811; printf \"GET /mcp HTTP/1.1\\r\\nHost: localhost\\r\\nAccept: text/event-stream\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r line <&3; case \"$$line\" in *200*|*400*|*405*) exit 0;; *) exit 1;; esac'"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s

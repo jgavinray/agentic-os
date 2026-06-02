@@ -1160,6 +1160,18 @@ async fn get_or_build_cached_context_inner(
     evidence.operational_constraints = constraints;
     let errors = errors_result.unwrap_or_default();
     let memories = evidence.memories();
+    let compiler_output = crate::context_compiler::ContextCompiler::new(&state.pool)
+        .compile(crate::context_compiler::CompilerRequest {
+            repo: repo.to_string(),
+            runtime: crate::context_compiler::RuntimeContext {
+                default_model: state.default_model.clone(),
+                litellm_url: state.litellm_url.clone(),
+                qdrant_url: state.qdrant_url.clone(),
+                summarizer_url: state.summarizer_url.clone(),
+                summarizer_model: state.summarizer_model.clone(),
+            },
+        })
+        .await;
     let (context, mut stats) = db::build_layered_context(
         repo,
         task,
@@ -1170,6 +1182,12 @@ async fn get_or_build_cached_context_inner(
         task_config.char_budget,
         state.failure_history_token_budget * 4,
     );
+    let artifact_context = crate::context_compiler::render(&compiler_output);
+    let context = if artifact_context.is_empty() {
+        context
+    } else {
+        format!("{artifact_context}{context}")
+    };
     stats.build_ms = build_started.elapsed().as_millis() as u64;
     stats.retrieval_semantic_hits = hybrid_result.semantic_hits;
     stats.retrieval_fts_hits = hybrid_result.fts_hits;
@@ -1186,6 +1204,8 @@ async fn get_or_build_cached_context_inner(
         .collect();
     stats.token_budget = task_config.char_budget / 4;
     stats.truncated = context.contains("[truncated:");
+    stats.context_chars = context.len();
+    stats.context_tokens_estimate = db::estimate_tokens(&context);
     stats.cache_hit = false;
 
     let cached = CachedContext {

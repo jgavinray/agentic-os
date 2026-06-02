@@ -1,4 +1,6 @@
 pub mod anthropic;
+pub mod context_artifacts;
+pub mod context_compiler;
 pub mod context_ledger;
 pub mod db;
 pub mod embedder;

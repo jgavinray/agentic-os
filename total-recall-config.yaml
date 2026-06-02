@@ -1,0 +1,24 @@
+memory_dir: /data/memory
+db_path: /data/memory/memory.db
+
+logging:
+  level: info
+  file: /data/logs/server.log
+  max_size_mb: 10
+  backup_count: 3
+
+embedding:
+  model: Snowflake/snowflake-arctic-embed-l-v2.0
+  model_path: /data/models/embed
+  dimension: 1024
+  cache_dir: /data/models/embed
+
+search:
+  default_limit: 10
+  max_limit: 100
+  similarity_threshold: 0.7
+
+mcp:
+  enabled: true
+  stdio: false
+  timeout_seconds: 30
