@@ -33,11 +33,38 @@ impl<'a> ContextCompiler<'a> {
     pub async fn compile(&self, request: CompilerRequest) -> CompilerOutput {
         let mut artifacts = vec![compile_service_topology(&request)];
 
+        if let Some(artifact) = artifacts.first() {
+            record_ledger(
+                self.pool,
+                &request.repo,
+                artifact,
+                "runtime_config",
+                None,
+                "included",
+                "service topology is always included for stack awareness",
+                serde_json::json!({}),
+            )
+            .await;
+        }
+
         match db::get_recent_instruction_candidates(self.pool, &request.repo, 25).await {
             Ok(events) => {
                 if let Some(artifact) =
                     context_artifacts::active_instruction_artifact(request.repo.clone(), &events)
                 {
+                    for event in &events {
+                        record_ledger(
+                            self.pool,
+                            &request.repo,
+                            &artifact,
+                            "agent_events",
+                            Some(&event.id),
+                            "included",
+                            "promoted recent explicit user instruction into active instruction artifact",
+                            serde_json::json!({"event_type": event.event_type}),
+                        )
+                        .await;
+                    }
                     artifacts.push(artifact);
                 }
             }
@@ -46,6 +73,51 @@ impl<'a> ContextCompiler<'a> {
                     target: "context_compiler",
                     repo = %request.repo,
                     "failed to fetch instruction candidates: {e}"
+                );
+            }
+        }
+
+        match db::get_recent_failure_history(self.pool, &request.repo, 12).await {
+            Ok(items) => {
+                if let Some(artifact) =
+                    context_artifacts::failure_history_artifact(request.repo.clone(), &items)
+                {
+                    for item in &items {
+                        let (decision, reason) = if item.remediation.is_some() {
+                            (
+                                "included",
+                                "promoted resolved failure/remediation pair into failure history artifact",
+                            )
+                        } else {
+                            (
+                                "suppressed",
+                                "failure has no known remediation and remains raw recent evidence",
+                            )
+                        };
+                        record_ledger(
+                            self.pool,
+                            &request.repo,
+                            &artifact,
+                            "agent_events",
+                            Some(&item.failure.id),
+                            decision,
+                            reason,
+                            serde_json::json!({
+                                "signature": item.signature,
+                                "category": item.category,
+                                "remediation_event_id": item.remediation.as_ref().map(|event| event.id.clone()),
+                            }),
+                        )
+                        .await;
+                    }
+                    artifacts.push(artifact);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "context_compiler",
+                    repo = %request.repo,
+                    "failed to fetch recent failure history: {e}"
                 );
             }
         }
@@ -85,6 +157,38 @@ fn compile_service_topology(request: &CompilerRequest) -> ContextArtifact {
         summarizer_url: request.runtime.summarizer_url.clone(),
         summarizer_model: request.runtime.summarizer_model.clone(),
     })
+}
+
+async fn record_ledger(
+    pool: &deadpool_postgres::Pool,
+    repo: &str,
+    artifact: &ContextArtifact,
+    candidate_source: &str,
+    candidate_id: Option<&str>,
+    decision: &str,
+    reason: &str,
+    metadata: serde_json::Value,
+) {
+    if let Err(e) = db::insert_context_compiler_ledger_entry(
+        pool,
+        repo,
+        &artifact.artifact_type,
+        candidate_source,
+        candidate_id,
+        decision,
+        reason,
+        Some(artifact.id),
+        metadata,
+    )
+    .await
+    {
+        tracing::warn!(
+            target: "context_compiler",
+            repo = %repo,
+            artifact_type = %artifact.artifact_type,
+            "failed to write compiler ledger entry: {e}"
+        );
+    }
 }
 
 pub fn render(output: &CompilerOutput) -> String {

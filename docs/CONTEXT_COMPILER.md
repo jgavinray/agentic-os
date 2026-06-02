@@ -387,6 +387,28 @@ The compiler should explicitly record why a candidate was included, suppressed,
 or superseded. That ledger is how we keep the system inspectable as learned
 ranking is added.
 
+## Diagnostics
+
+The orchestrator exposes compiler state through:
+
+```text
+GET /context/artifacts?repo=<repo>&limit=25&ledger_limit=50
+```
+
+The response includes:
+
+- current and recent `context_artifacts`
+- recent `context_compiler_ledger` decisions
+- artifact provenance through source event IDs and source file paths
+- inclusion/suppression reasons for promoted candidates
+
+This endpoint is intentionally operational. It lets an operator answer:
+
+- which working-knowledge artifacts are active
+- which memory candidates were promoted
+- which candidates were suppressed or dropped
+- whether the compiler is improving prompt signal or just adding context
+
 ## First Milestone
 
 The first value-bearing slice is a `service_topology` artifact compiled from
@@ -435,6 +457,15 @@ The first useful slice must satisfy these criteria:
 The service-topology artifact meets that bar because local-stack failures often
 come from endpoint, model, or service wiring. The model should know that wiring
 before it starts interpreting logs.
+
+The next implemented slices are:
+
+- `active_instruction`: recent explicit user instructions from Agentic OS
+  Postgres promoted into bounded working context.
+- `failure_history`: resolved failure/remediation pairs promoted from
+  execution-feedback events.
+- `context_compiler_ledger`: inclusion and suppression records for compiler
+  decisions.
 
 ## Total Recall Deployment
 
@@ -489,11 +520,9 @@ Agentic OS ledger does not already contain.
 
 ## Future Milestones
 
-1. Add `/context/artifacts` diagnostics so operators can inspect active,
-   superseded, and dropped artifacts.
-2. Add `repo_map` artifacts from source tree and manifest scans.
-3. Add Total Recall ingestion for episodic observations.
-4. Add status resolution for active/superseded user instructions.
-5. Add failure/remediation artifact extraction from trajectory events.
-6. Add ranking features and, later, XGBoost-based inclusion scoring.
-7. Split prompt hashes into stable-prefix hash and dynamic-tail hash.
+1. Add `repo_map` artifacts from source tree and manifest scans.
+2. Add Total Recall ingestion for external episodic observations.
+3. Add status resolution for active/superseded user instructions.
+4. Add stronger failure/remediation resolution from full trajectory chains.
+5. Add ranking features and, later, XGBoost-based inclusion scoring.
+6. Split prompt hashes into stable-prefix hash and dynamic-tail hash.
