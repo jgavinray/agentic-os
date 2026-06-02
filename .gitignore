@@ -27,6 +27,7 @@ Cargo.lock
 *.rlib
 
 # Workspace directories
+total-recall/
 workspace/
 workspace/*
 !/workspace/.gitkeep
