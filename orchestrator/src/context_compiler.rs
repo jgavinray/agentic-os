@@ -5,6 +5,7 @@ use crate::db;
 pub struct CompilerRequest {
     pub repo: String,
     pub task: String,
+    pub session_id: Option<String>,
     pub runtime: RuntimeContext,
 }
 
@@ -149,6 +150,74 @@ impl<'a> ContextCompiler<'a> {
                     repo = %request.repo,
                     "failed to fetch recent failure history: {e}"
                 );
+            }
+        }
+
+        match db::get_recent_repo_decision_candidates(self.pool, &request.repo, 12).await {
+            Ok(events) => {
+                if let Some(artifact) =
+                    context_artifacts::repo_decisions_artifact(request.repo.clone(), &events)
+                {
+                    for event in &events {
+                        record_ledger(
+                            self.pool,
+                            &request.repo,
+                            &artifact,
+                            "agent_events",
+                            Some(&event.id),
+                            "included",
+                            "promoted repository decision candidate into repo_decisions artifact",
+                            serde_json::json!({"event_type": event.event_type}),
+                        )
+                        .await;
+                    }
+                    artifacts.push(artifact);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "context_compiler",
+                    repo = %request.repo,
+                    "failed to fetch repo decision candidates: {e}"
+                );
+            }
+        }
+
+        if let Some(session_id) = request.session_id.as_deref() {
+            match db::get_recent_session_events(self.pool, session_id, 8).await {
+                Ok(events) => {
+                    if let Some(artifact) = context_artifacts::session_state_artifact(
+                        request.repo.clone(),
+                        session_id,
+                        &events,
+                    ) {
+                        for event in &events {
+                            record_ledger(
+                                self.pool,
+                                &request.repo,
+                                &artifact,
+                                "agent_events",
+                                Some(&event.id),
+                                "included",
+                                "promoted active session event into session_state artifact",
+                                serde_json::json!({
+                                    "event_type": event.event_type,
+                                    "session_id": session_id,
+                                }),
+                            )
+                            .await;
+                        }
+                        artifacts.push(artifact);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "context_compiler",
+                        repo = %request.repo,
+                        session_id = %session_id,
+                        "failed to fetch session state candidates: {e}"
+                    );
+                }
             }
         }
 
@@ -309,6 +378,7 @@ mod tests {
         let request = CompilerRequest {
             repo: "agentic-os".to_string(),
             task: "debug compiler".to_string(),
+            session_id: None,
             runtime: RuntimeContext {
                 default_model: "qwen36-35b-a3b".to_string(),
                 litellm_url: "http://litellm:4000/v1".to_string(),

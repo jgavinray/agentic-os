@@ -1224,6 +1224,7 @@ async fn get_or_build_cached_context_inner(
         .compile(crate::context_compiler::CompilerRequest {
             repo: repo.to_string(),
             task: task.to_string(),
+            session_id: session_id.map(str::to_string),
             runtime: crate::context_compiler::RuntimeContext {
                 default_model: state.default_model.clone(),
                 litellm_url: state.litellm_url.clone(),

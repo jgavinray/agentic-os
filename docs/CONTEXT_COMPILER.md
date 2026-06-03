@@ -460,14 +460,21 @@ before it starts interpreting logs.
 
 The next implemented slices are:
 
+- `repo_map`: stable map of core orchestrator modules and their roles.
 - `active_instruction`: recent explicit user instructions from Agentic OS
   Postgres promoted into bounded working context.
 - `failure_history`: resolved failure/remediation pairs promoted from
   execution-feedback events.
 - `durable_project_memory`: optional Total Recall notes promoted through the
   explicit HTTP API when `TOTAL_RECALL_URL` is configured.
+- `repo_decisions`: recent decision/checkpoint candidates promoted from the
+  Agentic OS event ledger.
+- `session_state`: recent active-session events promoted when a session ID is
+  available.
 - `context_compiler_ledger`: inclusion and suppression records for compiler
   decisions.
+- `stable_prefix_hash` and `dynamic_tail_hash`: separate context-pack hashes
+  for inspecting cacheable compiler prefix stability.
 
 ## Total Recall Deployment
 
@@ -532,6 +539,5 @@ Agentic OS ledger does not already contain.
 
 ## Future Milestones
 
-1. Add `repo_map` artifacts from source tree and manifest scans.
-2. Add stronger failure/remediation resolution from full trajectory chains.
-3. Add ranking features and, later, XGBoost-based inclusion scoring.
+1. Add learned ranking after enough compiler-ledger and outcome data exists.
+2. Add stronger learned suppression for noisy decision/session candidates.
