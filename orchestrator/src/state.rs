@@ -442,6 +442,8 @@ impl TokenUsage {
 pub struct AppState {
     /// Postgres connection pool
     pub pool: Pool,
+    /// Optional isolated raw client capture database pool.
+    pub capture_pool: Option<Pool>,
     /// Optional CPU sentiment classifier for detecting negative user feedback.
     pub sentiment: Option<Arc<crate::sentiment::SentimentClassifier>>,
     /// Qdrant base URL
