@@ -3,8 +3,9 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use orchestrator::{
-    db, embedder, feature_extraction, handlers, harness_feedback, logging, migrations, qdrant,
-    rate_limit, request_classification, sampling, sentiment, state, summarizer, telemetry,
+    client_capture, db, embedder, feature_extraction, handlers, harness_feedback, logging,
+    migrations, qdrant, rate_limit, request_classification, sampling, sentiment, state, summarizer,
+    telemetry,
 };
 use std::env;
 use std::sync::Arc;
@@ -20,6 +21,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let prometheus = telemetry::install_recorder()?;
 
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let capture_db_url = env::var("CAPTURE_DATABASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let qdrant_url = env::var("QDRANT_URL").expect("QDRANT_URL must be set");
     let litellm_url = env::var("LITELLM_URL")
         .expect("LITELLM_URL must be set")
@@ -157,6 +162,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
+    let capture_pool = if let Some(url) = capture_db_url.as_deref() {
+        let pool = db::create_pool(url)?;
+        client_capture::init(&pool).await?;
+        Some(pool)
+    } else {
+        None
+    };
     let single_writer = db::acquire_single_writer_lock(&pool).await?;
     migrations::run(&pool).await?;
     if execution_feedback_enabled {
@@ -205,6 +217,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let state = Arc::new(AppState {
         pool,
+        capture_pool,
         sentiment: sentiment_classifier,
         qdrant_url: qdrant_url.clone(),
         litellm_url,

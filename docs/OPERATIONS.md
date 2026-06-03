@@ -46,6 +46,19 @@ Every LiteLLM call ledger row records `reasoning_policy` and
 `reasoning_policy_source` so output quality, latency, cache behavior, and token
 usage can be compared by policy.
 
+## Raw Client Capture
+
+Raw protocol capture is stored outside the operational memory database. Set
+`CAPTURE_DATABASE_URL` to enable it; the default compose stack points this at
+`agentstack_capture` on the local Postgres service. Captures are append-only rows
+in `raw_http_exchanges` containing raw request headers, exact request body
+bytes, parsed request JSON when available, forwarded request body bytes, response
+status, response headers, and raw response/SSE bytes.
+
+This capture database is evidence for harness development, not context memory.
+The context compiler does not read from it. Derive bounded features from capture
+rows later when building classifiers or debugging Claude Code compatibility.
+
 ## Migrations
 
 Schema migrations are embedded with refinery from `orchestrator/migrations/`. The first migration is the baseline schema. On legacy databases created by the old bootstrap DDL, the orchestrator detects the existing tables and marks the baseline as applied without rerunning it.
@@ -173,6 +186,7 @@ Optional:
 | `PREFIX_CACHE_CANARY_ENABLED` | `false` | Enables namespace-allowlisted routing from `agentic/strong` to `agentic/strong-prefix-canary`. |
 | `PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST` | unset | Comma-separated namespaces eligible for canary routing. |
 | `VLLM_METRICS_URL` | unset | Prometheus metrics URL for the active vLLM backend. When set, the orchestrator records per-call prefix-cache deltas. |
+| `CAPTURE_DATABASE_URL` | `postgresql://agent:agentpass@postgres:5432/agentstack_capture` | Isolated Postgres database for raw client/orchestrator protocol captures. Unset to disable capture. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |

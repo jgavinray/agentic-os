@@ -105,3 +105,12 @@ Use repeated `context_pack_hash` values to compare normal traffic with `agentic/
 LiteLLM exact response-cache hit rate is separate from provider prefix/KV cache hit rate. agentic-os records policy and context facts; it does not manage backend KV cache.
 
 When `VLLM_METRICS_URL` is configured, `vllm_cache_observations` stores per-call vLLM cache deltas next to request token counts and provider cache counters. Use this table to compare what the client sees with what vLLM reports: cache reads are real only when vLLM reports cached prompt tokens, local-cache-hit tokens, or external-KV-transfer tokens. Local-compute tokens are prefill work, not provider cache creation.
+
+## Raw Capture Database
+
+`agentstack_capture.raw_http_exchanges` stores raw request/response evidence for
+Claude Code and other local clients when `CAPTURE_DATABASE_URL` is configured.
+It is intentionally separate from `agentstack`: raw capture rows are not memory
+events, are not summarized, and are not injected into context packs. Use them to
+derive request-shape features, compare raw client payloads with forwarded
+payloads, and inspect response/SSE fields.

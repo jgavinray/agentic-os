@@ -1581,6 +1581,13 @@ pub async fn checkpoint(
 // ── Chat completions ────────────────────────────────────────────
 
 /// Return an Anthropic-shaped error response.
+fn anthropic_error_value(error_type: &'static str, message: impl Into<String>) -> Value {
+    serde_json::json!({
+        "type": "error",
+        "error": {"type": error_type, "message": message.into()}
+    })
+}
+
 fn anthropic_error(
     status: StatusCode,
     error_type: &'static str,
@@ -1588,10 +1595,7 @@ fn anthropic_error(
 ) -> Response {
     (
         status,
-        axum::Json(serde_json::json!({
-            "type": "error",
-            "error": {"type": error_type, "message": message.into()}
-        })),
+        axum::Json(anthropic_error_value(error_type, message)),
     )
         .into_response()
 }
@@ -2667,18 +2671,76 @@ fn anthropic_cache_usage_sse_event(counters: crate::litellm::ProviderCacheCounte
     )
 }
 
-#[tracing::instrument(name = "handler.chat_completions", skip(state, headers, payload))]
+async fn record_client_capture(state: &AppState, capture: crate::client_capture::RawHttpCapture) {
+    let Some(pool) = state.capture_pool.as_ref() else {
+        return;
+    };
+    if let Err(e) = crate::client_capture::record(pool, &capture).await {
+        tracing::warn!(
+            exchange_id = %capture.exchange_id,
+            endpoint = %capture.endpoint,
+            "failed to record raw client capture: {e}"
+        );
+    }
+}
+
+async fn record_client_capture_response(
+    state: &AppState,
+    mut capture: crate::client_capture::RawHttpCapture,
+    status: StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) {
+    capture.response_status = Some(status.as_u16() as i32);
+    capture.response_headers = Some(serde_json::json!({"content-type": [content_type]}));
+    capture.raw_response_body = Some(body);
+    record_client_capture(state, capture).await;
+}
+
+#[tracing::instrument(name = "handler.chat_completions", skip(state, headers, body))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<Value>,
+    body: Bytes,
 ) -> Response {
+    let raw_client_body = body.to_vec();
+    let mut capture = crate::client_capture::RawHttpCapture::new(
+        "chat/completions",
+        &headers,
+        raw_client_body.clone(),
+    );
+    let payload: Value = match serde_json::from_slice(&raw_client_body) {
+        Ok(payload) => payload,
+        Err(e) => {
+            let body = serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": format!("invalid JSON request body: {e}")
+                }
+            });
+            record_client_capture_response(
+                &state,
+                capture,
+                StatusCode::BAD_REQUEST,
+                "application/json",
+                crate::client_capture::to_json_bytes(&body),
+            )
+            .await;
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+    };
+    capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
-        return (
+        let body = serde_json::json!({"error": "unauthorized"});
+        record_client_capture_response(
+            &state,
+            capture,
             StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
+            "application/json",
+            crate::client_capture::to_json_bytes(&body),
         )
-            .into_response();
+        .await;
+        return (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
     };
     if let Some(response) = check_rate_limit(&state, &caller_token) {
         return response;
@@ -2702,6 +2764,9 @@ pub async fn chat_completions(
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
     tracing::info!(repo = %repo, task = %task, "routing request");
+    capture.namespace = Some(namespace.clone());
+    capture.repo = Some(repo.clone());
+    capture.task = Some(task.clone());
 
     let requested_model = payload
         .get("model")
@@ -2801,7 +2866,9 @@ pub async fn chat_completions(
         context_pack_hash.clone(),
     );
     add_local_reasoning_metadata(&mut attempt, reasoning_selection);
+    capture.attempt_id = Some(attempt.attempt_id);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
+    capture.forwarded_request_body = Some(crate::client_capture::to_json_bytes(&req));
     let vllm_cache_before = vllm_cache_snapshot(&state).await;
     let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
@@ -2822,6 +2889,7 @@ pub async fn chat_completions(
             user_content,
             finalizer,
             vllm_cache_before,
+            capture,
         )
         .await;
     }
@@ -2829,6 +2897,11 @@ pub async fn chat_completions(
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &req, &finalizer).await {
         Ok((val, latency_ms)) => {
+            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
+            capture.response_headers =
+                Some(serde_json::json!({"content-type": ["application/json"]}));
+            capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
+            record_client_capture(&state, capture).await;
             let usage = TokenUsage::from_openai_value(&val);
             let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
             record_vllm_cache_observation(
@@ -2954,8 +3027,10 @@ async fn handle_streaming(
     user_content: String,
     mut finalizer: crate::litellm::LiteLlmCallFinalizer,
     vllm_cache_before: Option<(String, crate::vllm_metrics::VllmCacheSnapshot)>,
+    capture: crate::client_capture::RawHttpCapture,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
+    let mut capture = capture;
 
     let started = finalizer.attempt_mut().started_at;
     let upstream = match state
@@ -3081,6 +3156,11 @@ async fn handle_streaming(
     let state_bg = state.clone();
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
+            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
+            capture.response_headers =
+                Some(serde_json::json!({"content-type": ["text/event-stream"]}));
+            capture.raw_response_body = Some(raw_bytes.clone());
+            record_client_capture(&state_bg, capture).await;
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_sse(&raw);
             let provider_cache = crate::litellm::provider_counters_from_sse(&raw);
@@ -3193,13 +3273,48 @@ async fn handle_streaming(
 
 // ── Anthropic /v1/messages ──────────────────────────────────────
 
-#[tracing::instrument(name = "handler.messages", skip(state, headers, payload))]
+#[tracing::instrument(name = "handler.messages", skip(state, headers, body))]
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<Value>,
+    body: Bytes,
 ) -> Response {
+    let raw_client_body = body.to_vec();
+    let mut capture =
+        crate::client_capture::RawHttpCapture::new("messages", &headers, raw_client_body.clone());
+    let payload: Value = match serde_json::from_slice(&raw_client_body) {
+        Ok(payload) => payload,
+        Err(e) => {
+            let body = anthropic_error_value(
+                "invalid_request_error",
+                format!("invalid JSON request body: {e}"),
+            );
+            record_client_capture_response(
+                &state,
+                capture,
+                StatusCode::BAD_REQUEST,
+                "application/json",
+                crate::client_capture::to_json_bytes(&body),
+            )
+            .await;
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("invalid JSON request body: {e}"),
+            );
+        }
+    };
+    capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
+        let body = anthropic_error_value("authentication_error", "invalid or missing API key");
+        record_client_capture_response(
+            &state,
+            capture,
+            StatusCode::UNAUTHORIZED,
+            "application/json",
+            crate::client_capture::to_json_bytes(&body),
+        )
+        .await;
         return anthropic_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
@@ -3226,6 +3341,9 @@ pub async fn messages(
         .map(str::to_string)
         .unwrap_or_else(|| state.default_task.clone());
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
+    capture.namespace = Some(namespace.clone());
+    capture.repo = Some(repo.clone());
+    capture.task = Some(task.clone());
 
     let user_content = anthropic::extract_user_content_from_anthropic(&payload);
     if let Some(response) =
@@ -3315,7 +3433,9 @@ pub async fn messages(
         context_pack_hash.clone(),
     );
     add_local_reasoning_metadata(&mut attempt, reasoning_selection);
+    capture.attempt_id = Some(attempt.attempt_id);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
+    capture.forwarded_request_body = Some(crate::client_capture::to_json_bytes(&req));
     let vllm_cache_before = vllm_cache_snapshot(&state).await;
     let mut finalizer =
         crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
@@ -3337,6 +3457,7 @@ pub async fn messages(
             context_pack_id,
             finalizer,
             vllm_cache_before,
+            capture,
         )
         .await;
     }
@@ -3540,6 +3661,10 @@ pub async fn messages(
     .await;
     let provider_cache = merge_provider_cache_from_vllm_delta(provider_cache, vllm_delta);
     inject_anthropic_cache_usage(&mut val, provider_cache);
+    capture.response_status = Some(StatusCode::OK.as_u16() as i32);
+    capture.response_headers = Some(serde_json::json!({"content-type": ["application/json"]}));
+    capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
+    record_client_capture(&state, capture).await;
     telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
     if !usage.is_empty() {
         let pool = state.pool.clone();
@@ -3644,9 +3769,11 @@ async fn handle_streaming_anthropic(
     context_pack_id: Option<uuid::Uuid>,
     mut finalizer: crate::litellm::LiteLlmCallFinalizer,
     vllm_cache_before: Option<(String, crate::vllm_metrics::VllmCacheSnapshot)>,
+    capture: crate::client_capture::RawHttpCapture,
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
     let mut req = req;
+    let mut capture = capture;
 
     let started = finalizer.attempt_mut().started_at;
     let mut upstream = match state
@@ -3922,6 +4049,11 @@ async fn handle_streaming_anthropic(
     let state_bg = state.clone();
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
+            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
+            capture.response_headers =
+                Some(serde_json::json!({"content-type": ["text/event-stream"]}));
+            capture.raw_response_body = Some(raw_bytes.clone());
+            record_client_capture(&state_bg, capture).await;
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_anthropic_sse(&raw);
             telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
