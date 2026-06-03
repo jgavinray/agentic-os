@@ -23,3 +23,4 @@ pub mod telemetry;
 pub mod tool_mediation;
 pub mod total_recall;
 pub mod trajectory;
+pub mod vllm_metrics;

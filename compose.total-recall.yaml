@@ -5,7 +5,7 @@ services:
     # Local validation example:
     #   TOTAL_RECALL_BUILD_CONTEXT=./total-recall docker compose -f compose.total-recall.yaml up --build
     build:
-      context: ${TOTAL_RECALL_BUILD_CONTEXT:?Set TOTAL_RECALL_BUILD_CONTEXT to a Total Recall source that includes Snowflake model_path support}
+      context: ${TOTAL_RECALL_BUILD_CONTEXT:-./total-recall}
     container_name: agent-total-recall
     restart: unless-stopped
     command:

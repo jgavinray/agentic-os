@@ -42,6 +42,8 @@
 | `context_pack_items_injected_total` | counter | `layer` | Injected L0/L1/L2/L3/failure/remediation/failure_history/operational_constraints items. |
 | `retrieval_hits_total` | counter | `source` | Semantic, FTS, and deduped retrieval hits. |
 | `inference_tokens_total` | counter | `kind`, `model` | Processed, cached, and generated tokens. |
+| `vllm_prefix_cache_tokens_total` | counter | `kind`, `model` | vLLM prefix-cache query and hit token deltas observed around model calls. |
+| `vllm_prompt_tokens_by_cache_source_total` | counter | `source`, `model` | vLLM prompt-token source deltas: total, cached, local compute, local cache hit, and external KV transfer. |
 | `context_cache_stale_invalidations_total` | counter | none | Deprecated cache invalidation counter retained for compatibility. Stale-while-revalidate no longer deletes cached packs on memory writes. |
 | `execution_artifacts_total` | counter | `event_type`, `success` | Structured execution artifact events written. |
 | `failure_signatures_total` | counter | `signature`, `category` | Canonical failure fingerprints recorded inline on failed outcome events. |
@@ -95,3 +97,5 @@ Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM,
 Use repeated `context_pack_hash` values to compare normal traffic with `agentic/strong-prefix-canary` traffic. Prefix-cache ROI should be judged primarily by p95 `first_token_ms` reduction, then p50 TTFT, p95 total latency, provider cache read/created tokens, output tokens, error rate, fallback count, and backend throughput if the model server exposes it.
 
 LiteLLM exact response-cache hit rate is separate from provider prefix/KV cache hit rate. agentic-os records policy and context facts; it does not manage backend KV cache.
+
+When `VLLM_METRICS_URL` is configured, `vllm_cache_observations` stores per-call vLLM cache deltas next to request token counts and provider cache counters. Use this table to compare what the client sees with what vLLM reports: cache reads are real only when vLLM reports cached prompt tokens, local-cache-hit tokens, or external-KV-transfer tokens. Local-compute tokens are prefill work, not provider cache creation.

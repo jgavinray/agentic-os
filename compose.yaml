@@ -1,3 +1,6 @@
+include:
+  - compose.total-recall.yaml
+
 services:
   postgres:
     # Pinned from postgres:16 on 2026-05-18.
@@ -118,19 +121,20 @@ services:
       LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
       API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001;sk-agent-clean-002,agent-os-clean-002;sk-crusoe,crusoe
-      DEFAULT_MODEL: qwen36-35b-a3b
+      DEFAULT_MODEL: qwen36-35b-heretic
       DEFAULT_TASK: engineering
       SUMMARIZER_ENABLED: "${SUMMARIZER_ENABLED:-true}"
       SUMMARIZER_BASE_URL: "${SUMMARIZER_BASE_URL:-http://summarizer:8080/v1}"
       SUMMARIZER_MODEL: "${SUMMARIZER_MODEL:-qwen2.5-3b-instruct-q4_k_m}"
-      TOTAL_RECALL_URL: "${TOTAL_RECALL_URL:-}"
+      TOTAL_RECALL_URL: "${TOTAL_RECALL_URL:-http://total-recall:8811}"
+      VLLM_METRICS_URL: "${VLLM_METRICS_URL:-http://192.168.0.33:8000/metrics}"
       SUMMARIZER_MAX_TOKENS: "${SUMMARIZER_MAX_TOKENS:-384}"
       BACKGROUND_WORK_CONCURRENCY: "${BACKGROUND_WORK_CONCURRENCY:-4}"
       CONTEXT_CACHE_TTL_MS: "${CONTEXT_CACHE_TTL_MS:-300000}"
       CONTEXT_DECAY_RATE: "${CONTEXT_DECAY_RATE:-0.006}"
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-60}"
       RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-30}"
-      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:8088,http://127.0.0.1:8088}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       EMBED_MODEL_PATH: /data/models/embed
       SENTIMENT_MODEL_PATH: /data/models/sentiment

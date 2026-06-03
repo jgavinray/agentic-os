@@ -30,6 +30,8 @@ LiteLLM exact response cache and model-server prefix/KV cache are different syst
 
 Judge prefix-cache ROI with repeated `context_pack_hash` values. Primary metric is p95 `first_token_ms` reduction. Secondary checks are p50 `first_token_ms`, p95 `total_latency_ms`, provider cache read/created token counters, output tokens, error rate, fallback count, and backend GPU throughput when available. Exact response-cache hit rate is separate from provider prefix-cache hit rate.
 
+When `VLLM_METRICS_URL` is set, the orchestrator snapshots vLLM Prometheus cache counters around model calls and records deltas in `vllm_cache_observations`. `/cache/stats` includes both context-cache stats and vLLM prefix-cache stats. See `docs/VLLM_PREFIX_CACHE.md` for the current Heretic/Qwen3.6 diagnosis and remediation paths.
+
 ## Migrations
 
 Schema migrations are embedded with refinery from `orchestrator/migrations/`. The first migration is the baseline schema. On legacy databases created by the old bootstrap DDL, the orchestrator detects the existing tables and marks the baseline as applied without rerunning it.
@@ -156,6 +158,7 @@ Optional:
 | `AGENTIC_STRONG_PREFIX_CANARY_API_KEY` | `local-key` | API key for the prefix-cache canary backend. |
 | `PREFIX_CACHE_CANARY_ENABLED` | `false` | Enables namespace-allowlisted routing from `agentic/strong` to `agentic/strong-prefix-canary`. |
 | `PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST` | unset | Comma-separated namespaces eligible for canary routing. |
+| `VLLM_METRICS_URL` | unset | Prometheus metrics URL for the active vLLM backend. When set, the orchestrator records per-call prefix-cache deltas. |
 | `CONTEXT_CACHE_TTL_MS` | `300000` | Context cache TTL. |
 | `CONTEXT_DECAY_RATE` | `0.006` | Hybrid retrieval age decay. |
 | `EXECUTION_FEEDBACK_ENABLED` | `true` | Enables execution artifact capture and Failure History context. |
@@ -179,5 +182,5 @@ Optional:
 | `SENTIMENT_THRESHOLD` | `0.70` | Negative sentiment threshold. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Per-key inference route refill rate. |
 | `RATE_LIMIT_BURST` | `30` | Per-key inference route burst. |
-| `ALLOWED_ORIGINS` | `*` | CORS origin policy. |
+| `ALLOWED_ORIGINS` | `http://localhost:8088,http://127.0.0.1:8088` | CORS origin policy. Use `*` only for isolated local debugging. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Enables OTLP trace export when built with `tracing-otlp`. |
