@@ -20,7 +20,7 @@ All endpoints except `/health`, `/health/live`, and `/health/ready` require `Aut
 | `/events/append` | POST | Inserts a memory event in Postgres and best-effort indexes it in Qdrant. |
 | `/harness/guardrail` | POST | Evaluates deterministic harness/runtime guardrail metadata before or around tool execution. |
 | `/context/pack` | POST | Builds or returns a cached layered context pack for a repo/task. |
-| `/cache/stats` | GET | Returns in-process context cache size and TTL. |
+| `/cache/stats` | GET | Returns in-process context cache stats plus persisted vLLM prefix-cache observations when `VLLM_METRICS_URL` is configured. |
 | `/metrics` | GET | Returns Prometheus text exposition. |
 | `/metrics/json` | GET | Returns the legacy JSON metrics snapshot. |
 | `/summaries/checkpoint` | POST | Persists an operator checkpoint event with next actions and open questions. |

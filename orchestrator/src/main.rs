@@ -51,6 +51,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty());
+    let vllm_metrics_url = env::var("VLLM_METRICS_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let summarizer_key = env::var("SUMMARIZER_KEY")
         .ok()
         .map(|v| v.trim().to_string())
@@ -209,6 +213,7 @@ async fn main() -> Result<(), anyhow::Error> {
         summarizer_key,
         summarizer_model,
         total_recall_url,
+        vllm_metrics_url,
         summarizer_max_tokens,
         api_keys,
         default_model,

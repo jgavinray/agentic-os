@@ -55,10 +55,27 @@ pub struct DecisionContext {
 /// than opaque strings so callers cannot pass arbitrary blobs and so the
 /// function signature is self-documenting.
 pub fn extract_candidate_features(
-    _source_record: &SourceRecordRef,
+    source_record: &SourceRecordRef,
     _decision_context: &DecisionContext,
 ) -> CandidateFeatureVector {
-    unimplemented!("feature extraction body is Phase 3")
+    CandidateFeatureVector {
+        age_seconds: source_record.age_seconds.max(0),
+        same_repo: source_record.same_repo,
+        same_session: source_record.same_session,
+        same_trajectory: source_record.same_trajectory,
+        estimated_token_cost: source_record.estimated_token_cost.max(0),
+        token_cost_bucket: source_record.estimated_token_cost_bucket,
+        retrieval_score_bucket: RetrievalScoreBucket::Unknown,
+        failure_class: source_record.failure_class,
+        operational_constraint_type: source_record.operational_constraint_type,
+        context_section: source_record.context_section,
+        duplicate_coverage: source_record.duplicate_coverage,
+        deterministic_score_bucket: DeterministicScoreBucket::Unknown,
+        deterministic_rank: 0,
+        injected: false,
+        drop_reason: None,
+        representation_selected: RepresentationSelected::Full,
+    }
 }
 
 #[cfg(test)]

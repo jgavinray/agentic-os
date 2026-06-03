@@ -158,6 +158,10 @@ impl LiteLlmCallFinalizer {
     pub fn attempt_mut(&mut self) -> &mut LiteLlmCallAttempt {
         &mut self.attempt
     }
+
+    pub fn attempt(&self) -> &LiteLlmCallAttempt {
+        &self.attempt
+    }
 }
 
 impl Clone for LiteLlmCallFinalizer {
