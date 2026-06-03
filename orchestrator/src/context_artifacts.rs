@@ -297,6 +297,65 @@ pub fn failure_history_artifact(
     )
 }
 
+pub fn durable_project_memory_artifact(
+    repo: String,
+    notes: &[crate::total_recall::MemoryNote],
+) -> Option<ContextArtifact> {
+    let notes = notes
+        .iter()
+        .filter(|note| !note.archived && !note.content.trim().is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        return None;
+    }
+
+    let rendered = notes
+        .iter()
+        .map(|note| {
+            let title = note.title.as_deref().unwrap_or(&note.date);
+            format!(
+                "- {}: {}\n",
+                truncate_line(title, 120),
+                truncate_line(&note.content, 260)
+            )
+        })
+        .collect::<String>();
+    let compact = notes
+        .iter()
+        .map(|note| truncate_line(&note.content, 160))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let raw = serde_json::json!({
+        "source": "total_recall",
+        "notes": notes
+            .iter()
+            .map(|note| serde_json::json!({
+                "id": note.id,
+                "date": note.date,
+                "title": note.title,
+                "content": note.content,
+                "updated_at": note.updated_at,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let invalidation_key = stable_hash(&serde_json::json!({
+        "artifact_type": "durable_project_memory",
+        "notes": raw["notes"],
+    }));
+
+    Some(ContextArtifact::new(
+        repo,
+        "repo",
+        "durable_project_memory",
+        Some(raw.to_string()),
+        compact,
+        rendered,
+        invalidation_key,
+        serde_json::json!([]),
+    ))
+}
+
 pub fn render_artifacts(artifacts: &[ContextArtifact]) -> String {
     if artifacts.is_empty() {
         return String::new();
@@ -487,6 +546,22 @@ mod tests {
             artifact.source_event_ids,
             serde_json::json!(["failure-1", "remediation-1"])
         );
+    }
+
+    #[test]
+    fn durable_project_memory_artifact_promotes_total_recall_notes() {
+        let note = crate::total_recall::MemoryNote {
+            id: "note-1".to_string(),
+            date: "06-02-2026".to_string(),
+            title: Some("Compiler Strategy".to_string()),
+            content: "Keep Total Recall episodic data external and promote only bounded working knowledge.".to_string(),
+            updated_at: 1,
+            archived: false,
+        };
+
+        let artifact = durable_project_memory_artifact("agentic-os".to_string(), &[note]).unwrap();
+        assert_eq!(artifact.artifact_type, "durable_project_memory");
+        assert!(artifact.content_rendered.contains("Compiler Strategy"));
     }
 
     fn test_event(

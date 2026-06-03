@@ -47,6 +47,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .trim_end_matches('/')
         .to_string();
     let summarizer_model = env::var("SUMMARIZER_MODEL").unwrap_or_else(|_| default_model.clone());
+    let total_recall_url = env::var("TOTAL_RECALL_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
     let summarizer_key = env::var("SUMMARIZER_KEY")
         .ok()
         .map(|v| v.trim().to_string())
@@ -204,6 +208,7 @@ async fn main() -> Result<(), anyhow::Error> {
         summarizer_url,
         summarizer_key,
         summarizer_model,
+        total_recall_url,
         summarizer_max_tokens,
         api_keys,
         default_model,
