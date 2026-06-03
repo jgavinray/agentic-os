@@ -1631,6 +1631,142 @@ fn sanitize_anthropic_litellm_request(req: &mut Value) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalReasoningPolicy {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalReasoningSelection {
+    policy: LocalReasoningPolicy,
+    source: &'static str,
+}
+
+impl LocalReasoningPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    fn default_max_tokens(self) -> u64 {
+        match self {
+            Self::Low => 2048,
+            Self::Medium => 4096,
+            Self::High => MAX_MAX_TOKENS,
+        }
+    }
+
+    fn default_temperature(self) -> f64 {
+        match self {
+            Self::Low => 0.1,
+            Self::Medium => 0.2,
+            Self::High => 0.2,
+        }
+    }
+
+    fn system_contract(self) -> &'static str {
+        match self {
+            Self::Low => {
+                "Local harness reasoning policy: low. Answer directly with concrete facts, cite evidence when available, and avoid expanded plans unless required."
+            }
+            Self::Medium => {
+                "Local harness reasoning policy: medium. Use bounded engineering reasoning: objective, evidence, assessment, plan, and verification when the task benefits from structure. Do not add filler."
+            }
+            Self::High => {
+                "Local harness reasoning policy: high. Use a fuller engineering analysis: objective, evidence, constraints, tradeoffs, implementation steps, risks, and verification. Mark unknowns explicitly."
+            }
+        }
+    }
+}
+
+fn parse_local_reasoning_policy(value: &str) -> Option<LocalReasoningPolicy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" | "fast" => Some(LocalReasoningPolicy::Low),
+        "medium" | "normal" | "default" => Some(LocalReasoningPolicy::Medium),
+        "high" | "deep" => Some(LocalReasoningPolicy::High),
+        _ => None,
+    }
+}
+
+fn local_reasoning_selection(headers: &HeaderMap, payload: &Value) -> LocalReasoningSelection {
+    if let Some(policy) = headers
+        .get("x-agent-reasoning-policy")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_local_reasoning_policy)
+    {
+        return LocalReasoningSelection {
+            policy,
+            source: "x-agent-reasoning-policy",
+        };
+    }
+
+    if let Some(policy) = payload
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .and_then(parse_local_reasoning_policy)
+    {
+        return LocalReasoningSelection {
+            policy,
+            source: "client_reasoning_effort",
+        };
+    }
+
+    if let Some(budget) = payload
+        .get("thinking")
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(Value::as_u64)
+    {
+        let policy = if budget <= 2048 {
+            LocalReasoningPolicy::Low
+        } else if budget <= 8192 {
+            LocalReasoningPolicy::Medium
+        } else {
+            LocalReasoningPolicy::High
+        };
+        return LocalReasoningSelection {
+            policy,
+            source: "client_thinking_budget",
+        };
+    }
+
+    LocalReasoningSelection {
+        policy: LocalReasoningPolicy::Medium,
+        source: "local_default",
+    }
+}
+
+fn apply_local_reasoning_defaults(req: &mut Value, selection: LocalReasoningSelection) {
+    if req.get("max_tokens").is_none() {
+        req["max_tokens"] = Value::from(selection.policy.default_max_tokens());
+    }
+    if req.get("temperature").is_none() {
+        req["temperature"] = serde_json::json!(selection.policy.default_temperature());
+    }
+}
+
+fn add_local_reasoning_metadata(
+    attempt: &mut crate::litellm::LiteLlmCallAttempt,
+    selection: LocalReasoningSelection,
+) {
+    attempt.reasoning_policy = Some(selection.policy.as_str().to_string());
+    attempt.reasoning_policy_source = Some(selection.source.to_string());
+}
+
+fn inject_local_reasoning_contract_openai(req: &mut Value, selection: LocalReasoningSelection) {
+    inject_system_context(req, selection.policy.system_contract());
+}
+
+fn inject_local_reasoning_contract_anthropic(req: &mut Value, selection: LocalReasoningSelection) {
+    let mut blocks = existing_anthropic_system_blocks(req);
+    blocks.insert(0, anthropic_text_block(selection.policy.system_contract()));
+    req["system"] = Value::Array(blocks);
+}
+
 fn enforce_min_max_tokens(req: &mut Value) {
     let requested = req.get("max_tokens").and_then(|v| v.as_u64());
     let effective = requested
@@ -2578,11 +2714,14 @@ pub async fn chat_completions(
     {
         return response;
     }
+    let reasoning_selection = local_reasoning_selection(&headers, &payload);
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
     let route = litellm_route(&state, &namespace);
     req["model"] = Value::String(route.routed_model.clone());
+    apply_local_reasoning_defaults(&mut req, reasoning_selection);
     enforce_min_max_tokens(&mut req);
+    inject_local_reasoning_contract_openai(&mut req, reasoning_selection);
     let sampling_audit = crate::sampling::capture_and_maybe_override(
         &payload,
         &mut req,
@@ -2648,7 +2787,7 @@ pub async fn chat_completions(
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
     let cache_policy = crate::litellm::exact_cache_decision("chat_completions", &req, false);
-    let attempt = crate::litellm::new_attempt(
+    let mut attempt = crate::litellm::new_attempt(
         request_event_id,
         trajectory.map(|trajectory| trajectory.trajectory_id),
         context_pack_id,
@@ -2661,6 +2800,7 @@ pub async fn chat_completions(
         cache_policy,
         context_pack_hash.clone(),
     );
+    add_local_reasoning_metadata(&mut attempt, reasoning_selection);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
     let vllm_cache_before = vllm_cache_snapshot(&state).await;
     let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
@@ -3093,6 +3233,7 @@ pub async fn messages(
     {
         return response;
     }
+    let reasoning_selection = local_reasoning_selection(&headers, &payload);
     let model = payload
         .get("model")
         .and_then(|v| v.as_str())
@@ -3103,9 +3244,11 @@ pub async fn messages(
     let mut req = payload;
     let route = litellm_route(&state, &namespace);
     req["model"] = Value::String(route.routed_model.clone());
+    apply_local_reasoning_defaults(&mut req, reasoning_selection);
     enforce_min_max_tokens(&mut req);
     normalize_response_content_types(&mut req);
     sanitize_anthropic_litellm_request(&mut req);
+    inject_local_reasoning_contract_anthropic(&mut req, reasoning_selection);
     let tool_mediation_metadata = if state.tool_mediation_enabled {
         let outcome = crate::tool_mediation::shape_anthropic_request(&mut req, &user_content);
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
@@ -3158,7 +3301,7 @@ pub async fn messages(
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
     let cache_policy = crate::litellm::exact_cache_decision("messages", &req, false);
-    let attempt = crate::litellm::new_attempt(
+    let mut attempt = crate::litellm::new_attempt(
         request_event_id,
         trajectory.map(|trajectory| trajectory.trajectory_id),
         context_pack_id,
@@ -3171,6 +3314,7 @@ pub async fn messages(
         cache_policy,
         context_pack_hash.clone(),
     );
+    add_local_reasoning_metadata(&mut attempt, reasoning_selection);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
     let vllm_cache_before = vllm_cache_snapshot(&state).await;
     let mut finalizer =
@@ -4001,6 +4145,79 @@ mod tests {
         assert_eq!(usage.processed_tokens, 120);
         assert_eq!(usage.cached_tokens, 80);
         assert_eq!(usage.generated_tokens, 40);
+    }
+
+    #[test]
+    fn local_reasoning_policy_prefers_header_over_client_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-reasoning-policy", "high".parse().unwrap());
+        let payload = serde_json::json!({
+            "reasoning_effort": "low",
+            "thinking": {"type": "enabled", "budget_tokens": 1024}
+        });
+
+        let selection = local_reasoning_selection(&headers, &payload);
+
+        assert_eq!(selection.policy, LocalReasoningPolicy::High);
+        assert_eq!(selection.source, "x-agent-reasoning-policy");
+    }
+
+    #[test]
+    fn local_reasoning_policy_maps_anthropic_thinking_budget() {
+        let headers = HeaderMap::new();
+
+        let low = local_reasoning_selection(
+            &headers,
+            &serde_json::json!({"thinking": {"budget_tokens": 1024}}),
+        );
+        let medium = local_reasoning_selection(
+            &headers,
+            &serde_json::json!({"thinking": {"budget_tokens": 4096}}),
+        );
+        let high = local_reasoning_selection(
+            &headers,
+            &serde_json::json!({"thinking": {"budget_tokens": 12000}}),
+        );
+
+        assert_eq!(low.policy, LocalReasoningPolicy::Low);
+        assert_eq!(medium.policy, LocalReasoningPolicy::Medium);
+        assert_eq!(high.policy, LocalReasoningPolicy::High);
+        assert_eq!(high.source, "client_thinking_budget");
+    }
+
+    #[test]
+    fn local_reasoning_defaults_preserve_explicit_sampling() {
+        let mut req = serde_json::json!({
+            "max_tokens": 333,
+            "temperature": 0.7
+        });
+
+        apply_local_reasoning_defaults(
+            &mut req,
+            LocalReasoningSelection {
+                policy: LocalReasoningPolicy::Low,
+                source: "test",
+            },
+        );
+
+        assert_eq!(req["max_tokens"], serde_json::json!(333));
+        assert_eq!(req["temperature"], serde_json::json!(0.7));
+    }
+
+    #[test]
+    fn local_reasoning_defaults_shape_missing_sampling() {
+        let mut req = serde_json::json!({});
+
+        apply_local_reasoning_defaults(
+            &mut req,
+            LocalReasoningSelection {
+                policy: LocalReasoningPolicy::Low,
+                source: "test",
+            },
+        );
+
+        assert_eq!(req["max_tokens"], serde_json::json!(2048));
+        assert_eq!(req["temperature"], serde_json::json!(0.1));
     }
 
     #[test]
