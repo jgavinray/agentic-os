@@ -469,7 +469,7 @@ pub fn context_prefix_hashes(context: &str) -> (Option<String>, Option<String>) 
     )
 }
 
-fn split_context_prefix_tail(context: &str) -> (&str, &str) {
+pub fn split_context_prefix_tail(context: &str) -> (&str, &str) {
     if let Some(idx) = context.find("\nRepository: ") {
         context.split_at(idx + 1)
     } else if context.starts_with("Repository: ") {
