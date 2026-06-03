@@ -38,6 +38,8 @@ pub struct LiteLlmCallAttempt {
     pub selected_route: Option<String>,
     pub selection_reason: Option<String>,
     pub policy_version: Option<String>,
+    pub reasoning_policy: Option<String>,
+    pub reasoning_policy_source: Option<String>,
     pub cache_policy: CachePolicySnapshot,
     pub context_pack_hash: Option<String>,
     pub started_at: Instant,
@@ -223,9 +225,9 @@ pub async fn insert_litellm_call_ledger_start(
          (attempt_id, request_event_id, trajectory_id, context_pack_id, namespace, repo, task,
           endpoint, requested_model, routed_model, context_pack_hash, cache_backend,
           cache_policy_enabled, cache_bypass_reason, policy_version, selected_route,
-          selection_reason)
+          selection_reason, reasoning_policy, reasoning_policy_source)
          VALUES
-         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          ON CONFLICT (attempt_id) DO NOTHING",
         &[
             &attempt.attempt_id,
@@ -245,6 +247,8 @@ pub async fn insert_litellm_call_ledger_start(
             &attempt.policy_version,
             &attempt.selected_route,
             &attempt.selection_reason,
+            &attempt.reasoning_policy,
+            &attempt.reasoning_policy_source,
         ],
     )
     .await?;
@@ -280,9 +284,11 @@ pub async fn update_litellm_call_ledger_terminal(
                  policy_version = $11,
                  selected_route = $12,
                  selection_reason = $13,
-                 provider_cached_tokens = $14,
-                 provider_cache_created_tokens = $15,
-                 provider_cache_read_tokens = $16
+                 reasoning_policy = $14,
+                 reasoning_policy_source = $15,
+                 provider_cached_tokens = $16,
+                 provider_cache_created_tokens = $17,
+                 provider_cache_read_tokens = $18
              WHERE attempt_id = $1",
             &[
                 &attempt.attempt_id,
@@ -298,6 +304,8 @@ pub async fn update_litellm_call_ledger_terminal(
                 &attempt.policy_version,
                 &attempt.selected_route,
                 &attempt.selection_reason,
+                &attempt.reasoning_policy,
+                &attempt.reasoning_policy_source,
                 &counters.provider_cached_tokens,
                 &counters.provider_cache_created_tokens,
                 &counters.provider_cache_read_tokens,
@@ -314,11 +322,12 @@ pub async fn update_litellm_call_ledger_terminal(
           endpoint, requested_model, routed_model, terminal_status, error_kind, error_message,
           first_token_ms, total_latency_ms, context_pack_hash, cache_backend,
           cache_policy_enabled, cache_bypass_reason, policy_version, selected_route,
-          selection_reason, provider_cached_tokens, provider_cache_created_tokens,
+          selection_reason, reasoning_policy, reasoning_policy_source,
+          provider_cached_tokens, provider_cache_created_tokens,
           provider_cache_read_tokens)
          VALUES
          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
          ON CONFLICT (attempt_id) DO UPDATE
          SET terminal_status = EXCLUDED.terminal_status,
              error_kind = EXCLUDED.error_kind,
@@ -351,6 +360,8 @@ pub async fn update_litellm_call_ledger_terminal(
             &attempt.policy_version,
             &attempt.selected_route,
             &attempt.selection_reason,
+            &attempt.reasoning_policy,
+            &attempt.reasoning_policy_source,
             &counters.provider_cached_tokens,
             &counters.provider_cache_created_tokens,
             &counters.provider_cache_read_tokens,
@@ -388,6 +399,8 @@ pub fn new_attempt(
         selected_route: Some(route.selected_route.clone()),
         selection_reason: Some(route.selection_reason.clone()),
         policy_version: Some(route.policy_version.clone()),
+        reasoning_policy: None,
+        reasoning_policy_source: None,
         cache_policy,
         context_pack_hash,
         started_at: Instant::now(),
@@ -501,6 +514,8 @@ pub fn add_agentic_os_metadata(req: &mut Value, attempt: &LiteLlmCallAttempt) {
         "selected_route": attempt.selected_route,
         "selection_reason": attempt.selection_reason,
         "policy_version": attempt.policy_version,
+        "reasoning_policy": attempt.reasoning_policy,
+        "reasoning_policy_source": attempt.reasoning_policy_source,
         "context_pack_hash": attempt.context_pack_hash,
         "cache_backend": attempt.cache_policy.cache_backend,
         "cache_policy_enabled": attempt.cache_policy.cache_policy_enabled,

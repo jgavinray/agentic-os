@@ -32,6 +32,20 @@ Judge prefix-cache ROI with repeated `context_pack_hash` values. Primary metric 
 
 When `VLLM_METRICS_URL` is set, the orchestrator snapshots vLLM Prometheus cache counters around model calls and records deltas in `vllm_cache_observations`. `/cache/stats` includes both context-cache stats and vLLM prefix-cache stats. See `docs/VLLM_PREFIX_CACHE.md` for the current Heretic/Qwen3.6 diagnosis and remediation paths.
 
+## Local Reasoning Policy
+
+The local harness treats client thinking controls as intent, not as upstream API
+contracts. The orchestrator maps `x-agent-reasoning-policy`, Anthropic
+`reasoning_effort`, or Anthropic `thinking.budget_tokens` into `low`, `medium`,
+or `high`; strips unsupported thinking fields before forwarding to LiteLLM; and
+injects a bounded local reasoning contract into the system prompt. Explicit
+client `max_tokens` and `temperature` are preserved. Missing values are filled
+from the selected local policy.
+
+Every LiteLLM call ledger row records `reasoning_policy` and
+`reasoning_policy_source` so output quality, latency, cache behavior, and token
+usage can be compared by policy.
+
 ## Migrations
 
 Schema migrations are embedded with refinery from `orchestrator/migrations/`. The first migration is the baseline schema. On legacy databases created by the old bootstrap DDL, the orchestrator detects the existing tables and marks the baseline as applied without rerunning it.

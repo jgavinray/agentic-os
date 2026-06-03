@@ -94,6 +94,12 @@ Histogram buckets are explicit. HTTP/context buckets span 1 ms to 60 s, LiteLLM,
 
 `litellm_call_ledger` stores one row per attempted LiteLLM call. It records terminal status, TTFT (`first_token_ms`), total latency, route policy, cache policy, provider cache token counters, and `context_pack_hash`. It does not store raw prompts or raw responses.
 
+For local harness tuning, the ledger also records `reasoning_policy` and
+`reasoning_policy_source`. These fields describe the orchestrator's local
+low/medium/high policy after client Anthropic thinking hints have been
+normalized; they are not proof that the upstream model exposed native reasoning
+tokens.
+
 Use repeated `context_pack_hash` values to compare normal traffic with `agentic/strong-prefix-canary` traffic. Prefix-cache ROI should be judged primarily by p95 `first_token_ms` reduction, then p50 TTFT, p95 total latency, provider cache read/created tokens, output tokens, error rate, fallback count, and backend throughput if the model server exposes it.
 
 LiteLLM exact response-cache hit rate is separate from provider prefix/KV cache hit rate. agentic-os records policy and context facts; it does not manage backend KV cache.
