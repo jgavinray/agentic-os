@@ -456,6 +456,8 @@ pub struct AppState {
     pub summarizer_key: Option<String>,
     /// Model name sent to the summarizer endpoint.
     pub summarizer_model: String,
+    /// Optional Total Recall HTTP API base URL.
+    pub total_recall_url: Option<String>,
     /// Max output tokens for summary generation.
     pub summarizer_max_tokens: u64,
     /// Valid API keys — each entry is (token, namespace). Token authenticates; namespace

@@ -1220,7 +1220,7 @@ async fn get_or_build_cached_context_inner(
     evidence.operational_constraints = constraints;
     let errors = errors_result.unwrap_or_default();
     let memories = evidence.memories();
-    let compiler_output = crate::context_compiler::ContextCompiler::new(&state.pool)
+    let compiler_output = crate::context_compiler::ContextCompiler::new(&state.pool, &state.http)
         .compile(crate::context_compiler::CompilerRequest {
             repo: repo.to_string(),
             runtime: crate::context_compiler::RuntimeContext {
@@ -1229,6 +1229,7 @@ async fn get_or_build_cached_context_inner(
                 qdrant_url: state.qdrant_url.clone(),
                 summarizer_url: state.summarizer_url.clone(),
                 summarizer_model: state.summarizer_model.clone(),
+                total_recall_url: state.total_recall_url.clone(),
             },
         })
         .await;

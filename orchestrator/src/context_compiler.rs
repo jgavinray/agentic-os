@@ -14,6 +14,7 @@ pub struct RuntimeContext {
     pub qdrant_url: String,
     pub summarizer_url: String,
     pub summarizer_model: String,
+    pub total_recall_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -23,11 +24,12 @@ pub struct CompilerOutput {
 
 pub struct ContextCompiler<'a> {
     pool: &'a deadpool_postgres::Pool,
+    http: &'a reqwest::Client,
 }
 
 impl<'a> ContextCompiler<'a> {
-    pub fn new(pool: &'a deadpool_postgres::Pool) -> Self {
-        Self { pool }
+    pub fn new(pool: &'a deadpool_postgres::Pool, http: &'a reqwest::Client) -> Self {
+        Self { pool, http }
     }
 
     pub async fn compile(&self, request: CompilerRequest) -> CompilerOutput {
@@ -149,6 +151,44 @@ impl<'a> ContextCompiler<'a> {
             }
         }
 
+        if let Some(total_recall_url) = request.runtime.total_recall_url.as_deref() {
+            match crate::total_recall::recent_notes(self.http, total_recall_url, 30, 10).await {
+                Ok(notes) => {
+                    if let Some(artifact) = context_artifacts::durable_project_memory_artifact(
+                        request.repo.clone(),
+                        &notes,
+                    ) {
+                        for note in &notes {
+                            record_ledger(
+                                self.pool,
+                                &request.repo,
+                                &artifact,
+                                "total_recall",
+                                Some(&note.id),
+                                "included",
+                                "promoted external episodic note into durable project memory artifact",
+                                serde_json::json!({
+                                    "date": note.date,
+                                    "title": note.title,
+                                    "updated_at": note.updated_at,
+                                }),
+                            )
+                            .await;
+                        }
+                        artifacts.push(artifact);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "context_compiler",
+                        repo = %request.repo,
+                        total_recall_url = %total_recall_url,
+                        "failed to fetch Total Recall episodic memory: {e}"
+                    );
+                }
+            }
+        }
+
         for artifact in artifacts {
             if let Err(e) = db::upsert_context_artifact(self.pool, &artifact).await {
                 tracing::warn!(
@@ -253,6 +293,7 @@ mod tests {
                 qdrant_url: "http://qdrant:6333".to_string(),
                 summarizer_url: "http://summarizer:8080/v1".to_string(),
                 summarizer_model: "qwen2.5-3b".to_string(),
+                total_recall_url: None,
             },
         };
 

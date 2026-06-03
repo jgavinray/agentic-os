@@ -464,6 +464,8 @@ The next implemented slices are:
   Postgres promoted into bounded working context.
 - `failure_history`: resolved failure/remediation pairs promoted from
   execution-feedback events.
+- `durable_project_memory`: optional Total Recall notes promoted through the
+  explicit HTTP API when `TOTAL_RECALL_URL` is configured.
 - `context_compiler_ledger`: inclusion and suppression records for compiler
   decisions.
 
@@ -485,6 +487,16 @@ This repo provides an optional Compose overlay:
 ```bash
 docker compose -f compose.yaml -f compose.total-recall.yaml up -d total-recall
 ```
+
+Agentic OS consumes that service only when the orchestrator has an explicit URL:
+
+```bash
+TOTAL_RECALL_URL=http://total-recall:8811
+```
+
+The compiler reads `GET /api/recent` from Total Recall and promotes bounded
+notes into `durable_project_memory`. It does not paste raw note dumps into the
+prompt.
 
 The overlay mounts explicit container paths through `total-recall-config.yaml`.
 That matters because Total Recall defaults to `~/.total-recall`; inside a
@@ -521,8 +533,6 @@ Agentic OS ledger does not already contain.
 ## Future Milestones
 
 1. Add `repo_map` artifacts from source tree and manifest scans.
-2. Add Total Recall ingestion for external episodic observations.
-3. Add status resolution for active/superseded user instructions.
-4. Add stronger failure/remediation resolution from full trajectory chains.
-5. Add ranking features and, later, XGBoost-based inclusion scoring.
-6. Split prompt hashes into stable-prefix hash and dynamic-tail hash.
+2. Add richer Total Recall search over task-specific episodic observations.
+3. Add stronger failure/remediation resolution from full trajectory chains.
+4. Add ranking features and, later, XGBoost-based inclusion scoring.
