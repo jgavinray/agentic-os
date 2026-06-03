@@ -494,9 +494,9 @@ Agentic OS consumes that service only when the orchestrator has an explicit URL:
 TOTAL_RECALL_URL=http://total-recall:8811
 ```
 
-The compiler reads `GET /api/recent` from Total Recall and promotes bounded
-notes into `durable_project_memory`. It does not paste raw note dumps into the
-prompt.
+The compiler reads `GET /api/recent` and task-specific `POST /api/search` from
+Total Recall, deduplicates note IDs, and promotes bounded notes into
+`durable_project_memory`. It does not paste raw note dumps into the prompt.
 
 The overlay mounts explicit container paths through `total-recall-config.yaml`.
 That matters because Total Recall defaults to `~/.total-recall`; inside a
@@ -533,6 +533,5 @@ Agentic OS ledger does not already contain.
 ## Future Milestones
 
 1. Add `repo_map` artifacts from source tree and manifest scans.
-2. Add richer Total Recall search over task-specific episodic observations.
-3. Add stronger failure/remediation resolution from full trajectory chains.
-4. Add ranking features and, later, XGBoost-based inclusion scoring.
+2. Add stronger failure/remediation resolution from full trajectory chains.
+3. Add ranking features and, later, XGBoost-based inclusion scoring.
