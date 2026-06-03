@@ -356,6 +356,110 @@ pub fn durable_project_memory_artifact(
     ))
 }
 
+pub fn repo_decisions_artifact(
+    repo: String,
+    events: &[crate::db::AgentEvent],
+) -> Option<ContextArtifact> {
+    let events = events.iter().take(6).collect::<Vec<_>>();
+    if events.is_empty() {
+        return None;
+    }
+    let rendered = events
+        .iter()
+        .map(|event| {
+            let evidence = event
+                .evidence
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" Evidence: {}", truncate_line(value, 160)))
+                .unwrap_or_default();
+            format!("- {}{}\n", truncate_line(&event.summary, 220), evidence)
+        })
+        .collect::<String>();
+    let raw = serde_json::json!({
+        "source": "agent_events",
+        "events": events.iter().map(|event| event.payload()).collect::<Vec<_>>(),
+    });
+    let source_event_ids = serde_json::json!(events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>());
+    let invalidation_key = stable_hash(&serde_json::json!({
+        "artifact_type": "repo_decisions",
+        "source_event_ids": source_event_ids,
+        "events": raw["events"],
+    }));
+    Some(
+        ContextArtifact::new(
+            repo,
+            "repo",
+            "repo_decisions",
+            Some(raw.to_string()),
+            events
+                .iter()
+                .map(|event| truncate_line(&event.summary, 120))
+                .collect::<Vec<_>>()
+                .join(" "),
+            rendered,
+            invalidation_key,
+            serde_json::json!([]),
+        )
+        .with_source_event_ids(source_event_ids),
+    )
+}
+
+pub fn session_state_artifact(
+    repo: String,
+    session_id: &str,
+    events: &[crate::db::AgentEvent],
+) -> Option<ContextArtifact> {
+    let events = events.iter().take(5).collect::<Vec<_>>();
+    if events.is_empty() {
+        return None;
+    }
+    let rendered = events
+        .iter()
+        .map(|event| {
+            format!(
+                "- [{}] {}\n",
+                event.event_type,
+                truncate_line(&event.summary, 220)
+            )
+        })
+        .collect::<String>();
+    let raw = serde_json::json!({
+        "source": "agent_events",
+        "session_id": session_id,
+        "events": events.iter().map(|event| event.payload()).collect::<Vec<_>>(),
+    });
+    let source_event_ids = serde_json::json!(events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>());
+    let invalidation_key = stable_hash(&serde_json::json!({
+        "artifact_type": "session_state",
+        "session_id": session_id,
+        "source_event_ids": source_event_ids,
+    }));
+    Some(
+        ContextArtifact::new(
+            repo,
+            "session",
+            "session_state",
+            Some(raw.to_string()),
+            events
+                .iter()
+                .map(|event| truncate_line(&event.summary, 120))
+                .collect::<Vec<_>>()
+                .join(" "),
+            rendered,
+            invalidation_key,
+            serde_json::json!([]),
+        )
+        .with_source_event_ids(source_event_ids),
+    )
+}
+
 pub fn render_artifacts(artifacts: &[ContextArtifact]) -> String {
     if artifacts.is_empty() {
         return String::new();
@@ -562,6 +666,34 @@ mod tests {
         let artifact = durable_project_memory_artifact("agentic-os".to_string(), &[note]).unwrap();
         assert_eq!(artifact.artifact_type, "durable_project_memory");
         assert!(artifact.content_rendered.contains("Compiler Strategy"));
+    }
+
+    #[test]
+    fn repo_decisions_artifact_preserves_event_provenance() {
+        let event = test_event(
+            "decision-1",
+            "decision",
+            "Default to the Snowflake embedding model.",
+            serde_json::json!({}),
+        );
+        let artifact = repo_decisions_artifact("agentic-os".to_string(), &[event]).unwrap();
+        assert_eq!(artifact.artifact_type, "repo_decisions");
+        assert_eq!(artifact.source_event_ids, serde_json::json!(["decision-1"]));
+    }
+
+    #[test]
+    fn session_state_artifact_is_session_scoped() {
+        let event = test_event(
+            "event-1",
+            "tool_result",
+            "cargo check passed",
+            serde_json::json!({}),
+        );
+        let artifact =
+            session_state_artifact("agentic-os".to_string(), "session-1", &[event]).unwrap();
+        assert_eq!(artifact.scope, "session");
+        assert_eq!(artifact.artifact_type, "session_state");
+        assert!(artifact.content_rendered.contains("cargo check passed"));
     }
 
     fn test_event(
