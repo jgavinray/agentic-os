@@ -4,6 +4,7 @@ use crate::db;
 #[derive(Clone, Debug)]
 pub struct CompilerRequest {
     pub repo: String,
+    pub task: String,
     pub runtime: RuntimeContext,
 }
 
@@ -152,7 +153,9 @@ impl<'a> ContextCompiler<'a> {
         }
 
         if let Some(total_recall_url) = request.runtime.total_recall_url.as_deref() {
-            match crate::total_recall::recent_notes(self.http, total_recall_url, 30, 10).await {
+            match total_recall_candidates(self.http, total_recall_url, &request.repo, &request.task)
+                .await
+            {
                 Ok(notes) => {
                     if let Some(artifact) = context_artifacts::durable_project_memory_artifact(
                         request.repo.clone(),
@@ -232,6 +235,24 @@ fn compile_repo_map(request: &CompilerRequest) -> ContextArtifact {
     })
 }
 
+async fn total_recall_candidates(
+    http: &reqwest::Client,
+    total_recall_url: &str,
+    repo: &str,
+    task: &str,
+) -> Result<Vec<crate::total_recall::MemoryNote>, anyhow::Error> {
+    let query = format!("{repo} {task}");
+    let (recent, searched) = tokio::join!(
+        crate::total_recall::recent_notes(http, total_recall_url, 30, 10),
+        crate::total_recall::search_notes(http, total_recall_url, &query, 10),
+    );
+    let mut notes = recent?;
+    notes.extend(searched?);
+    let mut seen = std::collections::HashSet::new();
+    notes.retain(|note| seen.insert(note.id.clone()));
+    Ok(notes)
+}
+
 fn artifact_source_event_ids(artifact: &ContextArtifact) -> std::collections::HashSet<String> {
     artifact
         .source_event_ids
@@ -287,6 +308,7 @@ mod tests {
     fn service_topology_compilation_is_deterministic() {
         let request = CompilerRequest {
             repo: "agentic-os".to_string(),
+            task: "debug compiler".to_string(),
             runtime: RuntimeContext {
                 default_model: "qwen36-35b-a3b".to_string(),
                 litellm_url: "http://litellm:4000/v1".to_string(),

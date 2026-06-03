@@ -1223,6 +1223,7 @@ async fn get_or_build_cached_context_inner(
     let compiler_output = crate::context_compiler::ContextCompiler::new(&state.pool, &state.http)
         .compile(crate::context_compiler::CompilerRequest {
             repo: repo.to_string(),
+            task: task.to_string(),
             runtime: crate::context_compiler::RuntimeContext {
                 default_model: state.default_model.clone(),
                 litellm_url: state.litellm_url.clone(),
