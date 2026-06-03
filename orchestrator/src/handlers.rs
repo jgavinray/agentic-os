@@ -1669,29 +1669,62 @@ fn inject_system_context(payload: &mut Value, context: &str) {
     }
 }
 
-/// Inject context into an Anthropic-format request's system field.
-fn inject_system_context_anthropic(payload: &mut Value, context: &str) {
-    let existing = match payload.get("system") {
-        Some(Value::String(s)) => s.clone(),
+fn anthropic_text_block(text: impl Into<String>) -> Value {
+    serde_json::json!({"type": "text", "text": text.into()})
+}
+
+fn anthropic_cacheable_text_block(text: impl Into<String>) -> Value {
+    serde_json::json!({
+        "type": "text",
+        "text": text.into(),
+        "cache_control": {"type": "ephemeral"}
+    })
+}
+
+fn existing_anthropic_system_blocks(payload: &Value) -> Vec<Value> {
+    match payload.get("system") {
+        Some(Value::String(s)) if !s.trim().is_empty() => vec![anthropic_text_block(s.clone())],
         Some(Value::Array(blocks)) => blocks
             .iter()
-            .filter_map(|b| {
-                if b["type"].as_str() == Some("text") {
-                    b["text"].as_str()
+            .filter_map(|block| {
+                if block.get("type").and_then(|value| value.as_str()) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|text| !text.trim().is_empty())
+                {
+                    Some(block.clone())
                 } else {
                     None
                 }
             })
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => String::new(),
-    };
-    let combined = if existing.is_empty() {
-        context.to_string()
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Inject context into an Anthropic-format request's system field.
+///
+/// The compiler prefix is emitted as a separate cacheable text block while the
+/// dynamic task tail remains uncached. That gives Anthropic-compatible providers
+/// a stable breakpoint without freezing per-request evidence.
+fn inject_system_context_anthropic(payload: &mut Value, context: &str) {
+    let (stable_prefix, dynamic_tail) = if context.starts_with("== Stable Context Artifacts ==") {
+        crate::litellm::split_context_prefix_tail(context)
     } else {
-        format!("{existing}\n\n---\n{context}")
+        ("", context)
     };
-    payload["system"] = Value::String(combined);
+    let mut blocks = existing_anthropic_system_blocks(payload);
+    if !stable_prefix.trim().is_empty() {
+        blocks.push(anthropic_cacheable_text_block(stable_prefix.to_string()));
+    }
+    if !dynamic_tail.trim().is_empty() {
+        blocks.push(anthropic_text_block(dynamic_tail.to_string()));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+    payload["system"] = Value::Array(blocks);
 }
 
 /// Pack orchestrator context into an Anthropic-format request's system field.
@@ -4240,16 +4273,28 @@ mod tests {
     fn anthropic_inject_sets_system_when_absent() {
         let mut payload = json!({"messages": [{"role": "user", "content": "hi"}]});
         inject_system_context_anthropic(&mut payload, "ctx");
-        assert_eq!(payload["system"], "ctx");
+        assert_eq!(
+            payload["system"],
+            json!([{
+                "type": "text",
+                "text": "ctx"
+            }])
+        );
     }
 
     #[test]
     fn anthropic_inject_appends_to_string_system() {
         let mut payload = json!({"system": "base", "messages": []});
         inject_system_context_anthropic(&mut payload, "ctx");
-        let sys = payload["system"].as_str().unwrap();
-        assert!(sys.contains("base"));
-        assert!(sys.contains("ctx"));
+        let sys = payload["system"].as_array().unwrap();
+        assert_eq!(sys[0], json!({"type": "text", "text": "base"}));
+        assert_eq!(
+            sys[1],
+            json!({
+                "type": "text",
+                "text": "ctx"
+            })
+        );
     }
 
     #[test]
@@ -4259,20 +4304,57 @@ mod tests {
             "messages": []
         });
         inject_system_context_anthropic(&mut payload, "ctx");
-        let sys = payload["system"].as_str().unwrap();
-        assert!(sys.contains("part1"));
-        assert!(sys.contains("part2"));
-        assert!(sys.contains("ctx"));
-        // Result must be a plain string, not an array.
-        assert!(payload["system"].is_string());
+        let sys = payload["system"].as_array().unwrap();
+        assert_eq!(sys[0], json!({"type": "text", "text": "part1"}));
+        assert_eq!(sys[1], json!({"type": "text", "text": "part2"}));
+        assert_eq!(
+            sys[2],
+            json!({
+                "type": "text",
+                "text": "ctx"
+            })
+        );
     }
 
     #[test]
     fn anthropic_inject_ignores_non_text_system_type() {
         let mut payload = json!({"system": 42, "messages": []});
         inject_system_context_anthropic(&mut payload, "ctx");
-        // Non-string/array system treated as absent — context becomes the full value.
-        assert_eq!(payload["system"], "ctx");
+        assert_eq!(
+            payload["system"],
+            json!([{
+                "type": "text",
+                "text": "ctx"
+            }])
+        );
+    }
+
+    #[test]
+    fn anthropic_inject_caches_stable_prefix_not_dynamic_tail() {
+        let mut payload = json!({"messages": []});
+        let context =
+            "== Stable Context Artifacts ==\n[repo:service_topology:active]\nstable\n\nRepository: repo\nTask: task\n";
+        inject_system_context_anthropic(&mut payload, context);
+        let sys = payload["system"].as_array().unwrap();
+        assert_eq!(sys.len(), 2);
+        assert_eq!(
+            sys[0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "stable compiler prefix should be provider-cacheable"
+        );
+        assert!(sys[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Stable Context Artifacts"));
+        assert_eq!(
+            sys[1].get("cache_control"),
+            None,
+            "dynamic repository/task tail must not become a provider cache breakpoint"
+        );
+        assert!(sys[1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Repository: repo"));
     }
 
     // ── extract_assistant_from_anthropic_response ─────────────────────
