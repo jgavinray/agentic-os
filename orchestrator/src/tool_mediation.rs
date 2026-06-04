@@ -1,8 +1,15 @@
 //! Deterministic tool menu shaping and tool-call authorization.
 //!
-//! This module is deliberately policy-like but not model-driven: it maps
-//! client-provided tools into bounded capabilities, detects simple request/tool
-//! intent, shapes upstream tool menus, and authorizes attempted tool calls.
+//! This module is the client-tool boundary. It sees the concrete tools a client
+//! offered and the concrete tool calls a client is about to execute. It maps
+//! those tool names and shell command shapes into a small local capability
+//! vocabulary, then optionally applies the broader request-level
+//! `OrchestrationPolicy`.
+//!
+//! The split is deliberate: orchestration policy describes what the request may
+//! do, while tool mediation translates that request-level policy into the
+//! client-specific tool menus and authorization decisions available in proxy
+//! mode.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,6 +18,11 @@ use uuid::Uuid;
 
 pub const TOOL_MEDIATION_POLICY_VERSION: &str = "deterministic-v1";
 
+/// Local capability vocabulary for client tools.
+///
+/// This enum is intentionally smaller and more concrete than
+/// `orchestration_policy::ToolCapability`. For example, `TextSearch` and
+/// `FileList` are local tool shapes that both map to policy-level `RepoRead`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPayloadFormat {
@@ -37,6 +49,7 @@ pub enum ToolCapability {
     Validation,
     Publishing,
     Shell,
+    ShellMutation,
     Unknown,
 }
 
@@ -50,6 +63,7 @@ impl ToolCapability {
             Self::Validation => "validation",
             Self::Publishing => "publishing",
             Self::Shell => "shell",
+            Self::ShellMutation => "shell_mutation",
             Self::Unknown => "unknown",
         }
     }
@@ -85,20 +99,31 @@ impl ToolIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolSummary {
+    /// Client-visible tool name, such as `Read`, `Bash`, or `str_replace_editor`.
     pub name: String,
+    /// Bounded local capability label derived from the tool name.
     pub capability: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolMenuOutcome {
+    /// Tool mediation policy version used for this shaping decision.
     pub policy_version: &'static str,
+    /// Whether the request used OpenAI or Anthropic tool schema.
     pub endpoint_format: &'static str,
+    /// Deterministic intent inferred from the user text for canonical shaping.
     pub intent: &'static str,
+    /// `pass` when nothing changed, `shape` when tools were hidden.
     pub decision: &'static str,
+    /// Bounded reason label for metrics and event metadata.
     pub reason: &'static str,
+    /// Tools originally offered by the client.
     pub offered_tools: Vec<ToolSummary>,
+    /// Tools left visible after canonical and policy shaping.
     pub allowed_tools: Vec<ToolSummary>,
+    /// Tools hidden from the forwarded model request.
     pub hidden_tools: Vec<ToolSummary>,
+    /// True when a forced tool choice was reset because that tool was hidden.
     pub tool_choice_changed: bool,
 }
 
@@ -124,29 +149,49 @@ impl ToolMenuOutcome {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolAuthorizeRequest {
+    /// Optional session for durable event/policy persistence.
     pub session_id: Option<String>,
+    /// Repository or namespace for classification and event storage.
     pub repo: Option<String>,
+    /// Human task label used for event grouping.
     pub task: Option<String>,
+    /// Current trajectory id when the client has one.
     pub trajectory_id: Option<Uuid>,
+    /// Attempt index inside the current trajectory.
     pub attempt_index: Option<i32>,
+    /// Parent event id for lineage.
     pub parent_event_id: Option<Uuid>,
+    /// Optional user-facing intent text supplied by the client/hook adapter.
     pub user_intent: Option<String>,
+    /// Tool name the client is about to execute.
     pub tool_name: String,
+    /// Raw client tool arguments. These are persisted for audit when a session
+    /// exists, but only bounded keys are copied into classifier input.
     #[serde(default)]
     pub arguments: Value,
+    /// Complete set of tools the client can execute. Used for canonical
+    /// replacement suggestions, such as preferring `Read` over `Bash cat`.
     #[serde(default)]
     pub available_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolAuthorizeResponse {
+    /// Tool mediation policy version used for this authorization decision.
     pub policy_version: &'static str,
+    /// `allow` or `deny`.
     pub decision: &'static str,
+    /// Bounded reason label for clients, metrics, and event metadata.
     pub reason: &'static str,
+    /// Capability inferred for the attempted call.
     pub capability: &'static str,
+    /// Original attempted tool name.
     pub attempted_tool: String,
+    /// Preferred canonical tool when denial is only a canonical-tool redirect.
     pub preferred_tool: Option<String>,
+    /// Optional replacement payload the client can feed back to the model loop.
     pub replacement: Option<Value>,
+    /// Human-readable explanation for the model/client loop.
     pub message: String,
 }
 
@@ -168,17 +213,36 @@ impl ToolAuthorizeResponse {
 }
 
 pub fn shape_openai_request(req: &mut Value, user_content: &str) -> ToolMenuOutcome {
-    shape_request(req, user_content, ToolPayloadFormat::OpenAi)
+    shape_openai_request_with_policy(req, user_content, None)
+}
+
+pub fn shape_openai_request_with_policy(
+    req: &mut Value,
+    user_content: &str,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
+) -> ToolMenuOutcome {
+    // OpenAI and Anthropic share the same policy logic. Only the tool-name
+    // extraction and forced-tool-choice normalization differ by payload format.
+    shape_request(req, user_content, ToolPayloadFormat::OpenAi, policy)
 }
 
 pub fn shape_anthropic_request(req: &mut Value, user_content: &str) -> ToolMenuOutcome {
-    shape_request(req, user_content, ToolPayloadFormat::Anthropic)
+    shape_anthropic_request_with_policy(req, user_content, None)
+}
+
+pub fn shape_anthropic_request_with_policy(
+    req: &mut Value,
+    user_content: &str,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
+) -> ToolMenuOutcome {
+    shape_request(req, user_content, ToolPayloadFormat::Anthropic, policy)
 }
 
 fn shape_request(
     req: &mut Value,
     user_content: &str,
     format: ToolPayloadFormat,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
 ) -> ToolMenuOutcome {
     let intent = detect_tool_intent(user_content);
     let Some(tools) = req.get_mut("tools").and_then(Value::as_array_mut) else {
@@ -190,8 +254,108 @@ fn shape_request(
         return outcome(format, intent, "pass", "no_tools", vec![], vec![], false);
     }
 
+    // Canonical shaping prefers narrower client tools over shell fallbacks even
+    // before orchestration policy is considered. Example: when both `Read` and
+    // `Bash` are available for a file-read intent, `Bash` is hidden.
     let hidden_names = hidden_tool_names(intent, &offered);
-    if hidden_names.is_empty() {
+
+    // Policy shaping is subtractive. The orchestrator cannot add tools in proxy
+    // mode because the client still owns execution; it can only hide offered
+    // tools that violate the derived operating envelope.
+    let policy_hidden_names: BTreeSet<String> = if let Some(p) = policy {
+        offered
+            .iter()
+            .filter(|tool| {
+                let cap = capability_for_tool_name(&tool.name);
+                policy_blocks_tool_capability(p, cap) || !policy_allows_tool_capability(p, cap)
+            })
+            .map(|tool| tool.name.clone())
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+
+    // Merge canonical and policy hidden names so the model sees the intersection
+    // of "best available client tool" and "allowed by orchestration policy".
+    let mut all_hidden: BTreeSet<String> = hidden_names.clone();
+    all_hidden.extend(policy_hidden_names);
+
+    // Determine if we have any policy-driven hidden tools (beyond canonical).
+    let policy_hidden_count = if let Some(_p) = policy {
+        offered
+            .iter()
+            .filter(|tool| {
+                let cap = capability_for_tool_name(&tool.name);
+                // Count tools hidden by policy but not by canonical rules
+                !hidden_names.contains(&tool.name)
+                    && (policy_blocks_tool_capability(_p, cap)
+                        || !policy_allows_tool_capability(_p, cap))
+            })
+            .count()
+    } else {
+        0
+    };
+
+    // If canonical hiding already hides everything, use canonical path.
+    if all_hidden.len() == offered.len() && hidden_names.len() == offered.len() {
+        tools.retain(|tool| {
+            tool_name(tool, format)
+                .map(|name| !all_hidden.contains(&name))
+                .unwrap_or(true)
+        });
+        let tool_choice_changed = normalize_tool_choice(req, format, &all_hidden);
+        let allowed = offered
+            .iter()
+            .filter(|tool| !all_hidden.contains(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let hidden = offered
+            .iter()
+            .filter(|tool| all_hidden.contains(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        return outcome(
+            format,
+            intent,
+            "shape",
+            "prefer_canonical_tool",
+            offered,
+            allowed,
+            tool_choice_changed,
+        )
+        .with_hidden(hidden);
+    }
+
+    // If policy would hide all offered tools, shape to an empty tool menu. That
+    // is preferable to leaving an unsafe or out-of-policy fallback visible.
+    if let Some(_p) = policy {
+        let all_blocked_by_policy = offered.iter().all(|tool| {
+            let cap = capability_for_tool_name(&tool.name);
+            policy_blocks_tool_capability(_p, cap) || !policy_allows_tool_capability(_p, cap)
+        });
+        if all_blocked_by_policy {
+            // Clear the tools array so the request reflects zero tools.
+            tools.clear();
+            // Normalize tool_choice against all_hidden before returning.
+            let tool_choice_changed = normalize_tool_choice(req, format, &all_hidden);
+            let allowed: Vec<ToolSummary> = vec![];
+            let hidden = offered.clone();
+            return outcome(
+                format,
+                intent,
+                "shape",
+                "policy_filtered_all_tools",
+                offered,
+                allowed,
+                tool_choice_changed,
+            )
+            .with_hidden(hidden);
+        }
+    }
+
+    // If canonical hiding found nothing and policy found nothing, pass through.
+    if hidden_names.is_empty() && policy_hidden_count == 0 {
         return outcome(
             format,
             intent,
@@ -203,20 +367,29 @@ fn shape_request(
         );
     }
 
+    // Apply filtering: hide tools that are in all_hidden.
     tools.retain(|tool| {
         tool_name(tool, format)
-            .map(|name| !hidden_names.contains(&name))
+            .map(|name| !all_hidden.contains(&name))
             .unwrap_or(true)
     });
-    let tool_choice_changed = normalize_tool_choice(req, format, &hidden_names);
+    let tool_choice_changed = normalize_tool_choice(req, format, &all_hidden);
+
+    // Determine the reason.
+    let reason = if policy_hidden_count > 0 {
+        "policy_filtered"
+    } else {
+        "prefer_canonical_tool"
+    };
+
     let allowed = offered
         .iter()
-        .filter(|tool| !hidden_names.contains(&tool.name))
+        .filter(|tool| !all_hidden.contains(&tool.name))
         .cloned()
         .collect::<Vec<_>>();
     let hidden = offered
         .iter()
-        .filter(|tool| hidden_names.contains(&tool.name))
+        .filter(|tool| all_hidden.contains(&tool.name))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -224,7 +397,7 @@ fn shape_request(
         format,
         intent,
         "shape",
-        "prefer_canonical_tool",
+        reason,
         offered,
         allowed,
         tool_choice_changed,
@@ -233,6 +406,14 @@ fn shape_request(
 }
 
 pub fn authorize_tool_call(req: &ToolAuthorizeRequest, enabled: bool) -> ToolAuthorizeResponse {
+    authorize_tool_call_with_policy(req, enabled, None)
+}
+
+pub fn authorize_tool_call_with_policy(
+    req: &ToolAuthorizeRequest,
+    enabled: bool,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
+) -> ToolAuthorizeResponse {
     if !enabled {
         return ToolAuthorizeResponse {
             policy_version: TOOL_MEDIATION_POLICY_VERSION,
@@ -252,6 +433,36 @@ pub fn authorize_tool_call(req: &ToolAuthorizeRequest, enabled: bool) -> ToolAut
     } else {
         attempted_capability
     };
+
+    // Enforce policy before canonical-tool preference. A blocked tool must not
+    // get a canonical replacement suggestion first, because blocked means the
+    // capability itself is outside the current request envelope.
+    if let Some(p) = policy {
+        if policy_blocks_tool_capability(p, command_capability) {
+            return ToolAuthorizeResponse {
+                policy_version: TOOL_MEDIATION_POLICY_VERSION,
+                decision: "deny",
+                reason: "policy_blocked_tool",
+                capability: command_capability.as_str(),
+                attempted_tool: req.tool_name.clone(),
+                preferred_tool: None,
+                replacement: None,
+                message: "Tool call denied by orchestration policy.".to_string(),
+            };
+        }
+        if !policy_allows_tool_capability(p, command_capability) {
+            return ToolAuthorizeResponse {
+                policy_version: TOOL_MEDIATION_POLICY_VERSION,
+                decision: "deny",
+                reason: "policy_tool_not_allowed",
+                capability: command_capability.as_str(),
+                attempted_tool: req.tool_name.clone(),
+                preferred_tool: None,
+                replacement: None,
+                message: "Tool call is not allowed by orchestration policy.".to_string(),
+            };
+        }
+    }
 
     if attempted_capability == ToolCapability::Shell {
         if let Some(preferred) =
@@ -320,6 +531,10 @@ impl WithHidden for ToolMenuOutcome {
 }
 
 fn hidden_tool_names(intent: ToolIntent, offered: &[ToolSummary]) -> BTreeSet<String> {
+    // Canonical hiding only applies when the client already offered the
+    // narrower tool. If `Bash` is the only available way to read a file, proxy
+    // mode leaves it visible because the orchestrator cannot execute a missing
+    // `Read` tool for the client.
     let Some(canonical) = canonical_capability_for_intent(intent) else {
         return BTreeSet::new();
     };
@@ -331,7 +546,10 @@ fn hidden_tool_names(intent: ToolIntent, offered: &[ToolSummary]) -> BTreeSet<St
     }
 
     match canonical {
-        ToolCapability::FileRead | ToolCapability::TextSearch | ToolCapability::FileList => offered
+        ToolCapability::FileRead
+        | ToolCapability::TextSearch
+        | ToolCapability::FileList
+        | ToolCapability::ShellMutation => offered
             .iter()
             .filter(|tool| tool.capability == ToolCapability::Shell.as_str())
             .map(|tool| tool.name.clone())
@@ -350,6 +568,84 @@ fn canonical_capability_for_intent(intent: ToolIntent) -> Option<ToolCapability>
         ToolIntent::Publishing => Some(ToolCapability::Publishing),
         ToolIntent::General | ToolIntent::Unknown => None,
     }
+}
+
+/// Map a tool-mediation capability to the corresponding orchestration-policy
+/// capability for allowed/blocked checks.
+///
+/// Mapping semantics:
+/// - FileRead -> FileRead (allowed by FileRead or RepoRead; blocked by FileRead)
+/// - TextSearch -> RepoRead (allowed by RepoRead; blocked by RepoRead)
+/// - FileList -> RepoRead (allowed by RepoRead; blocked by RepoRead)
+/// - FileEdit -> FileEdit (allowed/blocked by FileEdit)
+/// - Validation -> ShellRead (allowed/blocked by ShellRead)
+/// - Publishing -> GitWrite (allowed/blocked by GitWrite)
+/// - Shell -> ShellRead (allowed/blocked by ShellRead)
+/// - ShellMutation -> ShellMutation (allowed/blocked by ShellMutation)
+/// - Unknown -> always false
+fn map_capability_to_policy(
+    capability: ToolCapability,
+) -> crate::orchestration_policy::ToolCapability {
+    match capability {
+        ToolCapability::FileRead => crate::orchestration_policy::ToolCapability::FileRead,
+        ToolCapability::TextSearch => crate::orchestration_policy::ToolCapability::RepoRead,
+        ToolCapability::FileList => crate::orchestration_policy::ToolCapability::RepoRead,
+        ToolCapability::FileEdit => crate::orchestration_policy::ToolCapability::FileEdit,
+        ToolCapability::Validation => crate::orchestration_policy::ToolCapability::ShellRead,
+        ToolCapability::Publishing => crate::orchestration_policy::ToolCapability::GitWrite,
+        ToolCapability::Shell => crate::orchestration_policy::ToolCapability::ShellRead,
+        ToolCapability::ShellMutation => crate::orchestration_policy::ToolCapability::ShellMutation,
+        ToolCapability::Unknown => crate::orchestration_policy::ToolCapability::Unknown,
+    }
+}
+
+/// Check whether the policy allows the given tool capability.
+///
+/// - FileRead: allowed if allowed_tools contains FileRead OR RepoRead.
+/// - TextSearch/FileList: allowed if allowed_tools contains RepoRead.
+/// - FileEdit: allowed if allowed_tools contains FileEdit.
+/// - Validation/Shell: allowed if allowed_tools contains ShellRead.
+/// - Publishing: allowed if allowed_tools contains GitWrite.
+/// - Unknown: always false (even if allowed_tools contains Unknown).
+fn policy_allows_tool_capability(
+    policy: &crate::orchestration_policy::OrchestrationPolicy,
+    capability: ToolCapability,
+) -> bool {
+    match capability {
+        ToolCapability::Unknown => return false,
+        // FileRead is allowed if either FileRead or RepoRead is in allowed_tools.
+        ToolCapability::FileRead => {
+            policy
+                .allowed_tools
+                .contains(&crate::orchestration_policy::ToolCapability::FileRead)
+                || policy
+                    .allowed_tools
+                    .contains(&crate::orchestration_policy::ToolCapability::RepoRead)
+        }
+        _ => {
+            let policy_cap = map_capability_to_policy(capability);
+            policy.allowed_tools.contains(&policy_cap)
+        }
+    }
+}
+
+/// Check whether the policy blocks the given tool capability.
+///
+/// - FileRead: blocked if blocked_tools contains FileRead.
+/// - TextSearch/FileList: blocked if blocked_tools contains RepoRead.
+/// - FileEdit: blocked if blocked_tools contains FileEdit.
+/// - Validation/Shell: blocked if blocked_tools contains ShellRead.
+/// - Publishing: blocked if blocked_tools contains GitWrite.
+/// - Unknown: always false (even if blocked_tools contains Unknown).
+fn policy_blocks_tool_capability(
+    policy: &crate::orchestration_policy::OrchestrationPolicy,
+    capability: ToolCapability,
+) -> bool {
+    if matches!(capability, ToolCapability::Unknown) {
+        return false;
+    }
+    let policy_cap = map_capability_to_policy(capability);
+    policy.blocked_tools.contains(&policy_cap)
 }
 
 fn preferred_tool_for_capability(
@@ -551,11 +847,16 @@ fn command_capability(arguments: &Value) -> ToolCapability {
     } else if is_shell_file_list(&lower) {
         ToolCapability::FileList
     } else {
-        ToolCapability::Shell
+        // Unknown shell means mutation, not "safe shell". This is intentionally
+        // conservative: read-only policy must not authorize arbitrary shell just
+        // because the command is unfamiliar.
+        ToolCapability::ShellMutation
     }
 }
 
 fn command_from_arguments(arguments: &Value) -> Option<String> {
+    // Different clients serialize shell commands differently. Keep this list
+    // deliberately small and explicit so authorization remains predictable.
     arguments
         .as_str()
         .map(str::to_string)
@@ -676,6 +977,11 @@ pub fn bounded_reason(value: &str) -> &'static str {
         "no_tools" => "no_tools",
         "not_applicable" => "not_applicable",
         "disabled" => "disabled",
+        "policy_filtered" => "policy_filtered",
+        "policy_would_hide_all_tools" => "policy_would_hide_all_tools",
+        "policy_filtered_all_tools" => "policy_filtered_all_tools",
+        "policy_blocked_tool" => "policy_blocked_tool",
+        "policy_tool_not_allowed" => "policy_tool_not_allowed",
         _ => "unknown",
     }
 }
@@ -689,6 +995,7 @@ pub fn bounded_capability(value: &str) -> &'static str {
         "validation" => "validation",
         "publishing" => "publishing",
         "shell" => "shell",
+        "shell_mutation" => "shell_mutation",
         "unknown" => "unknown",
         _ => "unknown",
     }
@@ -811,5 +1118,619 @@ mod tests {
 
         assert_eq!(response.decision, "allow");
         assert_eq!(response.reason, "not_applicable");
+    }
+
+    #[test]
+    fn shape_openai_request_with_policy_matches_shape_openai_request() {
+        let mut req1 = json!({
+            "messages": [{"role": "user", "content": "Read README.md"}],
+            "tools": [
+                {"type": "function", "function": {"name": "Read"}},
+                {"type": "function", "function": {"name": "Bash"}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "Bash"}}
+        });
+        let mut req2 = serde_json::to_value(&req1).unwrap();
+
+        let outcome1 = shape_openai_request(&mut req1, "Read README.md");
+        let outcome2 = shape_openai_request_with_policy(&mut req2, "Read README.md", None);
+
+        assert_eq!(outcome1.decision, outcome2.decision);
+        assert_eq!(outcome1.reason, outcome2.reason);
+        assert_eq!(outcome1.hidden_tools.len(), outcome2.hidden_tools.len());
+        assert_eq!(outcome1.hidden_tools[0].name, outcome2.hidden_tools[0].name);
+    }
+
+    #[test]
+    fn authorize_tool_call_with_policy_matches_authorize_tool_call() {
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("read README.md".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "cat README.md"}),
+            available_tools: vec!["Read".to_string(), "Bash".to_string()],
+        };
+
+        let response1 = authorize_tool_call(&req, true);
+        let response2 = authorize_tool_call_with_policy(&req, true, None);
+
+        assert_eq!(response1.decision, response2.decision);
+        assert_eq!(response1.reason, response2.reason);
+        assert_eq!(response1.preferred_tool, response2.preferred_tool);
+        assert_eq!(response1.replacement, response2.replacement);
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy mapping helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_allows_file_read_when_repo_read_allowed() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::RepoRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        assert!(policy_allows_tool_capability(
+            &policy,
+            ToolCapability::FileRead
+        ));
+    }
+
+    #[test]
+    fn policy_blocks_text_search_when_repo_read_blocked() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![PolicyCap::RepoRead],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        assert!(policy_blocks_tool_capability(
+            &policy,
+            ToolCapability::TextSearch
+        ));
+    }
+
+    #[test]
+    fn policy_maps_validation_to_shell_read() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::ShellRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        assert!(policy_allows_tool_capability(
+            &policy,
+            ToolCapability::Validation
+        ));
+    }
+
+    #[test]
+    fn policy_maps_publishing_to_git_write() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::GitWrite],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        assert!(policy_allows_tool_capability(
+            &policy,
+            ToolCapability::Publishing
+        ));
+    }
+
+    #[test]
+    fn policy_unknown_is_not_allowed_and_not_blocked() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::FileRead],
+            required_tools: vec![],
+            blocked_tools: vec![PolicyCap::FileRead],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        assert!(!policy_allows_tool_capability(
+            &policy,
+            ToolCapability::Unknown
+        ));
+        assert!(!policy_blocks_tool_capability(
+            &policy,
+            ToolCapability::Unknown
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy enforcement in authorize_tool_call_with_policy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_blocks_file_read_denies_read() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![PolicyCap::FileRead],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("read README.md".to_string()),
+            tool_name: "Read".to_string(),
+            arguments: json!({}),
+            available_tools: vec!["Read".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "policy_blocked_tool");
+        assert_eq!(response.capability, "file_read");
+        assert_eq!(response.attempted_tool, "Read");
+        assert_eq!(response.preferred_tool, None);
+        assert_eq!(
+            response.message,
+            "Tool call denied by orchestration policy."
+        );
+    }
+
+    #[test]
+    fn policy_not_allowing_shell_read_denies_bash() {
+        use crate::orchestration_policy::{EditPolicy, GitPolicy, RuntimePolicy};
+
+        // Empty allowed_tools and empty blocked_tools means nothing is allowed.
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("run a command".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "echo hello"}),
+            available_tools: vec!["Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "policy_tool_not_allowed");
+        assert_eq!(response.capability, "shell_mutation");
+        assert_eq!(response.attempted_tool, "Bash");
+        assert_eq!(response.preferred_tool, None);
+        assert_eq!(
+            response.message,
+            "Tool call is not allowed by orchestration policy."
+        );
+    }
+
+    #[test]
+    fn policy_shell_read_does_not_allow_generic_bash() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::ShellRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("run a command".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "echo hello"}),
+            available_tools: vec!["Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "policy_tool_not_allowed");
+        assert_eq!(response.capability, "shell_mutation");
+        assert_eq!(response.attempted_tool, "Bash");
+        assert_eq!(response.preferred_tool, None);
+        assert_eq!(
+            response.message,
+            "Tool call is not allowed by orchestration policy."
+        );
+    }
+
+    #[test]
+    fn policy_allows_file_read_but_canonical_read_exists() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::FileRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("read README.md".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "cat README.md"}),
+            available_tools: vec!["Read".to_string(), "Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        // Policy allows FileRead, but canonical-tool preference still applies.
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "prefer_canonical_tool");
+        assert_eq!(response.capability, "file_read");
+        assert_eq!(response.preferred_tool.as_deref(), Some("Read"));
+    }
+
+    // -----------------------------------------------------------------------
+    // policy_filtered_all_tools — OpenAI
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn openai_bash_only_with_empty_policy_hides_all() {
+        use crate::orchestration_policy::{EditPolicy, GitPolicy, RuntimePolicy};
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let mut req = json!({
+            "messages": [{"role": "user", "content": "run a command"}],
+            "tools": [
+                {"type": "function", "function": {"name": "Bash"}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "Bash"}}
+        });
+
+        let outcome = shape_openai_request_with_policy(&mut req, "run a command", Some(&policy));
+
+        assert_eq!(outcome.decision, "shape");
+        assert_eq!(outcome.reason, "policy_filtered_all_tools");
+        assert_eq!(req["tools"].as_array().unwrap().len(), 0);
+        assert!(outcome.allowed_tools.is_empty());
+        assert_eq!(outcome.hidden_tools.len(), 1);
+        assert_eq!(outcome.hidden_tools[0].name, "Bash");
+    }
+
+    #[test]
+    fn openai_bash_only_with_empty_policy_tool_choice_auto() {
+        use crate::orchestration_policy::{EditPolicy, GitPolicy, RuntimePolicy};
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let mut req = json!({
+            "messages": [{"role": "user", "content": "run a command"}],
+            "tools": [
+                {"type": "function", "function": {"name": "Bash"}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "Bash"}}
+        });
+
+        let outcome = shape_openai_request_with_policy(&mut req, "run a command", Some(&policy));
+
+        assert_eq!(req["tool_choice"], "auto");
+        assert!(outcome.tool_choice_changed);
+    }
+
+    // -----------------------------------------------------------------------
+    // policy_filtered_all_tools — Anthropic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn anthropic_bash_only_with_empty_policy_hides_all() {
+        use crate::orchestration_policy::{EditPolicy, GitPolicy, RuntimePolicy};
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let mut req = json!({
+            "messages": [],
+            "tools": [
+                {"name": "bash", "input_schema": {}}
+            ],
+            "tool_choice": {"type": "tool", "name": "bash"}
+        });
+
+        let outcome = shape_anthropic_request_with_policy(&mut req, "run a command", Some(&policy));
+
+        assert_eq!(outcome.decision, "shape");
+        assert_eq!(outcome.reason, "policy_filtered_all_tools");
+        assert_eq!(req["tools"].as_array().unwrap().len(), 0);
+        assert!(outcome.allowed_tools.is_empty());
+        assert_eq!(outcome.hidden_tools.len(), 1);
+        assert_eq!(outcome.hidden_tools[0].name, "bash");
+    }
+
+    // -----------------------------------------------------------------------
+    // ShellMutation policy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_blocks_shell_mutation_denies_mutating_bash() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![],
+            required_tools: vec![],
+            blocked_tools: vec![PolicyCap::ShellMutation],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("remove a file".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            available_tools: vec!["Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "policy_blocked_tool");
+        assert_eq!(response.capability, "shell_mutation");
+        assert_eq!(response.attempted_tool, "Bash");
+        assert_eq!(response.preferred_tool, None);
+        assert_eq!(
+            response.message,
+            "Tool call denied by orchestration policy."
+        );
+    }
+
+    #[test]
+    fn policy_shell_read_only_does_not_allow_mutating_bash() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::ShellRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("remove a file".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "rm -rf /tmp/example"}),
+            available_tools: vec!["Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "deny");
+        assert_eq!(response.reason, "policy_tool_not_allowed");
+        assert_eq!(response.capability, "shell_mutation");
+        assert_eq!(response.attempted_tool, "Bash");
+        assert_eq!(response.preferred_tool, None);
+        assert_eq!(
+            response.message,
+            "Tool call is not allowed by orchestration policy."
+        );
+    }
+
+    #[test]
+    fn policy_repo_read_allows_rg_shell_as_text_search() {
+        use crate::orchestration_policy::{
+            EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
+        };
+
+        let policy = crate::orchestration_policy::OrchestrationPolicy {
+            context_sources: vec![],
+            allowed_tools: vec![PolicyCap::RepoRead],
+            required_tools: vec![],
+            blocked_tools: vec![],
+            edit_policy: EditPolicy::ReadOnly,
+            validation_policy: crate::orchestration_policy::ValidationPolicy::None,
+            git_policy: GitPolicy::NoGitChanges,
+            runtime_policy: RuntimePolicy::NoRestart,
+            scope_policy: vec![],
+            prompt_refinement_policy: crate::orchestration_policy::PromptRefinementPolicy::None,
+            risk_policy: vec![],
+        };
+
+        let req = ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("search for pattern".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command": "rg pattern src"}),
+            available_tools: vec!["Bash".to_string()],
+        };
+
+        let response = authorize_tool_call_with_policy(&req, true, Some(&policy));
+
+        assert_eq!(response.decision, "allow");
+        assert_eq!(response.capability, "text_search");
+        assert_ne!(response.capability, "shell_mutation");
     }
 }

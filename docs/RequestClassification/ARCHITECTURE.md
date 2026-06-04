@@ -192,3 +192,28 @@ Live enforcement can be promoted only for high-confidence deterministic cases:
 
 Strong model versus small model routing comes later, after shadow data proves the
 labels are stable.
+
+## Orchestration Policy Handoff
+
+Request classification does not directly decide which tools a model sees or
+which client tool calls are allowed. It produces bounded labels. The
+orchestration policy layer consumes those labels and derives the operational
+envelope for the request.
+
+The handoff is:
+
+```text
+RequestClassification
+  -> derive_orchestration_policy
+  -> context source eligibility
+  -> allowed/required/blocked tool capabilities
+  -> edit, validation, git, runtime, prompt-refinement, and risk policies
+  -> event metadata and agent_orchestration_policies ledger row
+```
+
+This separation keeps the classifier rebuildable and privacy-bounded. The
+policy layer can change tool/runtime behavior without adding unbounded text to
+`agent_request_classifications`, and policy rows can be appended for later
+analysis without rewriting historical classification rows.
+
+See [../ORCHESTRATION_POLICY.md](../ORCHESTRATION_POLICY.md).
