@@ -48,6 +48,21 @@ Trajectory capture groups one user intent and its downstream context pack, model
 
 Completion writes one idempotent `trajectory_result` event with bounded statuses: `succeeded`, `abandoned`, `unresolved`, or `reverted`. `TRAJECTORY_CAPTURE_ENABLED=false` disables trajectory metadata, result emission, the idle sweep, and trajectory metrics. See [TRAJECTORIES.md](TRAJECTORIES.md).
 
+## Orchestration Policy
+
+Request classification produces bounded labels such as intent, domain,
+artifact type, risk, complexity, route, and response contract. Orchestration
+policy turns those labels into an explicit operating envelope for the request:
+eligible context sources, allowed/required/blocked tool capabilities, edit
+scope, validation posture, git behavior, runtime behavior, prompt-refinement
+mode, and risk overlays.
+
+The policy is derived before request forwarding and is persisted after the
+request or tool-authorization event exists. Policy metadata is attached to
+trajectory events for local inspection, while normalized policy rows are
+appended to `agent_orchestration_policies` for analytics and future classifier
+improvement. See [ORCHESTRATION_POLICY.md](ORCHESTRATION_POLICY.md).
+
 ## Tool Mediation
 
 Tool mediation is deterministic infrastructure between request classification and eventual full orchestration. In the current proxy mode, the client still owns tool execution and supplies the tool menu. When `TOOL_MEDIATION_ENABLED=true`, agentic-os maps those tool names into bounded capabilities, detects simple tool intent, and shapes the OpenAI or Anthropic `tools` array before forwarding the request. For example, if a request is a file-read intent and the client supplied both `Read` and `Bash`, the orchestrator hides `Bash` for that model call so the model sees the canonical read capability.

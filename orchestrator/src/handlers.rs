@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 
 use crate::anthropic;
 use crate::db;
+use crate::orchestration_policy;
 use crate::qdrant;
 use crate::rate_limit;
 use crate::state::*;
@@ -729,10 +730,100 @@ pub async fn authorize_tool(
             .into_response();
     };
 
-    let response = crate::tool_mediation::authorize_tool_call(&req, state.tool_mediation_enabled);
+    // `/tools/authorize` is the runtime enforcement path. A model request can
+    // have its tool menu shaped before generation, but a client may still ask
+    // to run a specific tool later. This endpoint re-derives policy from the
+    // attempted tool call and decides whether that concrete call is allowed.
+    let (classification, policy) =
+        derive_tool_authorization_policy(&req, &namespace, state.capture_pool.is_some());
+    let response = crate::tool_mediation::authorize_tool_call_with_policy(
+        &req,
+        state.tool_mediation_enabled,
+        Some(&policy),
+    );
+    let policy_metadata = orchestration_policy::compact_policy_metadata(&classification, &policy);
     telemetry::record_tool_authorization(&state.metrics, &response);
-    persist_tool_authorization_event(&state, &namespace, &req, &response);
+    persist_tool_authorization_event(
+        &state,
+        &namespace,
+        &req,
+        &response,
+        Some(classification),
+        Some(policy),
+        Some(policy_metadata),
+    );
     axum::Json(response).into_response()
+}
+
+/// Build compact classification text from the tool-authorization request.
+///
+/// Tool authorization is the one place where the orchestrator sees a concrete
+/// attempted tool call before the client executes it. We need enough text to let
+/// request classification detect destructive shell commands, current-info
+/// queries, paths, and similar operational signals. We do not want to serialize
+/// the entire argument object into classifier input, because tool payloads may
+/// contain arbitrary user-controlled text or sensitive values.
+///
+/// The bounded key list below is therefore part of the policy contract. Unknown
+/// keys are ignored for classification even though the full argument payload may
+/// still be preserved in the tool authorization event metadata.
+fn tool_authorization_classification_text(
+    req: &crate::tool_mediation::ToolAuthorizeRequest,
+) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(intent) = req
+        .user_intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(intent.to_string());
+    }
+
+    parts.push(format!("tool:{}", req.tool_name));
+
+    let argument_keys = ["command", "cmd", "script", "query", "path", "file_path"];
+    for key in argument_keys {
+        if let Some(Value::String(s)) = req.arguments.get(key) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                parts.push(format!("{}:{}", key, trimmed));
+            }
+        }
+    }
+
+    parts.join("\n")
+}
+
+fn derive_tool_authorization_policy(
+    req: &crate::tool_mediation::ToolAuthorizeRequest,
+    namespace: &str,
+    raw_capture_enabled: bool,
+) -> (
+    crate::request_classification::RequestClassification,
+    orchestration_policy::OrchestrationPolicy,
+) {
+    // Tool authorization derives policy from the attempted tool call, not just
+    // the original user prompt. That matters for generic intents like "run a
+    // command" where the destructive signal exists only inside the command
+    // argument.
+    let repo = req.repo.as_deref().unwrap_or(namespace);
+    let session_id = req.session_id.as_deref().unwrap_or("unknown");
+    let request_text = tool_authorization_classification_text(req);
+    let classification = crate::request_classification::classify_request_text(
+        repo,
+        session_id,
+        &request_text,
+        None,
+        "tool_authorization_request",
+    );
+    let policy = orchestration_policy::derive_orchestration_policy(
+        &classification,
+        &request_text,
+        raw_capture_enabled,
+    );
+    (classification, policy)
 }
 
 fn persist_tool_authorization_event(
@@ -740,10 +831,16 @@ fn persist_tool_authorization_event(
     namespace: &str,
     req: &crate::tool_mediation::ToolAuthorizeRequest,
     response: &crate::tool_mediation::ToolAuthorizeResponse,
+    policy_classification: Option<crate::request_classification::RequestClassification>,
+    policy: Option<orchestration_policy::OrchestrationPolicy>,
+    policy_metadata: Option<Value>,
 ) {
     if !state.tool_mediation_enabled {
         return;
     }
+    // Tool authorization can be called without a session when a client only
+    // wants an immediate allow/deny answer. Without a session, there is nowhere
+    // durable to attach the decision, so persistence is skipped.
     let Some(session_id) = req.session_id.clone() else {
         return;
     };
@@ -754,11 +851,17 @@ fn persist_tool_authorization_event(
         .unwrap_or_else(|| state.default_task.clone());
     let mut metadata = response.metadata(req);
     if let Some(object) = metadata.as_object_mut() {
+        // The full tool arguments are stored in event metadata for audit and
+        // operator inspection. This is separate from classifier input, which is
+        // bounded by `tool_authorization_classification_text`.
         object.insert("tool_arguments".to_string(), req.arguments.clone());
         object.insert(
             "available_tools".to_string(),
             serde_json::json!(req.available_tools),
         );
+        if let Some(policy_metadata) = policy_metadata {
+            object.insert("orchestration_policy".to_string(), policy_metadata);
+        }
     }
     let trajectory_id = state
         .trajectory_capture_enabled
@@ -788,6 +891,8 @@ fn persist_tool_authorization_event(
         error_description: None,
     };
     let state_bg = state.clone();
+    let policy_classification_bg = policy_classification.clone();
+    let policy_bg = policy.clone();
     spawn_bounded_background(state, "tool_authorization_event", async move {
         match db::append_event_from_request(
             &state_bg.pool,
@@ -797,8 +902,31 @@ fn persist_tool_authorization_event(
         )
         .await
         {
-            Ok((_event_id, _indexed)) => {
+            Ok((event_id, _indexed)) => {
                 spawn_feature_extraction(&state_bg, &repo, &session_id, event.trajectory_id);
+                if let (Some(classification), Some(policy)) = (policy_classification_bg, policy_bg)
+                {
+                    let mut classification = classification;
+                    classification.event_id = event_id.clone();
+                    // The policy row is written after the authorization event
+                    // so the append-only ledger can point at a durable event id
+                    // instead of a synthetic pre-insert placeholder.
+                    if let Err(e) = orchestration_policy::persist_orchestration_policy(
+                        &state_bg.pool,
+                        &classification,
+                        &policy,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            target = "orchestration_policy",
+                            repo = %repo,
+                            task = %task,
+                            event_id = %event_id,
+                            "failed to persist tool authorization orchestration policy: {e}"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -2111,7 +2239,46 @@ async fn persist_request_event(
     trajectory: crate::trajectory::TrajectoryContext,
     request_metadata: Option<Value>,
 ) -> Option<uuid::Uuid> {
-    let metadata = crate::trajectory::make_request_metadata(request_metadata, trajectory);
+    // Pre-request: classify and enrich request metadata so the trajectory event
+    // itself tells an operator which policy governed the request.
+    let raw_capture_enabled = state.capture_pool.is_some();
+    let classification = crate::request_classification::classify_request_text(
+        repo,
+        session_id,
+        user_content,
+        None,
+        "user_message",
+    );
+    let policy = orchestration_policy::derive_orchestration_policy(
+        &classification,
+        user_content,
+        raw_capture_enabled,
+    );
+    let policy_metadata = orchestration_policy::compact_policy_metadata(&classification, &policy);
+
+    // Preserve caller-provided metadata while adding a compact policy snapshot.
+    // The normalized policy ledger is written separately after the event insert.
+    let enriched_metadata = if let Some(ref obj) = request_metadata {
+        if let Value::Object(map) = obj {
+            // request_metadata is an object - add/replace "orchestration_policy" key.
+            let mut enriched = map.clone();
+            enriched.insert("orchestration_policy".to_string(), policy_metadata.clone());
+            Some(Value::Object(enriched))
+        } else {
+            // Non-object value - wrap it.
+            let mut wrapper = serde_json::Map::new();
+            wrapper.insert("orchestration_policy".to_string(), policy_metadata.clone());
+            wrapper.insert("original_metadata".to_string(), obj.clone());
+            Some(Value::Object(wrapper))
+        }
+    } else {
+        // None - create a new object.
+        let mut map = serde_json::Map::new();
+        map.insert("orchestration_policy".to_string(), policy_metadata.clone());
+        Some(Value::Object(map))
+    };
+
+    let metadata = crate::trajectory::make_request_metadata(enriched_metadata, trajectory);
     let req = AppendEventRequest {
         session_id: session_id.to_string(),
         repo: repo.to_string(),
@@ -2139,6 +2306,35 @@ async fn persist_request_event(
     let event_id = uuid::Uuid::parse_str(&event.id).ok();
     match db::insert_event(&state.pool, &event).await {
         Ok(()) => {
+            // Post-persist: classify from the stored event and write the
+            // append-only policy ledger row. The second classification keeps
+            // the persisted ledger aligned with the durable event shape.
+            let classification_event = db::AgentEvent {
+                metadata: event.metadata.clone(),
+                ..event.clone()
+            };
+            let classification =
+                crate::request_classification::classify_request_event(&classification_event);
+            let policy = orchestration_policy::derive_orchestration_policy(
+                &classification,
+                user_content,
+                raw_capture_enabled,
+            );
+            if let Err(e) = orchestration_policy::persist_orchestration_policy(
+                &state.pool,
+                &classification,
+                &policy,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "orchestration_policy",
+                    repo,
+                    event_id = %event.id,
+                    "failed to persist orchestration policy: {e}"
+                );
+            }
+
             spawn_qdrant_index_event(state, event);
             spawn_feature_extraction(state, repo, session_id, Some(trajectory.trajectory_id));
             event_id
@@ -2800,14 +2996,6 @@ pub async fn chat_completions(
             &route.routed_model,
         )
     });
-    let tool_mediation_metadata = if state.tool_mediation_enabled {
-        let outcome = crate::tool_mediation::shape_openai_request(&mut req, &user_content);
-        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
-        Some(outcome.metadata())
-    } else {
-        None
-    };
-    let request_metadata = merge_request_metadata([sampling_metadata, tool_mediation_metadata]);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
             Ok(session_id) => Some(session_id),
@@ -2819,6 +3007,33 @@ pub async fn chat_completions(
     } else {
         None
     };
+    let tool_mediation_metadata = if state.tool_mediation_enabled {
+        // Shape the OpenAI tool menu with the same policy model used by
+        // `/tools/authorize`. This only removes tools from the client-provided
+        // menu; proxy mode cannot invent tools the client did not offer.
+        let classification = crate::request_classification::classify_request_text(
+            &repo,
+            session_id.as_deref().unwrap_or("unknown"),
+            &user_content,
+            None,
+            "user_message",
+        );
+        let policy = orchestration_policy::derive_orchestration_policy(
+            &classification,
+            &user_content,
+            state.capture_pool.is_some(),
+        );
+        let outcome = crate::tool_mediation::shape_openai_request_with_policy(
+            &mut req,
+            &user_content,
+            Some(&policy),
+        );
+        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        Some(outcome.metadata())
+    } else {
+        None
+    };
+    let request_metadata = merge_request_metadata([sampling_metadata, tool_mediation_metadata]);
     let trajectory = if let Some(session_id) = session_id.as_deref() {
         Some(begin_trajectory_for_request(&state, session_id).await)
     } else {
@@ -3367,14 +3582,6 @@ pub async fn messages(
     normalize_response_content_types(&mut req);
     sanitize_anthropic_litellm_request(&mut req);
     inject_local_reasoning_contract_anthropic(&mut req, reasoning_selection);
-    let tool_mediation_metadata = if state.tool_mediation_enabled {
-        let outcome = crate::tool_mediation::shape_anthropic_request(&mut req, &user_content);
-        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
-        Some(outcome.metadata())
-    } else {
-        None
-    };
-    let request_metadata = merge_request_metadata([tool_mediation_metadata]);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
             Ok(session_id) => Some(session_id),
@@ -3386,6 +3593,33 @@ pub async fn messages(
     } else {
         None
     };
+    let tool_mediation_metadata = if state.tool_mediation_enabled {
+        // Same policy-aware shaping as the OpenAI endpoint, but applied to the
+        // Anthropic `tools` shape. The payload stays Anthropic-formatted all the
+        // way through this handler.
+        let classification = crate::request_classification::classify_request_text(
+            &repo,
+            session_id.as_deref().unwrap_or("unknown"),
+            &user_content,
+            None,
+            "user_message",
+        );
+        let policy = orchestration_policy::derive_orchestration_policy(
+            &classification,
+            &user_content,
+            state.capture_pool.is_some(),
+        );
+        let outcome = crate::tool_mediation::shape_anthropic_request_with_policy(
+            &mut req,
+            &user_content,
+            Some(&policy),
+        );
+        telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        Some(outcome.metadata())
+    } else {
+        None
+    };
+    let request_metadata = merge_request_metadata([tool_mediation_metadata]);
     let trajectory = if let Some(session_id) = session_id.as_deref() {
         Some(begin_trajectory_for_request(&state, session_id).await)
     } else {
@@ -4156,6 +4390,127 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    #[test]
+    fn derive_tool_authorization_policy_uses_request_fields() {
+        let req = crate::tool_mediation::ToolAuthorizeRequest {
+            session_id: Some("session-a".to_string()),
+            repo: Some("repo-a".to_string()),
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("explain the logs".to_string()),
+            tool_name: "Read".to_string(),
+            arguments: json!({}),
+            available_tools: vec![],
+        };
+
+        let (classification, policy) = derive_tool_authorization_policy(&req, "namespace-a", false);
+
+        assert_eq!(classification.repo, "repo-a");
+        assert_eq!(classification.session_id, "session-a");
+        assert!(policy
+            .scope_policy
+            .contains(&orchestration_policy::ScopePolicy::NoScp));
+    }
+
+    #[test]
+    fn derive_tool_authorization_policy_falls_back_to_namespace_and_tool_name() {
+        let req = crate::tool_mediation::ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: None,
+            tool_name: "Bash".to_string(),
+            arguments: json!({}),
+            available_tools: vec![],
+        };
+
+        let (classification, policy) = derive_tool_authorization_policy(&req, "namespace-a", false);
+
+        assert_eq!(classification.repo, "namespace-a");
+        assert_eq!(classification.session_id, "unknown");
+        assert!(policy
+            .scope_policy
+            .contains(&orchestration_policy::ScopePolicy::NoScp));
+    }
+
+    // ── Tool authorization classification text ────────────────────────
+
+    #[test]
+    fn derive_tool_authorization_policy_sees_destructive_command_arguments() {
+        let req = crate::tool_mediation::ToolAuthorizeRequest {
+            session_id: Some("session-a".to_string()),
+            repo: Some("repo-a".to_string()),
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: Some("run a command".to_string()),
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command":"rm -rf /tmp/example"}),
+            available_tools: vec![],
+        };
+
+        let (classification, policy) = derive_tool_authorization_policy(&req, "namespace-a", false);
+
+        assert!(classification
+            .risk
+            .contains(&crate::request_classification::RequestRisk::DestructiveCommand));
+        assert!(policy
+            .blocked_tools
+            .contains(&orchestration_policy::ToolCapability::ShellMutation));
+    }
+
+    #[test]
+    fn derive_tool_authorization_policy_allows_search_command_arguments_without_destructive_risk() {
+        let req = crate::tool_mediation::ToolAuthorizeRequest {
+            session_id: Some("session-a".to_string()),
+            repo: Some("repo-a".to_string()),
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: None,
+            tool_name: "Bash".to_string(),
+            arguments: json!({"command":"rg pattern src"}),
+            available_tools: vec![],
+        };
+
+        let (classification, policy) = derive_tool_authorization_policy(&req, "namespace-a", false);
+
+        assert!(!classification
+            .risk
+            .contains(&crate::request_classification::RequestRisk::DestructiveCommand));
+        assert!(policy
+            .scope_policy
+            .contains(&orchestration_policy::ScopePolicy::NoScp));
+    }
+
+    #[test]
+    fn tool_authorization_classification_text_ignores_unknown_argument_keys() {
+        let req = crate::tool_mediation::ToolAuthorizeRequest {
+            session_id: None,
+            repo: None,
+            task: None,
+            trajectory_id: None,
+            attempt_index: None,
+            parent_event_id: None,
+            user_intent: None,
+            tool_name: "Bash".to_string(),
+            arguments: json!({"secret":"sk-test", "command":"echo ok"}),
+            available_tools: vec![],
+        };
+
+        let text = tool_authorization_classification_text(&req);
+
+        assert!(!text.contains("sk-test"));
+        assert!(text.contains("command:echo ok"));
+    }
 
     // ── Auth headers ──────────────────────────────────────────────────
 

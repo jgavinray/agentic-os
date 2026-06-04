@@ -13,6 +13,7 @@ pub mod hybrid;
 pub mod litellm;
 pub mod logging;
 pub mod migrations;
+pub mod orchestration_policy;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;

@@ -20,9 +20,17 @@ Tools are mapped into bounded capabilities:
 - `validation`
 - `publishing`
 - `shell`
+- `shell_mutation`
 - `unknown`
 
 The first rule family is canonical-tool preference: when a narrower canonical tool exists, shell fallbacks are hidden or denied for that capability.
+
+The second rule family comes from orchestration policy. Request classification
+derives a policy that can allow, require, or block higher-level capabilities
+such as `repo_read`, `file_edit`, `shell_read`, `shell_mutation`, `git_write`,
+`deploy`, and `restart_service`. Tool mediation maps its local client-tool
+capabilities onto those policy capabilities before shaping menus or authorizing
+pending calls. See [ORCHESTRATION_POLICY.md](ORCHESTRATION_POLICY.md).
 
 ## Orchestrator Configuration
 
@@ -46,6 +54,11 @@ With the flag enabled, two paths are active:
 - Tool authorization: clients that support pre-tool hooks can call `/tools/authorize` before executing a pending tool call.
 
 Proxy shaping alone changes what the model can see in that request. Runtime enforcement requires the client or adapter to call `/tools/authorize` before execution.
+
+When an orchestration policy is available, proxy shaping is both canonical and
+policy-aware. Tools are hidden if they are explicitly blocked by the policy or
+if the policy does not allow their mapped capability. Blocked tools are
+authoritative over allowed tools.
 
 ## Proxy Menu Shaping
 
@@ -118,7 +131,8 @@ Response:
 }
 ```
 
-If no canonical replacement is available, the call is allowed.
+If no canonical replacement is available, the call is allowed only when the
+active orchestration policy allows the mapped capability and does not block it.
 
 An allow response means the client should continue with the original tool call. A deny response means the client should block the original call and surface `message` plus any `replacement` guidance back into its tool loop. The orchestrator does not post-process the client state in proxy mode.
 
@@ -199,6 +213,12 @@ Allowed `action` values are `offered`, `allowed`, `hidden`, `denied`, and `unkno
 Allowed `capability` values are the bounded capability enum above.
 
 Metric labels never include tool names, commands, filenames, trajectory IDs, or user-controlled text.
+
+Authorization events can include raw tool arguments in event metadata for
+operator inspection, but classifier input is bounded. Only `command`, `cmd`,
+`script`, `query`, `path`, and `file_path` are copied into the deterministic
+classification text used to derive the orchestration policy for a tool call.
+Unknown argument keys are ignored by that classifier input path.
 
 ## Feature Flag
 
