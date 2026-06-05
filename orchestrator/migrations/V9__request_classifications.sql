@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS agent_request_classifications (
 
     intent TEXT NOT NULL
         CHECK (intent IN (
-            'explain', 'debug', 'implement', 'generate_config', 'modify_config',
+            'explain', 'debug', 'generate_config', 'modify_config',
             'summarize', 'classify', 'search', 'plan',
             'operate_tool', 'unknown'
         )),
