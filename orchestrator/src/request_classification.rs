@@ -40,6 +40,11 @@ pub const FEATURE_KEYS: &[&str] = &[
     "has_config_shape",
     "has_diff_or_patch",
     "has_test_failure",
+    "is_composite",
+    "decomposition_candidate",
+    "decomposition_reason",
+    "sub_intent_count",
+    "sub_intents",
 ];
 
 macro_rules! request_classification_enums {
@@ -95,6 +100,7 @@ request_classification_enums! {
     pub enum RequestIntent {
         Explain => "explain",
         Debug => "debug",
+        Implement => "implement",
         GenerateConfig => "generate_config",
         ModifyConfig => "modify_config",
         Summarize => "summarize",
@@ -370,6 +376,14 @@ struct RequestFeatures {
     has_test_failure: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompositeAnalysis {
+    is_composite: bool,
+    decomposition_candidate: bool,
+    reason: &'static str,
+    sub_intents: Vec<RequestIntent>,
+}
+
 /// Classify a loaded event into deterministic request-level features and labels.
 ///
 /// This is a pure Phase 2 entry point: it does not query storage, call models,
@@ -381,6 +395,7 @@ pub fn classify_request_event(event: &crate::db::AgentEvent) -> RequestClassific
     let metadata_keys_lower = metadata_keys.to_ascii_lowercase();
     let features = extract_features(&text, &lower, &metadata_keys_lower);
     let detected_domains = detected_domains(&features, &lower);
+    let composite = analyze_composition(&text, &lower, &event.event_type);
 
     let mut row = RequestClassification::deterministic(
         event.id.clone(),
@@ -389,7 +404,7 @@ pub fn classify_request_event(event: &crate::db::AgentEvent) -> RequestClassific
         event.created_at,
     );
     row.trajectory_id = event.trajectory_id;
-    row.features = features_to_json(&features, &detected_domains);
+    row.features = features_to_json(&features, &detected_domains, &composite);
     row.intent = classify_intent(&features, &lower, &event.event_type);
     row.domain = classify_domain(&features, &lower, &detected_domains);
     row.secondary_domains = detected_domains
@@ -1476,7 +1491,11 @@ fn extract_features(text: &str, lower: &str, metadata_keys_lower: &str) -> Reque
     }
 }
 
-fn features_to_json(features: &RequestFeatures, detected_domains: &[RequestDomain]) -> Value {
+fn features_to_json(
+    features: &RequestFeatures,
+    detected_domains: &[RequestDomain],
+    composite: &CompositeAnalysis,
+) -> Value {
     let mut object = Map::new();
     object.insert("char_count".to_string(), json!(features.char_count));
     object.insert("line_count".to_string(), json!(features.line_count));
@@ -1554,6 +1573,24 @@ fn features_to_json(features: &RequestFeatures, detected_domains: &[RequestDomai
         "has_test_failure".to_string(),
         json!(features.has_test_failure),
     );
+    object.insert("is_composite".to_string(), json!(composite.is_composite));
+    object.insert(
+        "decomposition_candidate".to_string(),
+        json!(composite.decomposition_candidate),
+    );
+    object.insert("decomposition_reason".to_string(), json!(composite.reason));
+    object.insert(
+        "sub_intent_count".to_string(),
+        json!(composite.sub_intents.len()),
+    );
+    object.insert(
+        "sub_intents".to_string(),
+        json!(composite
+            .sub_intents
+            .iter()
+            .map(|intent| intent.as_str())
+            .collect::<Vec<_>>()),
+    );
     Value::Object(object)
 }
 
@@ -1619,6 +1656,21 @@ fn classify_intent(features: &RequestFeatures, lower: &str, event_type: &str) ->
         RequestIntent::Search
     } else if contains_any(lower, &["plan", "proposal", "approach", "design"]) {
         RequestIntent::Plan
+    } else if contains_any(
+        lower,
+        &[
+            "implement",
+            "implementation",
+            "build this",
+            "build the",
+            "add feature",
+            "add support",
+            "add functionality",
+            "wire up",
+            "integrate",
+        ],
+    ) {
+        RequestIntent::Implement
     } else if contains_any(
         lower,
         &["generate config", "create yaml", "write yaml", "manifest"],
@@ -1794,7 +1846,10 @@ fn classify_complexity(
     } else if domain_count > 1
         || matches!(
             intent,
-            RequestIntent::Debug | RequestIntent::GenerateConfig | RequestIntent::ModifyConfig
+            RequestIntent::Debug
+                | RequestIntent::Implement
+                | RequestIntent::GenerateConfig
+                | RequestIntent::ModifyConfig
         )
         || features.has_config_shape
     {
@@ -1826,7 +1881,7 @@ fn recommend_route(
         RecommendedRoute::WebRequired
     } else if matches!(
         intent,
-        RequestIntent::OperateTool | RequestIntent::ModifyConfig
+        RequestIntent::OperateTool | RequestIntent::Implement | RequestIntent::ModifyConfig
     ) && !features.has_file_path
         && !features.has_config_shape
         && !features.has_shell_command
@@ -1866,6 +1921,7 @@ fn response_contract(
         _ if matches!(intent, RequestIntent::Summarize | RequestIntent::Plan) => {
             ResponseContract::MarkdownSummary
         }
+        _ if matches!(intent, RequestIntent::Implement) => ResponseContract::ValidationRequired,
         _ if matches!(
             artifact_type,
             RequestArtifactType::Code | RequestArtifactType::Yaml | RequestArtifactType::Json
@@ -1877,6 +1933,180 @@ fn response_contract(
         _ => ResponseContract::DirectAnswer,
     }
 }
+
+fn analyze_composition(text: &str, lower: &str, event_type: &str) -> CompositeAnalysis {
+    if text.trim().is_empty() {
+        return CompositeAnalysis {
+            is_composite: false,
+            decomposition_candidate: false,
+            reason: "none",
+            sub_intents: Vec::new(),
+        };
+    }
+
+    let (fragments, reason) = decomposition_fragments(text, lower);
+    let mut sub_intents = Vec::new();
+    for fragment in fragments.iter().take(5) {
+        let fragment = fragment.trim();
+        if fragment.len() < 3 {
+            continue;
+        }
+        let fragment_lower = fragment.to_ascii_lowercase();
+        if !has_subtask_action_signal(&fragment_lower) {
+            continue;
+        }
+        let features = extract_features(fragment, &fragment_lower, "");
+        sub_intents.push(classify_intent(&features, &fragment_lower, event_type));
+    }
+
+    let decomposition_candidate = sub_intents.len() >= 2;
+    CompositeAnalysis {
+        is_composite: decomposition_candidate,
+        decomposition_candidate,
+        reason: if decomposition_candidate {
+            reason
+        } else {
+            "none"
+        },
+        sub_intents: if decomposition_candidate {
+            sub_intents
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn decomposition_fragments(text: &str, lower: &str) -> (Vec<String>, &'static str) {
+    let structured = structured_list_fragments(text);
+    if structured.len() >= 2 {
+        return (structured, "structured_list");
+    }
+
+    for (separator, reason) in [
+        ("\n", "line_separated"),
+        (";", "sequence_separator"),
+        (", then ", "sequence_separator"),
+        (" then ", "sequence_separator"),
+    ] {
+        if lower.contains(separator) {
+            let fragments = split_nonempty(text, separator);
+            if fragments.len() >= 2 {
+                return (fragments, reason);
+            }
+        }
+    }
+
+    if action_signal_count(lower) >= 2 {
+        let coordinated = split_nonempty(text, " and ");
+        if coordinated.len() >= 2 {
+            return (coordinated, "coordinated_actions");
+        }
+
+        let comma_actions = split_on_action_commas(text);
+        if comma_actions.len() >= 2 {
+            return (comma_actions, "coordinated_actions");
+        }
+    }
+
+    (Vec::new(), "none")
+}
+
+fn structured_list_fragments(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let item = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+                .or_else(|| numbered_item_text(trimmed))?;
+            let item = item.trim();
+            (!item.is_empty()).then(|| item.to_string())
+        })
+        .take(5)
+        .collect()
+}
+
+fn numbered_item_text(value: &str) -> Option<&str> {
+    let split_at = value
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(idx, ch)| idx + ch.len_utf8())?;
+    let rest = value.get(split_at..)?;
+    rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))
+}
+
+fn split_nonempty(text: &str, separator: &str) -> Vec<String> {
+    text.split(separator)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .take(5)
+        .collect()
+}
+
+fn split_on_action_commas(text: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if fragments.is_empty() || has_subtask_action_signal(&part.to_ascii_lowercase()) {
+            fragments.push(part.to_string());
+        } else if let Some(last) = fragments.last_mut() {
+            last.push_str(", ");
+            last.push_str(part);
+        }
+    }
+    fragments.into_iter().take(5).collect()
+}
+
+fn action_signal_count(lower: &str) -> usize {
+    SUBTASK_ACTION_SIGNALS
+        .iter()
+        .filter(|signal| lower.contains(**signal))
+        .count()
+}
+
+fn has_subtask_action_signal(lower: &str) -> bool {
+    contains_any(lower, SUBTASK_ACTION_SIGNALS)
+}
+
+const SUBTASK_ACTION_SIGNALS: &[&str] = &[
+    "investigate",
+    "inspect",
+    "look at",
+    "look up",
+    "search",
+    "find",
+    "read",
+    "open",
+    "review",
+    "explain",
+    "summarize",
+    "classify",
+    "plan",
+    "design",
+    "debug",
+    "fix",
+    "patch",
+    "edit",
+    "modify",
+    "change",
+    "update",
+    "add",
+    "remove",
+    "create",
+    "write",
+    "generate",
+    "run",
+    "execute",
+    "validate",
+    "test",
+    "deploy",
+    "restart",
+];
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
@@ -2059,6 +2289,51 @@ mod tests {
         let expected: HashSet<&str> = FEATURE_KEYS.iter().copied().collect();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn composite_requests_emit_bounded_sub_intents() {
+        let row = classify_request_event(&event(
+            "e-composite",
+            "Search the repo for context injection; implement the fix in src/main.rs; run cargo test; summarize the result",
+            None,
+        ));
+
+        assert_eq!(row.features["is_composite"], true);
+        assert_eq!(row.features["decomposition_candidate"], true);
+        assert_eq!(row.features["decomposition_reason"], "sequence_separator");
+        assert_eq!(row.features["sub_intent_count"], 4);
+        assert_eq!(
+            row.features["sub_intents"],
+            json!(["search", "implement", "operate_tool", "summarize"])
+        );
+    }
+
+    #[test]
+    fn implementation_language_maps_to_implement_intent() {
+        let row = classify_request_event(&event(
+            "e-implement",
+            "Implement the classifier change in src/request_classification.rs",
+            None,
+        ));
+
+        assert_eq!(row.intent, RequestIntent::Implement);
+        assert_eq!(row.response_contract, ResponseContract::ValidationRequired);
+    }
+
+    #[test]
+    fn single_intent_with_conjunction_is_not_decomposed() {
+        let row = classify_request_event(&event(
+            "e-not-composite",
+            "Explain Docker and Kubernetes networking",
+            None,
+        ));
+
+        assert_eq!(row.features["is_composite"], false);
+        assert_eq!(row.features["decomposition_candidate"], false);
+        assert_eq!(row.features["decomposition_reason"], "none");
+        assert_eq!(row.features["sub_intent_count"], 0);
+        assert_eq!(row.features["sub_intents"], json!([]));
     }
 
     #[test]

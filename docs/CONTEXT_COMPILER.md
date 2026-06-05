@@ -325,6 +325,12 @@ treating every store as equally authoritative.
    relevant; never required for core Agentic OS working memory.
 ```
 
+The orchestration policy derived from the live request constrains these sources
+before artifacts are compiled. Narrow explanation and implementation requests
+can use repo-scoped Postgres/Qdrant evidence without automatically pulling Total
+Recall, compiled summaries, or session-state artifacts. Broader workflows can
+still opt into those sources through their intent and policy envelope.
+
 Each source can improve signal, but only after the compiler promotes its output
 into an artifact. The prompt does not get a concatenation of source results.
 

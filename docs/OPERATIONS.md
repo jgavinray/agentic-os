@@ -18,7 +18,12 @@ Set `SUMMARIZER_ENABLED=false` to pause memory compaction. Set `SUMMARIZER_BASE_
 
 The cache is in process only. Full context packs are derived state and are not rebuilt on the user-facing request path. Model requests use the newest cached pack for the repo/task/session scope when one exists, fall back to a minimal context when none exists, and enqueue a coalesced background refresh for the next turn. The explicit `/context-pack` endpoint still builds synchronously because its contract is to return the generated pack.
 
-Stored cache entries are keyed by `repo:task:event_count`; limit overrides become part of the task string. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Request-time lookup may use the latest stale entry by key prefix while a background refresh catches up. Writes to memory do not delete cached packs; refreshed packs replace older event-count versions for the same repo/task prefix.
+Stored cache entries are keyed by `repo:task:event_count`, with limit overrides
+and policy shape folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls
+expiration for exact cache hits. Request-time lookup may use the latest stale
+entry by key prefix while a background refresh catches up. Writes to memory do
+not delete cached packs; refreshed packs replace older event-count versions for
+the same repo/task/policy prefix.
 
 Trajectory request events are still durably inserted into Postgres before forwarding, but their Qdrant indexing runs as background best-effort work.
 

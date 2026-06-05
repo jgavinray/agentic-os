@@ -51,11 +51,17 @@ Completion writes one idempotent `trajectory_result` event with bounded statuses
 ## Orchestration Policy
 
 Request classification produces bounded labels such as intent, domain,
-artifact type, risk, complexity, route, and response contract. Orchestration
-policy turns those labels into an explicit operating envelope for the request:
-eligible context sources, allowed/required/blocked tool capabilities, edit
-scope, validation posture, git behavior, runtime behavior, prompt-refinement
-mode, and risk overlays.
+artifact type, risk, complexity, route, response contract, and bounded
+composite/decomposition feature metadata. Orchestration policy turns those
+labels into an explicit operating envelope for the request: eligible context
+sources, allowed/required/blocked tool capabilities, edit scope, validation
+posture, git behavior, runtime behavior, prompt-refinement mode, and risk
+overlays.
+
+Implementation requests use a dedicated `implement` intent. In proxy mode that
+intent exposes read/search/edit/create surfaces while blocking generic shell,
+publishing, deletion-oriented or unknown broad tools, deployment, restart, and
+runtime mutation.
 
 The policy is derived before request forwarding and is persisted after the
 request or tool-authorization event exists. Policy metadata is attached to
@@ -65,7 +71,7 @@ improvement. See [ORCHESTRATION_POLICY.md](ORCHESTRATION_POLICY.md).
 
 ## Tool Mediation
 
-Tool mediation is deterministic infrastructure between request classification and eventual full orchestration. In the current proxy mode, the client still owns tool execution and supplies the tool menu. When `TOOL_MEDIATION_ENABLED=true`, agentic-os maps those tool names into bounded capabilities, detects simple tool intent, and shapes the OpenAI or Anthropic `tools` array before forwarding the request. For example, if a request is a file-read intent and the client supplied both `Read` and `Bash`, the orchestrator hides `Bash` for that model call so the model sees the canonical read capability.
+Tool mediation is deterministic infrastructure between request classification and eventual full orchestration. In the current proxy mode, the client still owns tool execution and supplies the tool menu. When `TOOL_MEDIATION_ENABLED=true`, agentic-os maps those tool names into bounded capabilities, detects simple tool intent, applies the active orchestration policy, and shapes the OpenAI or Anthropic `tools` array before forwarding the request. For example, if a request is a file-read intent and the client supplied both `Read` and `Bash`, the orchestrator hides `Bash` for that model call so the model sees the canonical read capability. For implementation intent, a broad coding-client menu is narrowed to read/search/edit/write style tools.
 
 Runtime enforcement uses `/tools/authorize`, which is mounted by the same orchestrator process and protected by the same bearer API keys as other non-health endpoints. Clients with pre-tool hooks can submit a pending tool call before execution. If a shell command is a canonical-tool fallback, such as `cat README.md` while `Read` is available, agentic-os returns `decision=deny`, `reason=prefer_canonical_tool`, and replacement guidance. The client still decides how to feed that denial back into its tool loop unless agentic-os later runs in broker or full orchestrator mode. See [TOOL_MEDIATION.md](TOOL_MEDIATION.md).
 
@@ -91,7 +97,7 @@ Raw events start at L0. The summarizer promotes memory through L1, L2, and L3 wh
 | L2 | Repo-level summaries | Reusable repo conventions and decisions. |
 | L3 | Project-level memory | Durable architecture truths. |
 
-The context policy changes layer weights by task category: narrow/debug work favors fresh L0/L1 plus failures, while architecture work favors L2/L3.
+The context policy changes layer weights by task category: narrow/debug work favors fresh L0/L1 plus failures, while architecture work favors L2/L3. Live request classification can narrow the task category and orchestration policy can further restrict eligible context sources before the compiler builds artifacts or performs semantic recall.
 
 Operational Constraints are assembled from deterministic feature records and placed immediately above Failure History. They are capped by count and token budget and contain only compact corrective text, never raw events or metadata. See [FEATURE_EXTRACTION.md](FEATURE_EXTRACTION.md).
 
@@ -105,7 +111,13 @@ In Compose, that endpoint is a dedicated llama.cpp sidecar (`http://summarizer:8
 
 Context packs are cached in process. Model requests use stale-while-revalidate semantics: the orchestrator injects the newest cached pack for the repo/task/session scope, or a minimal fallback when no cache exists, then refreshes the full pack in a coalesced background task. This keeps context computation, semantic retrieval, and constraint lookup off the first-token path. The explicit `/context-pack` endpoint still builds synchronously because callers use it to fetch the pack itself.
 
-Stored cache keys use `repo:task:event_count`; optional limit overrides are folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration for exact cache hits. Memory writes do not delete existing cache entries. Instead, request-time lookup can use the newest pack for the repo/task prefix while a coalesced background refresh builds the current event-count version. When a refreshed pack is stored, older versions for that same prefix are replaced.
+Stored cache keys use `repo:task:event_count`, with optional limit and policy
+shape folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration
+for exact cache hits. Memory writes do not delete existing cache entries.
+Instead, request-time lookup can use the newest pack for the repo/task/policy
+prefix while a coalesced background refresh builds the current event-count
+version. When a refreshed pack is stored, older versions for that same prefix
+are replaced.
 
 Request events are durably inserted into Postgres before forwarding, but their Qdrant indexing is background best-effort work so vector embedding does not block request setup.
 

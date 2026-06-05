@@ -122,6 +122,7 @@ The policy layer handles every current `RequestIntent`:
 
 - `Explain`
 - `Debug`
+- `Implement`
 - `ModifyConfig`
 - `GenerateConfig`
 - `OperateTool`
@@ -133,6 +134,14 @@ The policy layer handles every current `RequestIntent`:
 
 The `Unknown` fallback is deliberately minimal: no allowed tools, read-only,
 no git changes, no restarts, no validation, and `no_scp`.
+
+`Implement` is intentionally narrower than a general coding-agent mode. It
+allows repository read/search/list, file read, file edit/create, and git read.
+It blocks generic shell, shell mutation, docker mutation, deployment, service
+restart, git write/publishing, and remote host access. The policy carries a
+targeted-test validation posture as an expectation, but generic shell validation
+is not exposed during the implementation request itself; a later
+validation-specific phase should make that tool surface explicit.
 
 ### Risk Overlays
 
@@ -257,9 +266,11 @@ orchestration policy tells it which context sources are eligible and why.
 
 For example:
 
-- `Explain` can use Total Recall, Postgres events, Qdrant semantic recall, and
-  compiled summaries.
-- `Debug` additionally enables the context ledger.
+- `Explain` uses lightweight Postgres/Qdrant context by default and does not
+  automatically pull durable memories or compiled summaries.
+- `Debug` can additionally enable the context ledger for failure history.
+- `Implement` uses repository-scoped Postgres/Qdrant context while avoiding
+  Total Recall, compiled summaries, and stale session artifacts by default.
 - raw capture enables raw-capture-derived features as a context source.
 - prompt/spec review narrows tools but can still allow repo context.
 
@@ -290,12 +301,31 @@ Policy data can explain cache behavior, but it is not the cache itself.
   returned, but there is no session-scoped event to attach a policy row to.
 - The current implementation is deterministic rules only. It does not train or
   invoke a classifier model.
+- Composite/decomposition labels are classification features only today. They
+  are not yet used to schedule subtasks or derive separate per-sub-intent
+  policies.
+
+## Next Steps
+
+The next policy layer should consume `sub_intents` from request classification
+and derive child envelopes without widening the parent request:
+
+- parent `blocked_tools` and risk overlays remain authoritative,
+- each sub-intent gets the smallest tool/context set that can satisfy it,
+- implementation sub-intents keep read/search/edit/write tools only,
+- validation sub-intents can explicitly expose validation tools,
+- publishing, deployment, restart, and destructive operations require explicit
+  sub-intents and policy overlays,
+- concurrency planning should operate on those child envelopes after dependency
+  relationships are represented.
 
 ## Testing Coverage
 
 The current tests cover:
 
 - every intent family,
+- implementation tool/context narrowing,
+- composite/decomposition labels,
 - unknown fallback behavior,
 - high-stakes and destructive risk overlays,
 - external web requirement handling,
