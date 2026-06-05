@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-pub const CLASSIFICATION_SCHEMA_VERSION: i32 = 1;
+pub const CLASSIFICATION_SCHEMA_VERSION: i32 = 2;
 pub const ROUTING_POLICY_VERSION: &str = "deterministic-v1";
 pub const CLASSIFIER_SOURCE_DETERMINISTIC_RULES: &str = "deterministic_rules";
 
@@ -2146,7 +2146,11 @@ mod tests {
     use crate::db::AgentEvent;
     use std::collections::HashSet;
 
-    const MIGRATION: &str = include_str!("../migrations/V9__request_classifications.sql");
+    const REQUEST_CLASSIFICATION_MIGRATIONS: &str = concat!(
+        include_str!("../migrations/V9__request_classifications.sql"),
+        "\n",
+        include_str!("../migrations/V17__add_implement_request_intent.sql")
+    );
 
     #[test]
     fn enum_inventory_contains_unknown_for_every_enum() {
@@ -2195,19 +2199,19 @@ mod tests {
         for (_name, variants) in enum_inventory() {
             for variant in *variants {
                 assert!(
-                    MIGRATION.contains(&format!("'{variant}'")),
+                    REQUEST_CLASSIFICATION_MIGRATIONS.contains(&format!("'{variant}'")),
                     "migration is missing enum label {variant}"
                 );
             }
         }
-        assert!(MIGRATION.contains("CHECK (intent IN"));
-        assert!(MIGRATION.contains("CHECK (domain IN"));
-        assert!(MIGRATION.contains("CHECK (artifact_type IN"));
-        assert!(MIGRATION.contains("CHECK (complexity IN"));
-        assert!(MIGRATION.contains("CHECK (recommended_route IN"));
-        assert!(MIGRATION.contains("CHECK (response_contract IN"));
-        assert!(MIGRATION.contains("CHECK (risk <@ ARRAY"));
-        assert!(MIGRATION.contains("CHECK (secondary_domains <@ ARRAY"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (intent IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (domain IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (artifact_type IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (complexity IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (recommended_route IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (response_contract IN"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (risk <@ ARRAY"));
+        assert!(REQUEST_CLASSIFICATION_MIGRATIONS.contains("CHECK (secondary_domains <@ ARRAY"));
     }
 
     #[test]
@@ -2235,10 +2239,10 @@ mod tests {
                 "{column} must be explicitly privacy-allowlisted"
             );
         }
-        assert!(!MIGRATION.contains("summary TEXT"));
-        assert!(!MIGRATION.contains("evidence TEXT"));
-        assert!(!MIGRATION.contains("request TEXT"));
-        assert!(!MIGRATION.contains("prompt TEXT"));
+        assert!(!REQUEST_CLASSIFICATION_MIGRATIONS.contains("summary TEXT"));
+        assert!(!REQUEST_CLASSIFICATION_MIGRATIONS.contains("evidence TEXT"));
+        assert!(!REQUEST_CLASSIFICATION_MIGRATIONS.contains("request TEXT"));
+        assert!(!REQUEST_CLASSIFICATION_MIGRATIONS.contains("prompt TEXT"));
     }
 
     #[test]
