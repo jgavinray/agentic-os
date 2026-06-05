@@ -74,6 +74,26 @@ hidden tools: Bash
 reason: prefer_canonical_tool
 ```
 
+For implementation intent, policy-aware shaping keeps only the tools needed to
+inspect and edit repository files. A broad client menu such as:
+
+```text
+offered tools: Read, Grep, Edit, Write, Bash, MultiEdit, Delete, CreatePR
+```
+
+is narrowed before model dispatch:
+
+```text
+decision: shape
+allowed tools: Read, Grep, Edit, Write
+hidden tools: Bash, MultiEdit, Delete, CreatePR
+reason: policy_filtered
+```
+
+This keeps implementation work on read/search/edit/create surfaces without
+offering generic shell, deletion, multi-file bulk editing, publishing,
+deployment, or runtime mutation tools.
+
 The same shaping path supports OpenAI-style tools and Anthropic-style tools. If no canonical tool is available, shell is left visible because hiding it would remove the only available capability.
 
 Menu shaping is subtractive. agentic-os does not inject tools the client did not advertise, because the client may not be able to execute them.
@@ -219,6 +239,23 @@ operator inspection, but classifier input is bounded. Only `command`, `cmd`,
 `script`, `query`, `path`, and `file_path` are copied into the deterministic
 classification text used to derive the orchestration policy for a tool call.
 Unknown argument keys are ignored by that classifier input path.
+
+## Next Steps
+
+Tool mediation currently applies the parent request policy. Request
+classification now also emits bounded composite/decomposition labels, including
+`sub_intents`. A future mediation layer should use those labels to derive
+smaller child tool envelopes:
+
+- implementation children: read/search/edit/write only,
+- validation children: validation tools only,
+- search children: read/search/list only,
+- publishing or deployment children: available only when explicitly requested,
+- parent blocked tools and risk overlays remain authoritative across all
+  children.
+
+That gives the planner enough structure to reduce tool menus per subtask before
+adding concurrent execution.
 
 ## Feature Flag
 

@@ -1142,6 +1142,53 @@ mod tests {
     }
 
     #[test]
+    fn implementation_policy_hides_broad_and_unknown_tools() {
+        let text = "Implement the request classifier change in src/request_classification.rs";
+        let classification = crate::request_classification::classify_request_text(
+            "agentic-os",
+            "session-a",
+            text,
+            None,
+            "user_message",
+        );
+        let policy =
+            crate::orchestration_policy::derive_orchestration_policy(&classification, text, false);
+        let mut req = json!({
+            "messages": [],
+            "tools": [
+                {"type": "function", "function": {"name": "Read"}},
+                {"type": "function", "function": {"name": "Grep"}},
+                {"type": "function", "function": {"name": "Edit"}},
+                {"type": "function", "function": {"name": "Write"}},
+                {"type": "function", "function": {"name": "Bash"}},
+                {"type": "function", "function": {"name": "MultiEdit"}},
+                {"type": "function", "function": {"name": "Delete"}},
+                {"type": "function", "function": {"name": "CreatePR"}}
+            ]
+        });
+
+        let outcome = shape_openai_request_with_policy(&mut req, text, Some(&policy));
+        let allowed = req["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let hidden = outcome
+            .hidden_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(classification.intent.as_str(), "implement");
+        assert_eq!(allowed, vec!["Read", "Grep", "Edit", "Write"]);
+        assert!(hidden.contains(&"Bash"));
+        assert!(hidden.contains(&"MultiEdit"));
+        assert!(hidden.contains(&"Delete"));
+        assert!(hidden.contains(&"CreatePR"));
+    }
+
+    #[test]
     fn authorize_tool_call_with_policy_matches_authorize_tool_call() {
         let req = ToolAuthorizeRequest {
             session_id: None,

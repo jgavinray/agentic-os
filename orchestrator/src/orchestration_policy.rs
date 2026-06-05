@@ -767,6 +767,7 @@ fn base_policy(
     match intent {
         RequestIntent::Explain => explain_policy(),
         RequestIntent::Debug => debug_policy(artifact_type),
+        RequestIntent::Implement => implement_policy(),
         RequestIntent::ModifyConfig => modify_config_policy(artifact_type),
         RequestIntent::GenerateConfig => generate_config_policy(artifact_type),
         RequestIntent::OperateTool => operate_tool_policy(),
@@ -779,9 +780,9 @@ fn base_policy(
 }
 
 fn explain_policy() -> BasePolicy {
-    // Explanation may read broad context and metrics, but it is intentionally
-    // non-mutating. If an "explain" request needs current information, the
-    // risk overlay adds required web search later.
+    // Explanation is non-mutating and should stay lightweight by default.
+    // Broader durable memory and compiled summaries are reserved for planning,
+    // architecture, and other explicitly broad workflows.
     BasePolicy {
         allowed: vec![
             ToolCapability::WebSearch,
@@ -798,17 +799,46 @@ fn explain_policy() -> BasePolicy {
             ToolCapability::RestartService,
             ToolCapability::GitWrite,
         ],
-        context: vec![
-            ContextSource::TotalRecall,
-            ContextSource::PostgresEvents,
-            ContextSource::QdrantSemantic,
-            ContextSource::CompiledSummaries,
-        ],
+        context: vec![ContextSource::PostgresEvents, ContextSource::QdrantSemantic],
         edit: EditPolicy::ReadOnly,
         validation: ValidationPolicy::None,
         git: GitPolicy::NoGitChanges,
         runtime: RuntimePolicy::NoRestart,
         scope: vec![ScopePolicy::NoScp],
+    }
+}
+
+fn implement_policy() -> BasePolicy {
+    // Implementation requests may inspect the repo and edit/create files. They
+    // deliberately do not expose generic shell, publishing, runtime mutation,
+    // deployment, or broad mutation surfaces.
+    BasePolicy {
+        allowed: vec![
+            ToolCapability::RepoRead,
+            ToolCapability::FileRead,
+            ToolCapability::FileEdit,
+            ToolCapability::GitRead,
+        ],
+        required: vec![],
+        blocked: vec![
+            ToolCapability::ShellMutation,
+            ToolCapability::ShellRead,
+            ToolCapability::DockerMutation,
+            ToolCapability::Deploy,
+            ToolCapability::RestartService,
+            ToolCapability::GitWrite,
+            ToolCapability::RemoteHostAccess,
+        ],
+        context: vec![ContextSource::PostgresEvents, ContextSource::QdrantSemantic],
+        edit: EditPolicy::ScopedEdit,
+        validation: ValidationPolicy::TargetedTests,
+        git: GitPolicy::NoGitChanges,
+        runtime: RuntimePolicy::NoRestart,
+        scope: vec![
+            ScopePolicy::CurrentRepoOnly,
+            ScopePolicy::IgnoreUnrelatedDirtyChanges,
+            ScopePolicy::NoScp,
+        ],
     }
 }
 
@@ -852,10 +882,8 @@ fn debug_policy(artifact_type: crate::request_classification::RequestArtifactTyp
         required: vec![],
         blocked,
         context: vec![
-            ContextSource::TotalRecall,
             ContextSource::PostgresEvents,
             ContextSource::QdrantSemantic,
-            ContextSource::CompiledSummaries,
             ContextSource::ContextLedger,
         ],
         edit,
@@ -907,11 +935,7 @@ fn modify_config_policy(
         allowed,
         required: vec![],
         blocked,
-        context: vec![
-            ContextSource::TotalRecall,
-            ContextSource::PostgresEvents,
-            ContextSource::CompiledSummaries,
-        ],
+        context: vec![ContextSource::PostgresEvents],
         edit,
         validation,
         git: GitPolicy::CommitAllowed,
@@ -946,7 +970,7 @@ fn operate_tool_policy() -> BasePolicy {
         ],
         required: vec![],
         blocked: vec![ToolCapability::FileEdit, ToolCapability::FileRead],
-        context: vec![ContextSource::TotalRecall, ContextSource::PostgresEvents],
+        context: vec![ContextSource::PostgresEvents],
         edit: EditPolicy::ReadOnly,
         validation: ValidationPolicy::None,
         git: GitPolicy::NoGitChanges,
@@ -1028,7 +1052,7 @@ fn classify_policy() -> BasePolicy {
             ToolCapability::RestartService,
             ToolCapability::GitWrite,
         ],
-        context: vec![ContextSource::TotalRecall, ContextSource::PostgresEvents],
+        context: vec![ContextSource::PostgresEvents],
         edit: EditPolicy::ReadOnly,
         validation: ValidationPolicy::None,
         git: GitPolicy::NoGitChanges,
@@ -1050,11 +1074,7 @@ fn search_policy() -> BasePolicy {
             ToolCapability::RestartService,
             ToolCapability::GitWrite,
         ],
-        context: vec![
-            ContextSource::TotalRecall,
-            ContextSource::PostgresEvents,
-            ContextSource::QdrantSemantic,
-        ],
+        context: vec![ContextSource::PostgresEvents, ContextSource::QdrantSemantic],
         edit: EditPolicy::ReadOnly,
         validation: ValidationPolicy::None,
         git: GitPolicy::NoGitChanges,
@@ -1272,6 +1292,36 @@ mod tests {
         assert!(policy.blocked_tools.contains(&ToolCapability::GitWrite));
     }
 
+    #[test]
+    fn test_implement_allows_edit_create_and_targeted_validation_only() {
+        let c = classification(
+            RequestIntent::Implement,
+            vec![RequestRisk::None],
+            RequestArtifactType::Code,
+        );
+        let policy =
+            derive_orchestration_policy(&c, "implement the request classifier change", false);
+
+        assert!(policy.allowed_tools.contains(&ToolCapability::RepoRead));
+        assert!(policy.allowed_tools.contains(&ToolCapability::FileRead));
+        assert!(policy.allowed_tools.contains(&ToolCapability::FileEdit));
+        assert_eq!(policy.validation_policy, ValidationPolicy::TargetedTests);
+        assert_eq!(policy.git_policy, GitPolicy::NoGitChanges);
+        assert_eq!(policy.runtime_policy, RuntimePolicy::NoRestart);
+        assert!(policy.blocked_tools.contains(&ToolCapability::ShellRead));
+        assert!(policy
+            .blocked_tools
+            .contains(&ToolCapability::ShellMutation));
+        assert!(policy.blocked_tools.contains(&ToolCapability::GitWrite));
+        assert!(policy.blocked_tools.contains(&ToolCapability::Deploy));
+        assert!(policy
+            .blocked_tools
+            .contains(&ToolCapability::RestartService));
+        assert!(policy
+            .scope_policy
+            .contains(&ScopePolicy::IgnoreUnrelatedDirtyChanges));
+    }
+
     // 8. Unknown minimal read-only empty allowed_tools
     #[test]
     fn test_unknown_minimal() {
@@ -1292,6 +1342,7 @@ mod tests {
         for intent in [
             RequestIntent::Explain,
             RequestIntent::Debug,
+            RequestIntent::Implement,
             RequestIntent::ModifyConfig,
             RequestIntent::GenerateConfig,
             RequestIntent::OperateTool,
@@ -1734,9 +1785,9 @@ mod tests {
     }
 
     // 4. raw_capture_enabled true with RequestIntent::Explain includes
-    //    ContextSource::RawCaptureFeatures and still includes TotalRecall.
+    //    ContextSource::RawCaptureFeatures without widening durable memory.
     #[test]
-    fn test_raw_capture_explain_includes_raw_capture_features_and_total_recall() {
+    fn test_raw_capture_explain_includes_raw_capture_features_only() {
         let c = classification(
             RequestIntent::Explain,
             vec![RequestRisk::None],
@@ -1751,8 +1802,14 @@ mod tests {
             "raw_capture_enabled=true must include RawCaptureFeatures"
         );
         assert!(
-            policy.context_sources.contains(&ContextSource::TotalRecall),
-            "Explain must still include TotalRecall"
+            !policy.context_sources.contains(&ContextSource::TotalRecall),
+            "raw capture must not widen narrow explain requests into TotalRecall"
+        );
+        assert!(
+            !policy
+                .context_sources
+                .contains(&ContextSource::CompiledSummaries),
+            "raw capture must not inject compiled summaries into narrow explain requests"
         );
     }
 

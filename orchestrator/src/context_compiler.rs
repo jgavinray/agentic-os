@@ -6,6 +6,7 @@ pub struct CompilerRequest {
     pub repo: String,
     pub task: String,
     pub session_id: Option<String>,
+    pub policy: Option<crate::orchestration_policy::OrchestrationPolicy>,
     pub runtime: RuntimeContext,
 }
 
@@ -35,97 +36,115 @@ impl<'a> ContextCompiler<'a> {
     }
 
     pub async fn compile(&self, request: CompilerRequest) -> CompilerOutput {
-        let mut artifacts = vec![
-            compile_service_topology(&request),
-            compile_repo_map(&request),
-        ];
+        let mut artifacts = Vec::new();
 
-        for artifact in &artifacts {
-            record_ledger(
-                self.pool,
-                &request.repo,
-                artifact,
-                "runtime_config",
-                None,
-                "included",
-                "static compiler artifact included for stack and repo awareness",
-                serde_json::json!({}),
-            )
-            .await;
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::CompiledSummaries,
+        ) {
+            artifacts.push(compile_service_topology(&request));
+            artifacts.push(compile_repo_map(&request));
+
+            for artifact in &artifacts {
+                record_ledger(
+                    self.pool,
+                    &request.repo,
+                    artifact,
+                    "runtime_config",
+                    None,
+                    "included",
+                    "static compiler artifact included for stack and repo awareness",
+                    serde_json::json!({}),
+                )
+                .await;
+            }
         }
 
-        match db::get_recent_instruction_candidates(self.pool, &request.repo, 25).await {
-            Ok(events) => {
-                if let Some(artifact) =
-                    context_artifacts::active_instruction_artifact(request.repo.clone(), &events)
-                {
-                    let included_event_ids = artifact_source_event_ids(&artifact);
-                    let mut seen_subjects = std::collections::HashSet::new();
-                    for event in &events {
-                        let text = event
-                            .evidence
-                            .as_deref()
-                            .filter(|value| !value.trim().is_empty())
-                            .unwrap_or(&event.summary);
-                        let subject = context_artifacts::instruction_subject(text);
-                        let is_first_subject = seen_subjects.insert(subject);
-                        let included = included_event_ids.contains(&event.id);
-                        let (decision, reason) = if included && is_first_subject {
-                            (
-                                "included",
-                                "promoted newest explicit user instruction for this subject",
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::PostgresEvents,
+        ) && compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::CompiledSummaries,
+        ) {
+            match db::get_recent_instruction_candidates(self.pool, &request.repo, 25).await {
+                Ok(events) => {
+                    if let Some(artifact) = context_artifacts::active_instruction_artifact(
+                        request.repo.clone(),
+                        &events,
+                    ) {
+                        let included_event_ids = artifact_source_event_ids(&artifact);
+                        let mut seen_subjects = std::collections::HashSet::new();
+                        for event in &events {
+                            let text = event
+                                .evidence
+                                .as_deref()
+                                .filter(|value| !value.trim().is_empty())
+                                .unwrap_or(&event.summary);
+                            let subject = context_artifacts::instruction_subject(text);
+                            let is_first_subject = seen_subjects.insert(subject);
+                            let included = included_event_ids.contains(&event.id);
+                            let (decision, reason) = if included && is_first_subject {
+                                (
+                                    "included",
+                                    "promoted newest explicit user instruction for this subject",
+                                )
+                            } else {
+                                (
+                                    "superseded",
+                                    "newer explicit user instruction for this subject was promoted",
+                                )
+                            };
+                            record_ledger(
+                                self.pool,
+                                &request.repo,
+                                &artifact,
+                                "agent_events",
+                                Some(&event.id),
+                                decision,
+                                reason,
+                                serde_json::json!({
+                                    "event_type": event.event_type,
+                                    "subject": subject,
+                                }),
                             )
-                        } else {
-                            (
-                                "superseded",
-                                "newer explicit user instruction for this subject was promoted",
-                            )
-                        };
-                        record_ledger(
-                            self.pool,
-                            &request.repo,
-                            &artifact,
-                            "agent_events",
-                            Some(&event.id),
-                            decision,
-                            reason,
-                            serde_json::json!({
-                                "event_type": event.event_type,
-                                "subject": subject,
-                            }),
-                        )
-                        .await;
+                            .await;
+                        }
+                        artifacts.push(artifact);
                     }
-                    artifacts.push(artifact);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "context_compiler",
+                        repo = %request.repo,
+                        "failed to fetch instruction candidates: {e}"
+                    );
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    target: "context_compiler",
-                    repo = %request.repo,
-                    "failed to fetch instruction candidates: {e}"
-                );
-            }
         }
 
-        match db::get_recent_failure_history(self.pool, &request.repo, 12).await {
-            Ok(items) => {
-                if let Some(artifact) =
-                    context_artifacts::failure_history_artifact(request.repo.clone(), &items)
-                {
-                    for item in &items {
-                        let (decision, reason) = if item.remediation.is_some() {
-                            (
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::ContextLedger,
+        ) {
+            match db::get_recent_failure_history(self.pool, &request.repo, 12).await {
+                Ok(items) => {
+                    if let Some(artifact) =
+                        context_artifacts::failure_history_artifact(request.repo.clone(), &items)
+                    {
+                        for item in &items {
+                            let (decision, reason) = if item.remediation.is_some() {
+                                (
                                 "included",
                                 "promoted resolved failure/remediation pair into failure history artifact",
                             )
-                        } else {
-                            (
+                            } else {
+                                (
                                 "suppressed",
                                 "failure has no known remediation and remains raw recent evidence",
                             )
-                        };
-                        record_ledger(
+                            };
+                            record_ledger(
                             self.pool,
                             &request.repo,
                             &artifact,
@@ -140,26 +159,31 @@ impl<'a> ContextCompiler<'a> {
                             }),
                         )
                         .await;
+                        }
+                        artifacts.push(artifact);
                     }
-                    artifacts.push(artifact);
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "context_compiler",
-                    repo = %request.repo,
-                    "failed to fetch recent failure history: {e}"
-                );
+                Err(e) => {
+                    tracing::warn!(
+                        target: "context_compiler",
+                        repo = %request.repo,
+                        "failed to fetch recent failure history: {e}"
+                    );
+                }
             }
         }
 
-        match db::get_recent_repo_decision_candidates(self.pool, &request.repo, 12).await {
-            Ok(events) => {
-                if let Some(artifact) =
-                    context_artifacts::repo_decisions_artifact(request.repo.clone(), &events)
-                {
-                    for event in &events {
-                        record_ledger(
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::CompiledSummaries,
+        ) {
+            match db::get_recent_repo_decision_candidates(self.pool, &request.repo, 12).await {
+                Ok(events) => {
+                    if let Some(artifact) =
+                        context_artifacts::repo_decisions_artifact(request.repo.clone(), &events)
+                    {
+                        for event in &events {
+                            record_ledger(
                             self.pool,
                             &request.repo,
                             &artifact,
@@ -170,42 +194,6 @@ impl<'a> ContextCompiler<'a> {
                             serde_json::json!({"event_type": event.event_type}),
                         )
                         .await;
-                    }
-                    artifacts.push(artifact);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "context_compiler",
-                    repo = %request.repo,
-                    "failed to fetch repo decision candidates: {e}"
-                );
-            }
-        }
-
-        if let Some(session_id) = request.session_id.as_deref() {
-            match db::get_recent_session_events(self.pool, session_id, 8).await {
-                Ok(events) => {
-                    if let Some(artifact) = context_artifacts::session_state_artifact(
-                        request.repo.clone(),
-                        session_id,
-                        &events,
-                    ) {
-                        for event in &events {
-                            record_ledger(
-                                self.pool,
-                                &request.repo,
-                                &artifact,
-                                "agent_events",
-                                Some(&event.id),
-                                "included",
-                                "promoted active session event into session_state artifact",
-                                serde_json::json!({
-                                    "event_type": event.event_type,
-                                    "session_id": session_id,
-                                }),
-                            )
-                            .await;
                         }
                         artifacts.push(artifact);
                     }
@@ -214,49 +202,101 @@ impl<'a> ContextCompiler<'a> {
                     tracing::warn!(
                         target: "context_compiler",
                         repo = %request.repo,
-                        session_id = %session_id,
-                        "failed to fetch session state candidates: {e}"
+                        "failed to fetch repo decision candidates: {e}"
                     );
                 }
             }
         }
 
-        if let Some(total_recall_url) = request.runtime.total_recall_url.as_deref() {
-            match total_recall_candidates(self.http, total_recall_url, &request.repo, &request.task)
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::CompiledSummaries,
+        ) {
+            if let Some(session_id) = request.session_id.as_deref() {
+                match db::get_recent_session_events(self.pool, session_id, 8).await {
+                    Ok(events) => {
+                        if let Some(artifact) = context_artifacts::session_state_artifact(
+                            request.repo.clone(),
+                            session_id,
+                            &events,
+                        ) {
+                            for event in &events {
+                                record_ledger(
+                                    self.pool,
+                                    &request.repo,
+                                    &artifact,
+                                    "agent_events",
+                                    Some(&event.id),
+                                    "included",
+                                    "promoted active session event into session_state artifact",
+                                    serde_json::json!({
+                                        "event_type": event.event_type,
+                                        "session_id": session_id,
+                                    }),
+                                )
+                                .await;
+                            }
+                            artifacts.push(artifact);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "context_compiler",
+                            repo = %request.repo,
+                            session_id = %session_id,
+                            "failed to fetch session state candidates: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        if compiler_source_allowed(
+            &request,
+            crate::orchestration_policy::ContextSource::TotalRecall,
+        ) {
+            if let Some(total_recall_url) = request.runtime.total_recall_url.as_deref() {
+                match total_recall_candidates(
+                    self.http,
+                    total_recall_url,
+                    &request.repo,
+                    &request.task,
+                )
                 .await
-            {
-                Ok(notes) => {
-                    if let Some(artifact) = context_artifacts::durable_project_memory_artifact(
-                        request.repo.clone(),
-                        &notes,
-                    ) {
-                        for note in &notes {
-                            record_ledger(
-                                self.pool,
-                                &request.repo,
-                                &artifact,
-                                "total_recall",
-                                Some(&note.id),
-                                "included",
-                                "promoted external episodic note into durable project memory artifact",
-                                serde_json::json!({
-                                    "date": note.date,
-                                    "title": note.title,
-                                    "updated_at": note.updated_at,
-                                }),
-                            )
-                            .await;
+                {
+                    Ok(notes) => {
+                        if let Some(artifact) = context_artifacts::durable_project_memory_artifact(
+                            request.repo.clone(),
+                            &notes,
+                        ) {
+                            for note in &notes {
+                                record_ledger(
+                                    self.pool,
+                                    &request.repo,
+                                    &artifact,
+                                    "total_recall",
+                                    Some(&note.id),
+                                    "included",
+                                    "promoted external episodic note into durable project memory artifact",
+                                    serde_json::json!({
+                                        "date": note.date,
+                                        "title": note.title,
+                                        "updated_at": note.updated_at,
+                                    }),
+                                )
+                                .await;
+                            }
+                            artifacts.push(artifact);
                         }
-                        artifacts.push(artifact);
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "context_compiler",
-                        repo = %request.repo,
-                        total_recall_url = %total_recall_url,
-                        "failed to fetch Total Recall episodic memory: {e}"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "context_compiler",
+                            repo = %request.repo,
+                            total_recall_url = %total_recall_url,
+                            "failed to fetch Total Recall episodic memory: {e}"
+                        );
+                    }
                 }
             }
         }
@@ -285,6 +325,17 @@ impl<'a> ContextCompiler<'a> {
 
         CompilerOutput { active_artifacts }
     }
+}
+
+fn compiler_source_allowed(
+    request: &CompilerRequest,
+    source: crate::orchestration_policy::ContextSource,
+) -> bool {
+    request
+        .policy
+        .as_ref()
+        .map(|policy| policy.context_sources.contains(&source))
+        .unwrap_or(true)
 }
 
 fn compile_service_topology(request: &CompilerRequest) -> ContextArtifact {
@@ -379,6 +430,7 @@ mod tests {
             repo: "agentic-os".to_string(),
             task: "debug compiler".to_string(),
             session_id: None,
+            policy: None,
             runtime: RuntimeContext {
                 default_model: "qwen36-35b-a3b".to_string(),
                 litellm_url: "http://litellm:4000/v1".to_string(),

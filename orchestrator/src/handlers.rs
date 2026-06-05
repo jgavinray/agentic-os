@@ -1222,10 +1222,14 @@ fn context_cache_task(
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
     feature_extraction_enabled: bool,
+    policy_cache_key: Option<&str>,
 ) -> String {
-    let cache_task = limit_override
+    let mut cache_task = limit_override
         .map(|limit| format!("{task}:limit={limit}"))
         .unwrap_or_else(|| task.to_string());
+    if let Some(policy_cache_key) = policy_cache_key {
+        cache_task = format!("{cache_task}:policy={policy_cache_key}");
+    }
     if feature_extraction_enabled {
         if let Some(trajectory) = trajectory {
             format!("{cache_task}:trajectory={}", trajectory.trajectory_id)
@@ -1251,6 +1255,8 @@ async fn get_or_build_cached_context(
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
     task_config: &TaskContextConfig,
+    classification: Option<&crate::request_classification::RequestClassification>,
+    policy_override: Option<&crate::orchestration_policy::OrchestrationPolicy>,
 ) -> Result<CachedContext, anyhow::Error> {
     get_or_build_cached_context_inner(
         state,
@@ -1260,6 +1266,8 @@ async fn get_or_build_cached_context(
         trajectory,
         limit_override,
         task_config,
+        classification,
+        policy_override,
         true,
     )
     .await
@@ -1274,15 +1282,19 @@ async fn get_or_build_cached_context_inner(
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
     task_config: &TaskContextConfig,
+    classification: Option<&crate::request_classification::RequestClassification>,
+    policy_override: Option<&crate::orchestration_policy::OrchestrationPolicy>,
     record_metrics: bool,
 ) -> Result<CachedContext, anyhow::Error> {
     let event_count = db::count_events_for_repo(&state.pool, repo).await?;
+    let policy_cache_key = policy_override.map(policy_context_cache_key);
     let cache_task = context_cache_task(
         task,
         session_id,
         trajectory,
         limit_override,
         state.feature_extraction_enabled,
+        policy_cache_key.as_deref(),
     );
     let cache_key = context_cache_key(repo, &cache_task, event_count);
     if let Some(cached) = state.cache.get(&cache_key) {
@@ -1296,7 +1308,11 @@ async fn get_or_build_cached_context_inner(
     }
 
     let build_started = std::time::Instant::now();
-    let mut policy = crate::state::ContextPolicy::for_task(task);
+    let mut policy =
+        crate::state::ContextPolicy::for_category(context_task_category(task, classification));
+    if let Some(orchestration_policy) = policy_override {
+        apply_orchestration_context_limits(&mut policy, orchestration_policy);
+    }
     if let Some(limit) = limit_override {
         policy.l0_recent_limit = limit.max(0);
     } else {
@@ -1333,7 +1349,21 @@ async fn get_or_build_cached_context_inner(
         operational_constraints_result,
     ) = tokio::join!(
         db::get_context_evidence_for_policy(&state.pool, repo, &policy),
-        hybrid_search(state, repo, task, task_config.semantic_limit),
+        async {
+            if orchestration_context_source_allowed(
+                policy_override,
+                crate::orchestration_policy::ContextSource::QdrantSemantic,
+            ) {
+                hybrid_search(state, repo, task, task_config.semantic_limit).await
+            } else {
+                HybridSearchResult {
+                    hits: vec![],
+                    semantic_hits: 0,
+                    fts_hits: 0,
+                    deduped_hits: 0,
+                }
+            }
+        },
         db::get_active_errors(&state.pool, repo, 5),
         async {
             if state.execution_feedback_enabled && !failure_signatures.is_empty() {
@@ -1381,6 +1411,7 @@ async fn get_or_build_cached_context_inner(
             repo: repo.to_string(),
             task: task.to_string(),
             session_id: session_id.map(str::to_string),
+            policy: policy_override.cloned(),
             runtime: crate::context_compiler::RuntimeContext {
                 default_model: state.default_model.clone(),
                 litellm_url: state.litellm_url.clone(),
@@ -1454,13 +1485,17 @@ fn cached_context_for_request(
     session_id: Option<&str>,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     task_config: &TaskContextConfig,
+    classification: Option<&crate::request_classification::RequestClassification>,
+    policy_override: Option<&crate::orchestration_policy::OrchestrationPolicy>,
 ) -> CachedContext {
+    let policy_cache_key = policy_override.map(policy_context_cache_key);
     let cache_task = context_cache_task(
         task,
         session_id,
         trajectory,
         None,
         state.feature_extraction_enabled,
+        policy_cache_key.as_deref(),
     );
     let cache_prefix = context_cache_prefix(repo, &cache_task);
     spawn_context_cache_refresh(
@@ -1471,6 +1506,8 @@ fn cached_context_for_request(
         trajectory,
         None,
         task_config,
+        classification.cloned(),
+        policy_override.cloned(),
         cache_prefix.clone(),
     );
 
@@ -1509,6 +1546,8 @@ fn spawn_context_cache_refresh(
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     limit_override: Option<i64>,
     task_config: &TaskContextConfig,
+    classification: Option<crate::request_classification::RequestClassification>,
+    policy_override: Option<crate::orchestration_policy::OrchestrationPolicy>,
     refresh_key: String,
 ) {
     if !state.cache.try_begin_refresh(refresh_key.clone()) {
@@ -1529,6 +1568,8 @@ fn spawn_context_cache_refresh(
             trajectory,
             limit_override,
             &task_config,
+            classification.as_ref(),
+            policy_override.as_ref(),
             false,
         )
         .await
@@ -1541,6 +1582,91 @@ fn spawn_context_cache_refresh(
         }
         state_bg.cache.finish_refresh(&refresh_key);
     });
+}
+
+fn context_task_category(
+    task: &str,
+    classification: Option<&crate::request_classification::RequestClassification>,
+) -> crate::state::TaskCategory {
+    use crate::request_classification::{RequestComplexity, RequestIntent};
+    let Some(classification) = classification else {
+        return crate::state::TaskCategory::from_task(task);
+    };
+    match classification.complexity {
+        RequestComplexity::L0Trivial | RequestComplexity::L1Simple => {
+            crate::state::TaskCategory::Narrow
+        }
+        RequestComplexity::L2Moderate => {
+            if matches!(
+                classification.intent,
+                RequestIntent::Explain | RequestIntent::Search | RequestIntent::Classify
+            ) {
+                crate::state::TaskCategory::Narrow
+            } else {
+                crate::state::TaskCategory::Moderate
+            }
+        }
+        RequestComplexity::L3Complex | RequestComplexity::L4ToolRequired => {
+            crate::state::TaskCategory::Moderate
+        }
+        RequestComplexity::L5HighRisk | RequestComplexity::Unknown => {
+            crate::state::TaskCategory::Narrow
+        }
+    }
+}
+
+fn policy_context_cache_key(policy: &crate::orchestration_policy::OrchestrationPolicy) -> String {
+    let context = policy
+        .context_sources
+        .iter()
+        .map(|source| source.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
+    format!(
+        "{}.{}.{}",
+        policy.edit_policy.as_str(),
+        policy.validation_policy.as_str(),
+        context
+    )
+}
+
+fn orchestration_context_source_allowed(
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
+    source: crate::orchestration_policy::ContextSource,
+) -> bool {
+    policy
+        .map(|policy| policy.context_sources.contains(&source))
+        .unwrap_or(true)
+}
+
+fn apply_orchestration_context_limits(
+    policy: &mut crate::state::ContextPolicy,
+    orchestration_policy: &crate::orchestration_policy::OrchestrationPolicy,
+) {
+    if !orchestration_policy
+        .context_sources
+        .contains(&crate::orchestration_policy::ContextSource::PostgresEvents)
+    {
+        policy.l0_recent_limit = 0;
+        policy.l1_limit = 0;
+        policy.l2_limit = 0;
+        policy.l3_limit = 0;
+        policy.failure_limit = 0;
+    }
+    if !orchestration_policy
+        .context_sources
+        .contains(&crate::orchestration_policy::ContextSource::CompiledSummaries)
+    {
+        policy.l1_limit = policy.l1_limit.min(1);
+        policy.l2_limit = 0;
+        policy.l3_limit = 0;
+    }
+    if !orchestration_policy
+        .context_sources
+        .contains(&crate::orchestration_policy::ContextSource::ContextLedger)
+    {
+        policy.failure_limit = 0;
+    }
 }
 
 fn retrieved_event_ids(
@@ -1618,6 +1744,8 @@ pub async fn context_pack(
         None,
         req.limit,
         &task_config,
+        None,
+        None,
     )
     .await
     {
@@ -2032,11 +2160,21 @@ async fn pack_context_into_anthropic_req(
     task: &str,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     parent_event_id: Option<uuid::Uuid>,
+    classification: Option<&crate::request_classification::RequestClassification>,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
 ) -> (Option<uuid::Uuid>, Option<String>) {
-    let task_category = crate::state::TaskCategory::from_task(task);
+    let task_category = context_task_category(task, classification);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let cached =
-        cached_context_for_request(state, repo, task, session_id, trajectory, &task_config);
+    let cached = cached_context_for_request(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        &task_config,
+        classification,
+        policy,
+    );
     let context_pack_id = maybe_write_context_pack_event(
         state,
         session_id,
@@ -2626,14 +2764,24 @@ async fn pack_context_into_req(
     task: &str,
     trajectory: Option<crate::trajectory::TrajectoryContext>,
     parent_event_id: Option<uuid::Uuid>,
+    classification: Option<&crate::request_classification::RequestClassification>,
+    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
 ) -> (Option<uuid::Uuid>, Option<String>) {
     if req.get("model").is_none() {
         req["model"] = Value::String(state.default_model.clone());
     }
-    let task_category = crate::state::TaskCategory::from_task(task);
+    let task_category = context_task_category(task, classification);
     let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let cached =
-        cached_context_for_request(state, repo, task, session_id, trajectory, &task_config);
+    let cached = cached_context_for_request(
+        state,
+        repo,
+        task,
+        session_id,
+        trajectory,
+        &task_config,
+        classification,
+        policy,
+    );
     let context_pack_id = maybe_write_context_pack_event(
         state,
         session_id,
@@ -3007,26 +3155,26 @@ pub async fn chat_completions(
     } else {
         None
     };
+    let request_classification = crate::request_classification::classify_request_text(
+        &repo,
+        session_id.as_deref().unwrap_or("unknown"),
+        &user_content,
+        None,
+        "user_message",
+    );
+    let request_policy = orchestration_policy::derive_orchestration_policy(
+        &request_classification,
+        &user_content,
+        state.capture_pool.is_some(),
+    );
     let tool_mediation_metadata = if state.tool_mediation_enabled {
         // Shape the OpenAI tool menu with the same policy model used by
         // `/tools/authorize`. This only removes tools from the client-provided
         // menu; proxy mode cannot invent tools the client did not offer.
-        let classification = crate::request_classification::classify_request_text(
-            &repo,
-            session_id.as_deref().unwrap_or("unknown"),
-            &user_content,
-            None,
-            "user_message",
-        );
-        let policy = orchestration_policy::derive_orchestration_policy(
-            &classification,
-            &user_content,
-            state.capture_pool.is_some(),
-        );
         let outcome = crate::tool_mediation::shape_openai_request_with_policy(
             &mut req,
             &user_content,
-            Some(&policy),
+            Some(&request_policy),
         );
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
         Some(outcome.metadata())
@@ -3061,6 +3209,8 @@ pub async fn chat_completions(
         &task,
         trajectory,
         request_event_id,
+        Some(&request_classification),
+        Some(&request_policy),
     )
     .await;
     let correlation_id = trajectory
@@ -3593,26 +3743,26 @@ pub async fn messages(
     } else {
         None
     };
+    let request_classification = crate::request_classification::classify_request_text(
+        &repo,
+        session_id.as_deref().unwrap_or("unknown"),
+        &user_content,
+        None,
+        "user_message",
+    );
+    let request_policy = orchestration_policy::derive_orchestration_policy(
+        &request_classification,
+        &user_content,
+        state.capture_pool.is_some(),
+    );
     let tool_mediation_metadata = if state.tool_mediation_enabled {
         // Same policy-aware shaping as the OpenAI endpoint, but applied to the
         // Anthropic `tools` shape. The payload stays Anthropic-formatted all the
         // way through this handler.
-        let classification = crate::request_classification::classify_request_text(
-            &repo,
-            session_id.as_deref().unwrap_or("unknown"),
-            &user_content,
-            None,
-            "user_message",
-        );
-        let policy = orchestration_policy::derive_orchestration_policy(
-            &classification,
-            &user_content,
-            state.capture_pool.is_some(),
-        );
         let outcome = crate::tool_mediation::shape_anthropic_request_with_policy(
             &mut req,
             &user_content,
-            Some(&policy),
+            Some(&request_policy),
         );
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
         Some(outcome.metadata())
@@ -3647,6 +3797,8 @@ pub async fn messages(
         &task,
         trajectory,
         request_event_id,
+        Some(&request_classification),
+        Some(&request_policy),
     )
     .await;
     let correlation_id = trajectory
@@ -4439,6 +4591,52 @@ mod tests {
             .contains(&orchestration_policy::ScopePolicy::NoScp));
     }
 
+    #[test]
+    fn live_classification_overrides_generic_task_for_context_category() {
+        let classification = crate::request_classification::classify_request_text(
+            "agentic-os",
+            "session-a",
+            "Read README.md",
+            None,
+            "user_message",
+        );
+
+        assert_eq!(
+            context_task_category("default task", Some(&classification)),
+            crate::state::TaskCategory::Narrow
+        );
+    }
+
+    #[test]
+    fn orchestration_policy_narrows_context_memory_levels() {
+        let classification = crate::request_classification::classify_request_text(
+            "agentic-os",
+            "session-a",
+            "Read README.md",
+            None,
+            "user_message",
+        );
+        let orchestration_policy = orchestration_policy::derive_orchestration_policy(
+            &classification,
+            "Read README.md",
+            false,
+        );
+        let mut context_policy =
+            crate::state::ContextPolicy::for_category(crate::state::TaskCategory::Moderate);
+
+        apply_orchestration_context_limits(&mut context_policy, &orchestration_policy);
+
+        assert_eq!(context_policy.l2_limit, 0);
+        assert_eq!(context_policy.l3_limit, 0);
+        assert_eq!(context_policy.failure_limit, 0);
+        assert!(!orchestration_policy
+            .context_sources
+            .contains(&orchestration_policy::ContextSource::CompiledSummaries));
+        assert!(!orchestration_policy
+            .context_sources
+            .contains(&orchestration_policy::ContextSource::TotalRecall));
+    }
+
     // ── Tool authorization classification text ────────────────────────
 
     #[test]
@@ -5063,7 +5261,7 @@ mod tests {
         let ctx_start = src
             .find("async fn get_or_build_cached_context")
             .expect("get_or_build_cached_context not found in source");
-        let ctx_body: String = src[ctx_start..].chars().take(4000).collect();
+        let ctx_body: String = src[ctx_start..].chars().take(6500).collect();
 
         assert!(
             ctx_body.contains("tokio::join!"),
@@ -5121,7 +5319,7 @@ mod tests {
         let ctx_start = src
             .find("async fn get_or_build_cached_context")
             .expect("get_or_build_cached_context not found");
-        let ctx_body: String = src[ctx_start..].chars().take(2500).collect();
+        let ctx_body: String = src[ctx_start..].chars().take(4500).collect();
         assert!(ctx_body.contains("state.execution_feedback_enabled"));
 
         let validation_start = src

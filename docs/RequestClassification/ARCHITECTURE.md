@@ -59,6 +59,7 @@ Intent:
 ```text
 explain
 debug
+implement
 generate_config
 modify_config
 summarize
@@ -68,6 +69,11 @@ plan
 operate_tool
 unknown
 ```
+
+`implement` is the bounded label for source-level implementation requests that
+should be allowed to inspect and edit/create repository files without implying
+shell execution, git publication, runtime mutation, deployment, or broad
+refactoring.
 
 Domain:
 
@@ -151,6 +157,22 @@ refusal
 unknown
 ```
 
+Composite/decomposition metadata is stored in the bounded `features` JSONB, not
+as raw subtask text:
+
+```text
+is_composite
+decomposition_candidate
+decomposition_reason
+sub_intent_count
+sub_intents
+```
+
+`sub_intents` contains only intent labels from the closed taxonomy. The
+classifier uses deterministic structure and action-signal checks, such as
+bullets, semicolons, line-separated steps, and clear coordinated actions. It
+does not store raw subtask text and does not schedule subtasks.
+
 ## Versioning
 
 Every classification row records:
@@ -217,3 +239,21 @@ policy layer can change tool/runtime behavior without adding unbounded text to
 analysis without rewriting historical classification rows.
 
 See [../ORCHESTRATION_POLICY.md](../ORCHESTRATION_POLICY.md).
+
+## Next Steps
+
+The classifier now answers two orchestration questions:
+
+- whether the request appears composite,
+- which bounded sub-intent labels appear inside the request.
+
+The next layer should consume those labels without changing the classifier's
+privacy contract:
+
+- derive a per-sub-intent tool/context envelope,
+- keep parent risk and blocked-tool overlays authoritative for every sub-intent,
+- associate tool groups with sub-intents for later planning,
+- schedule independent sub-intents concurrently only after dependencies can be
+  represented explicitly,
+- add a validation-specific phase that can expose validation tools without
+  making generic shell visible during implementation.
