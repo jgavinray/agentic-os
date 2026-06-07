@@ -65,6 +65,7 @@ pub mod handlers_anthropic_dispatch;
 pub mod handlers_anthropic_messages;
 pub mod handlers_anthropic_streaming;
 pub mod handlers_capture;
+pub mod handlers_chat_completions;
 pub mod handlers_context;
 pub mod handlers_openai_dispatch;
 pub mod handlers_request;
