@@ -1341,128 +1341,6 @@ async fn dispatch_non_streaming_raw(
     Ok((value, latency_ms))
 }
 
-async fn vllm_cache_snapshot(
-    state: &AppState,
-) -> Option<(String, crate::vllm_metrics::VllmCacheSnapshot)> {
-    let metrics_url = state.vllm_metrics_url.as_deref()?;
-    match crate::vllm_metrics::fetch_cache_snapshot(&state.http, metrics_url).await {
-        Ok(snapshot) => Some((metrics_url.to_string(), snapshot)),
-        Err(e) => {
-            tracing::warn!(metrics_url, "failed to fetch vLLM cache metrics: {e}");
-            None
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn record_vllm_cache_observation(
-    state: &AppState,
-    before: Option<(String, crate::vllm_metrics::VllmCacheSnapshot)>,
-    session_id: Option<&str>,
-    namespace: &str,
-    repo: &str,
-    task: &str,
-    attempt: &crate::litellm::LiteLlmCallAttempt,
-    usage: &TokenUsage,
-    provider_cache: crate::litellm::ProviderCacheCounters,
-) -> Option<crate::vllm_metrics::VllmCacheDelta> {
-    let Some((metrics_url, before)) = before else {
-        return None;
-    };
-    let after = match crate::vllm_metrics::fetch_cache_snapshot(&state.http, &metrics_url).await {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            tracing::warn!(
-                metrics_url,
-                "failed to fetch post-request vLLM cache metrics: {e}"
-            );
-            return None;
-        }
-    };
-    let delta = after.delta_since(before);
-    telemetry::record_vllm_cache_delta(&delta, &attempt.routed_model);
-    let observation = db::VllmCacheObservationInput {
-        session_id: session_id.map(str::to_string),
-        namespace: namespace.to_string(),
-        repo: repo.to_string(),
-        task: task.to_string(),
-        endpoint: attempt.endpoint.clone(),
-        requested_model: attempt.requested_model.clone(),
-        routed_model: attempt.routed_model.clone(),
-        request_event_id: attempt.request_event_id,
-        context_pack_id: attempt.context_pack_id,
-        attempt_id: attempt.attempt_id,
-        metrics_url,
-        delta,
-        request_input_tokens: usage.processed_tokens as i64,
-        request_output_tokens: usage.generated_tokens as i64,
-        provider_cache,
-    };
-    if let Err(e) = db::insert_vllm_cache_observation(&state.pool, &observation).await {
-        tracing::warn!(
-            attempt_id = %attempt.attempt_id,
-            "failed to record vLLM cache observation: {e}"
-        );
-    }
-    Some(delta)
-}
-
-fn provider_cache_from_vllm_delta(
-    delta: crate::vllm_metrics::VllmCacheDelta,
-) -> crate::litellm::ProviderCacheCounters {
-    let cache_read = delta
-        .prompt_tokens_local_cache_hit_delta
-        .saturating_add(delta.prompt_tokens_external_kv_delta)
-        .max(delta.prompt_tokens_cached_delta);
-    crate::litellm::ProviderCacheCounters {
-        provider_cached_tokens: delta.prompt_tokens_cached_delta.max(0),
-        provider_cache_created_tokens: 0,
-        provider_cache_read_tokens: cache_read.max(0),
-    }
-}
-
-fn merge_provider_cache_from_vllm_delta(
-    provider_cache: crate::litellm::ProviderCacheCounters,
-    delta: Option<crate::vllm_metrics::VllmCacheDelta>,
-) -> crate::litellm::ProviderCacheCounters {
-    let Some(delta) = delta else {
-        return provider_cache;
-    };
-    let mut merged = provider_cache;
-    merged.max_assign(provider_cache_from_vllm_delta(delta));
-    merged
-}
-
-fn inject_anthropic_cache_usage(
-    value: &mut Value,
-    counters: crate::litellm::ProviderCacheCounters,
-) {
-    if let Some(usage) = value.get_mut("usage").and_then(Value::as_object_mut) {
-        usage.insert(
-            "cache_creation_input_tokens".to_string(),
-            serde_json::json!(counters.provider_cache_created_tokens.max(0)),
-        );
-        usage.insert(
-            "cache_read_input_tokens".to_string(),
-            serde_json::json!(counters.provider_cache_read_tokens.max(0)),
-        );
-    }
-}
-
-fn anthropic_cache_usage_sse_event(counters: crate::litellm::ProviderCacheCounters) -> String {
-    format!(
-        concat!(
-            "event: message_delta\n",
-            "data: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{",
-            "\"cache_creation_input_tokens\":{},",
-            "\"cache_read_input_tokens\":{}",
-            "}}}}\n\n"
-        ),
-        counters.provider_cache_created_tokens.max(0),
-        counters.provider_cache_read_tokens.max(0)
-    )
-}
-
 async fn record_client_capture(state: &AppState, capture: crate::client_capture::RawHttpCapture) {
     let Some(pool) = state.capture_pool.as_ref() else {
         return;
@@ -1697,7 +1575,7 @@ pub async fn chat_completions(
     capture.attempt_id = Some(attempt.attempt_id);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
     capture.forwarded_request_body = Some(crate::client_capture::to_json_bytes(&req));
-    let vllm_cache_before = vllm_cache_snapshot(&state).await;
+    let vllm_cache_before = crate::vllm_metrics::cache_snapshot(&state).await;
     let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
     if is_stream {
@@ -1732,7 +1610,7 @@ pub async fn chat_completions(
             record_client_capture(&state, capture).await;
             let usage = TokenUsage::from_openai_value(&val);
             let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
-            record_vllm_cache_observation(
+            crate::vllm_metrics::record_cache_observation(
                 &state,
                 vllm_cache_before,
                 session_id.as_deref(),
@@ -1992,7 +1870,7 @@ async fn handle_streaming(
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_sse(&raw);
             let provider_cache = crate::litellm::provider_counters_from_sse(&raw);
-            record_vllm_cache_observation(
+            crate::vllm_metrics::record_cache_observation(
                 &state_bg,
                 vllm_cache_before,
                 session_id.as_deref(),
@@ -2299,7 +2177,7 @@ pub async fn messages(
     capture.attempt_id = Some(attempt.attempt_id);
     crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
     capture.forwarded_request_body = Some(crate::client_capture::to_json_bytes(&req));
-    let vllm_cache_before = vllm_cache_snapshot(&state).await;
+    let vllm_cache_before = crate::vllm_metrics::cache_snapshot(&state).await;
     let mut finalizer =
         crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
@@ -2511,7 +2389,7 @@ pub async fn messages(
 
     let usage = TokenUsage::from_openai_value(&val);
     let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
-    let vllm_delta = record_vllm_cache_observation(
+    let vllm_delta = crate::vllm_metrics::record_cache_observation(
         &state,
         vllm_cache_before,
         session_id.as_deref(),
@@ -2523,8 +2401,9 @@ pub async fn messages(
         provider_cache,
     )
     .await;
-    let provider_cache = merge_provider_cache_from_vllm_delta(provider_cache, vllm_delta);
-    inject_anthropic_cache_usage(&mut val, provider_cache);
+    let provider_cache =
+        crate::vllm_metrics::merge_provider_cache_from_delta(provider_cache, vllm_delta);
+    crate::vllm_metrics::inject_anthropic_cache_usage(&mut val, provider_cache);
     capture.response_status = Some(StatusCode::OK.as_u16() as i32);
     capture.response_headers = Some(serde_json::json!({"content-type": ["application/json"]}));
     capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
@@ -2884,7 +2763,7 @@ async fn handle_streaming_anthropic(
         let raw = String::from_utf8_lossy(&data);
         let usage = extract_token_usage_from_anthropic_sse(&raw);
         let provider_cache = crate::litellm::provider_counters_from_sse(&raw);
-        let vllm_delta = record_vllm_cache_observation(
+        let vllm_delta = crate::vllm_metrics::record_cache_observation(
             &cache_state,
             vllm_cache_before,
             cache_session_id.as_deref(),
@@ -2896,8 +2775,8 @@ async fn handle_streaming_anthropic(
             provider_cache,
         )
         .await;
-        let counters = merge_provider_cache_from_vllm_delta(provider_cache, vllm_delta);
-        let cache_usage_event = anthropic_cache_usage_sse_event(counters);
+        let counters = crate::vllm_metrics::merge_provider_cache_from_delta(provider_cache, vllm_delta);
+        let cache_usage_event = crate::vllm_metrics::anthropic_cache_usage_sse_event(counters);
         data.extend_from_slice(cache_usage_event.as_bytes());
         let mut done_finalizer = stream_finalizer.clone();
         done_finalizer.attempt_mut().first_token_at = first_token_at;
