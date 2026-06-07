@@ -5,6 +5,7 @@ pub mod background;
 pub mod client_capture;
 pub mod context_artifacts;
 pub mod context_compiler;
+pub mod context_compiler_support;
 pub mod context_ledger;
 pub mod context_packing;
 pub mod context_packing_endpoint;
