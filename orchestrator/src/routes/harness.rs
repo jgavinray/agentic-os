@@ -3,8 +3,48 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
+use crate::handlers::check_auth;
 use crate::handlers::{authenticate, check_rate_limit};
-use crate::state::AppState;
+use crate::state::{AppState, HarnessGuardrailRequest, HarnessGuardrailResponse};
+use crate::telemetry;
+
+#[tracing::instrument(name = "handler.harness_guardrail", skip(state, headers, req))]
+pub async fn harness_guardrail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<HarnessGuardrailRequest>,
+) -> Response {
+    if !check_auth(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    let event_type = req.event_type.as_deref().unwrap_or("harness_event");
+    let summary = req.summary.as_deref().unwrap_or("");
+    let metadata = req.metadata.unwrap_or_else(|| serde_json::json!({}));
+    let decision = crate::harness_feedback::evaluate_runtime_guardrail(
+        event_type,
+        summary,
+        req.evidence.as_deref(),
+        &metadata,
+    );
+    telemetry::record_harness_guardrail_decision(decision.action, decision.reason);
+
+    axum::Json(HarnessGuardrailResponse {
+        action: decision.action.to_string(),
+        reason: decision.reason.to_string(),
+        should_stop: decision.should_stop,
+        signals: decision
+            .signals
+            .iter()
+            .map(|signal| (*signal).to_string())
+            .collect(),
+    })
+    .into_response()
+}
 
 #[tracing::instrument(name = "handler.harness_outcome", skip(state, headers, req), fields(trajectory_id = %req.trajectory_id))]
 pub async fn harness_outcome(
