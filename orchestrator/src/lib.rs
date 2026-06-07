@@ -142,6 +142,7 @@ pub mod summarizer_candidates;
 pub mod summarizer_failures;
 pub mod summarizer_levels;
 pub mod summarizer_promotion;
+pub mod summarizer_upstream;
 pub mod system_context;
 pub mod telemetry;
 pub mod telemetry_descriptions;

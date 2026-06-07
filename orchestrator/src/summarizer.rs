@@ -5,6 +5,7 @@ use crate::summarizer_candidates::{
 };
 use crate::summarizer_failures::record_summarization_failure;
 use crate::summarizer_levels::{source_level_for_target, summary_prompt_for_level};
+use crate::summarizer_upstream::request_summary;
 use crate::telemetry;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -130,51 +131,7 @@ async fn do_summarize(
 
     let prompt = prompt_template.replace("{messages}", &messages_text);
 
-    let request_body = serde_json::json!({
-        "model": state.summarizer_model.clone(),
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": state.summarizer_max_tokens,
-        "temperature": 0.1,
-    });
-
-    let url = format!("{}/chat/completions", state.summarizer_url);
-    let upstream_started = std::time::Instant::now();
-    let mut request = state.http.post(&url).json(&request_body);
-    if let Some(key) = &state.summarizer_key {
-        request = request.bearer_auth(key);
-    }
-    let resp = request.send().await?;
-    let status = resp.status();
-    telemetry::record_upstream_summarizer(
-        "chat_completions",
-        upstream_started.elapsed(),
-        &status.as_u16().to_string(),
-    );
-    if !status.is_success() {
-        telemetry::record_upstream_summarizer_error(
-            "chat_completions",
-            telemetry::upstream_error_kind(status),
-        );
-    }
-    let val: serde_json::Value = resp.json().await.inspect_err(|_| {
-        telemetry::record_upstream_summarizer_error("chat_completions", "parse");
-    })?;
-    telemetry::record_tokens(
-        &state.metrics,
-        &crate::state::TokenUsage::from_openai_value(&val),
-        &state.summarizer_model,
-    );
-
-    let content_val = &val["choices"][0]["message"]["content"];
-    let summary_text = match content_val {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => anyhow::bail!("no content in summarization response"),
-    };
+    let summary_text = request_summary(state, prompt).await?;
 
     let session_row = conn
         .query_one(
