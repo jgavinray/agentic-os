@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse;
@@ -17,6 +17,11 @@ use crate::qdrant;
 use crate::rate_limit;
 use crate::state::*;
 use crate::telemetry;
+
+pub use crate::routes::context::context_artifacts;
+pub use crate::routes::harness::{harness_outcome, litellm_callback_payload};
+pub use crate::routes::health::{health, health_live, health_ready, list_models};
+pub use crate::routes::observability::{cache_stats, metrics, metrics_json};
 
 // ── Auth helpers ───────────────────────────────────────────────
 
@@ -41,7 +46,7 @@ fn provided_api_token(headers: &HeaderMap) -> &str {
 
 // Returns the (token, namespace) pair if auth passes; None otherwise.
 // Constant-time comparison prevents timing-based key recovery.
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
+pub(crate) fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
     let provided = provided_api_token(headers).as_bytes();
     for (token, namespace) in &state.api_keys {
         let expected = token.as_bytes();
@@ -54,11 +59,11 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String
     None
 }
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
+pub(crate) fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     authenticate(state, headers).is_some()
 }
 
-fn check_rate_limit(state: &AppState, token: &str) -> Option<Response> {
+pub(crate) fn check_rate_limit(state: &AppState, token: &str) -> Option<Response> {
     match state.rate_limiter.check(token) {
         Ok(()) => None,
         Err(retry_after) => Some(rate_limited_response(token, retry_after)),
@@ -281,273 +286,6 @@ fn anthropic_text_message(text: &str) -> Value {
             "output_tokens": 0
         }
     })
-}
-
-// ── Health checks (no auth) ─────────────────────────────────────
-
-#[tracing::instrument(name = "handler.health")]
-pub async fn health() -> axum::Json<Value> {
-    axum::Json(serde_json::json!({"status": "ok"}))
-}
-
-#[tracing::instrument(name = "handler.health_live")]
-pub async fn health_live() -> axum::Json<Value> {
-    axum::Json(serde_json::json!({"status": "ok"}))
-}
-
-#[tracing::instrument(name = "handler.health_ready", skip(state))]
-pub async fn health_ready(
-    State(state): State<Arc<AppState>>,
-) -> Result<axum::Json<Value>, (StatusCode, axum::Json<Value>)> {
-    let http = state.http.clone();
-    let mut healthy = Vec::new();
-    let mut unhealthy = Vec::new();
-
-    if db::check_ready(&state.pool).await.is_ok() {
-        healthy.push("postgres");
-    } else {
-        unhealthy.push("postgres");
-    }
-
-    let qdrant_started = std::time::Instant::now();
-    if http
-        .get(format!("{}/collections", state.qdrant_url))
-        .send()
-        .await
-        .map(|r| {
-            let status = r.status();
-            telemetry::record_qdrant_request(
-                "health",
-                qdrant_started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            status.is_success()
-        })
-        .unwrap_or(false)
-    {
-        healthy.push("qdrant");
-    } else {
-        unhealthy.push("qdrant");
-    }
-
-    // LITELLM_URL already includes /v1 — no extra path segment needed here.
-    if http
-        .get(format!("{}/models", state.litellm_url))
-        .send()
-        .await
-        .map(|r| r.status().is_success() || r.status() == 401)
-        .unwrap_or(false)
-    {
-        healthy.push("litellm");
-    } else {
-        unhealthy.push("litellm");
-    }
-
-    if !unhealthy.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({
-                "status": "degraded",
-                "healthy": healthy,
-                "unhealthy": unhealthy,
-            })),
-        ));
-    }
-
-    Ok(axum::Json(serde_json::json!({
-        "status": "ready",
-        "services": healthy,
-    })))
-}
-
-// ── Model listing — BUG-10: proxy to LiteLLM ───────────────────
-
-#[tracing::instrument(name = "handler.list_models", skip(state, headers))]
-pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    let url = format!("{}/models", state.litellm_url);
-    let started = std::time::Instant::now();
-    match state
-        .http
-        .get(&url)
-        .bearer_auth(&state.litellm_key)
-        .send()
-        .await
-    {
-        Ok(r) => {
-            let status = r.status();
-            telemetry::record_upstream_litellm(
-                "models",
-                started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            if !status.is_success() {
-                telemetry::record_upstream_litellm_error(
-                    "models",
-                    telemetry::upstream_error_kind(status),
-                );
-            }
-            match r.json::<Value>().await {
-                Ok(v) => (status, axum::Json(v)).into_response(),
-                Err(_) => {
-                    telemetry::record_upstream_litellm_error("models", "parse");
-                    fallback_model_list(&state).into_response()
-                }
-            }
-        }
-        Err(e) => {
-            telemetry::record_upstream_litellm("models", started.elapsed(), "error");
-            telemetry::record_upstream_litellm_error("models", telemetry::reqwest_error_kind(&e));
-            fallback_model_list(&state).into_response()
-        }
-    }
-}
-
-fn fallback_model_list(state: &AppState) -> axum::Json<Value> {
-    axum::Json(serde_json::json!({
-        "data": [{"id": state.default_model, "object": "model", "owned_by": "orchestrator"}],
-        "object": "list"
-    }))
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct CacheStatsQuery {
-    pub repo: Option<String>,
-    pub session_id: Option<String>,
-}
-
-#[tracing::instrument(name = "handler.cache_stats", skip(state, headers))]
-pub async fn cache_stats(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(query): Query<CacheStatsQuery>,
-) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    let vllm = db::get_vllm_cache_stats(
-        &state.pool,
-        query.repo.as_deref(),
-        query.session_id.as_deref(),
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("failed to fetch vLLM cache stats: {e}");
-        db::VllmCacheStats::default()
-    });
-    axum::Json(serde_json::json!({
-        "context_cache": state.cache.stats(),
-        "vllm_prefix_cache": vllm,
-        "filters": {
-            "repo": query.repo,
-            "session_id": query.session_id,
-        }
-    }))
-    .into_response()
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ContextArtifactsQuery {
-    pub repo: String,
-    pub limit: Option<i64>,
-    pub ledger_limit: Option<i64>,
-}
-
-#[tracing::instrument(name = "handler.context_artifacts", skip(state, headers))]
-pub async fn context_artifacts(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(query): Query<ContextArtifactsQuery>,
-) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    let limit = query.limit.unwrap_or(25).clamp(1, 100);
-    let ledger_limit = query.ledger_limit.unwrap_or(50).clamp(1, 200);
-    let artifacts = match db::get_context_artifacts_for_repo(&state.pool, &query.repo, limit).await
-    {
-        Ok(artifacts) => artifacts,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({
-                    "error": "failed_to_fetch_context_artifacts",
-                    "detail": e.to_string()
-                })),
-            )
-                .into_response();
-        }
-    };
-    let ledger = match db::get_context_compiler_ledger(&state.pool, &query.repo, ledger_limit).await
-    {
-        Ok(ledger) => ledger,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({
-                    "error": "failed_to_fetch_context_compiler_ledger",
-                    "detail": e.to_string()
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    axum::Json(serde_json::json!({
-        "repo": query.repo,
-        "artifacts": artifacts,
-        "ledger": ledger,
-    }))
-    .into_response()
-}
-
-#[tracing::instrument(name = "handler.metrics", skip(state, headers))]
-pub async fn metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    telemetry::record_pool_gauges(&state.pool);
-    telemetry::record_process_metrics();
-    (
-        telemetry::prometheus_content_type(),
-        state.prometheus.render(),
-    )
-        .into_response()
-}
-
-#[tracing::instrument(name = "handler.metrics_json", skip(state, headers))]
-pub async fn metrics_json(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    axum::Json(state.metrics.snapshot()).into_response()
 }
 
 pub async fn run_trajectory_idle_sweep(state: Arc<AppState>) {
@@ -1054,77 +792,6 @@ pub async fn validations(
         qdrant_indexed,
     })
     .into_response()
-}
-
-#[tracing::instrument(name = "handler.harness_outcome", skip(state, headers, req), fields(trajectory_id = %req.trajectory_id))]
-pub async fn harness_outcome(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Json(req): axum::Json<crate::adversarial_harness::HarnessOutcomeRequest>,
-) -> Response {
-    let Some((caller_token, _namespace)) = authenticate(&state, &headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    };
-    if let Some(response) = check_rate_limit(&state, &caller_token) {
-        return response;
-    }
-
-    match crate::adversarial_harness::record_harness_outcome(&state.pool, &req).await {
-        Ok(outcome_event_id) => axum::Json(crate::adversarial_harness::HarnessOutcomeResponse {
-            captured: true,
-            outcome_event_id,
-        })
-        .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": "invalid_harness_outcome",
-                "detail": e.to_string()
-            })),
-        )
-            .into_response(),
-    }
-}
-
-#[tracing::instrument(name = "handler.litellm_callback_payload", skip(state, headers, req), fields(attempt_id = ?req.attempt_id))]
-pub async fn litellm_callback_payload(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Json(req): axum::Json<crate::adversarial_harness::LiteLlmCallbackPayloadRequest>,
-) -> Response {
-    let Some((caller_token, _namespace)) = authenticate(&state, &headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    };
-    if let Some(response) = check_rate_limit(&state, &caller_token) {
-        return response;
-    }
-
-    match crate::adversarial_harness::record_litellm_callback_payload(&state.pool, &req).await {
-        Ok((callback_payload_id, normalized_ledger)) => {
-            axum::Json(crate::adversarial_harness::LiteLlmCallbackPayloadResponse {
-                captured: true,
-                callback_payload_id,
-                normalized_ledger,
-            })
-            .into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": "invalid_litellm_callback_payload",
-                "detail": e.to_string()
-            })),
-        )
-            .into_response(),
-    }
 }
 
 fn spawn_feature_extraction(
