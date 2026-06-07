@@ -15,9 +15,11 @@ use crate::auth::{provided_api_token, rate_limited_response};
 use crate::db;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
+#[cfg(test)]
+use crate::local_reasoning::LocalReasoningSelection;
 use crate::local_reasoning::{
-    add_local_reasoning_metadata, apply_local_reasoning_defaults, local_reasoning_selection,
-    LocalReasoningSelection,
+    add_local_reasoning_metadata, apply_local_reasoning_defaults, inject_contract_anthropic,
+    inject_contract_openai, local_reasoning_selection,
 };
 use crate::orchestration_policy;
 use crate::qdrant;
@@ -30,10 +32,7 @@ use crate::sse::{
     extract_token_usage_from_sse, optional_token_usage_from_sse,
 };
 use crate::state::*;
-use crate::system_context::{
-    anthropic_text_block, existing_anthropic_system_blocks, inject_system_context,
-    inject_system_context_anthropic,
-};
+use crate::system_context::{inject_system_context, inject_system_context_anthropic};
 use crate::telemetry;
 use crate::token_limits::{
     context_window_retry_max_tokens, enforce_min_max_tokens, set_max_tokens,
@@ -791,16 +790,6 @@ fn baseline_arm_selection(
             .get(crate::adversarial_harness::BASELINE_ARM_HEADER)
             .and_then(|value| value.to_str().ok()),
     )
-}
-
-fn inject_local_reasoning_contract_openai(req: &mut Value, selection: LocalReasoningSelection) {
-    inject_system_context(req, selection.policy.system_contract());
-}
-
-fn inject_local_reasoning_contract_anthropic(req: &mut Value, selection: LocalReasoningSelection) {
-    let mut blocks = existing_anthropic_system_blocks(req);
-    blocks.insert(0, anthropic_text_block(selection.policy.system_contract()));
-    req["system"] = Value::Array(blocks);
 }
 
 fn litellm_route(state: &AppState, namespace: &str) -> crate::litellm::RouteSelection {
@@ -1671,7 +1660,7 @@ pub async fn chat_completions(
     req["model"] = Value::String(route.routed_model.clone());
     apply_local_reasoning_defaults(&mut req, reasoning_selection);
     enforce_min_max_tokens(&mut req);
-    inject_local_reasoning_contract_openai(&mut req, reasoning_selection);
+    inject_contract_openai(&mut req, reasoning_selection);
     let sampling_audit = crate::sampling::capture_and_maybe_override(
         &payload,
         &mut req,
@@ -2290,7 +2279,7 @@ pub async fn messages(
     enforce_min_max_tokens(&mut req);
     anthropic::normalize_response_content_types(&mut req);
     anthropic::sanitize_litellm_request(&mut req);
-    inject_local_reasoning_contract_anthropic(&mut req, reasoning_selection);
+    inject_contract_anthropic(&mut req, reasoning_selection);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
             Ok(session_id) => Some(session_id),

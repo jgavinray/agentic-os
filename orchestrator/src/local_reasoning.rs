@@ -124,6 +124,19 @@ pub(crate) fn apply_local_reasoning_defaults(req: &mut Value, selection: LocalRe
     }
 }
 
+pub(crate) fn inject_contract_openai(req: &mut Value, selection: LocalReasoningSelection) {
+    crate::system_context::inject_system_context(req, selection.policy.system_contract());
+}
+
+pub(crate) fn inject_contract_anthropic(req: &mut Value, selection: LocalReasoningSelection) {
+    let mut blocks = crate::system_context::existing_anthropic_system_blocks(req);
+    blocks.insert(
+        0,
+        crate::system_context::anthropic_text_block(selection.policy.system_contract()),
+    );
+    req["system"] = Value::Array(blocks);
+}
+
 pub(crate) fn add_local_reasoning_metadata(
     attempt: &mut crate::litellm::LiteLlmCallAttempt,
     selection: LocalReasoningSelection,
