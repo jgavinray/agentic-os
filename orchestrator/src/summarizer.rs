@@ -1,10 +1,11 @@
 use crate::db::AgentEvent;
 use crate::state::AppState;
+use crate::summarizer_candidates::{
+    candidate_sessions, promotable_source_rows, source_event_ids, source_messages_text,
+};
 use crate::summarizer_failures::record_summarization_failure;
 use crate::summarizer_levels::{source_level_for_target, summary_prompt_for_level};
-pub(crate) use crate::summarizer_promotion::{has_source_ids, should_promote_to_level};
 use crate::telemetry;
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 
@@ -21,41 +22,7 @@ pub async fn run(state: Arc<AppState>) {
 
 async fn check_sessions(state: Arc<AppState>) -> Result<(), anyhow::Error> {
     let conn = state.pool.get().await?;
-    let rows = conn
-        .query(
-            "WITH candidates AS (
-                 SELECT session_id, 1 AS target_level
-                 FROM agent_events
-                 WHERE event_type IN ('user_message', 'assistant_message')
-                   AND summary_level = 0
-                   AND summarized = false
-                 GROUP BY session_id
-                 HAVING count(*) > 20
-                 UNION ALL
-                 SELECT session_id, 2 AS target_level
-                 FROM agent_events
-                 WHERE event_type = 'summary'
-                   AND summary_level = 1
-                   AND summarized = false
-                 GROUP BY session_id
-                 HAVING count(*) > 20
-                 UNION ALL
-                 SELECT session_id, 3 AS target_level
-                 FROM agent_events
-                 WHERE event_type = 'summary'
-                   AND summary_level = 2
-                   AND summarized = false
-                 GROUP BY session_id
-                 HAVING count(*) > 200
-             )
-             SELECT session_id, target_level FROM candidates",
-            &[],
-        )
-        .await?;
-    let candidates: Vec<(String, i32)> = rows
-        .iter()
-        .map(|r| (r.get("session_id"), r.get("target_level")))
-        .collect();
+    let candidates = candidate_sessions(&conn).await?;
     drop(conn);
 
     for target_level in [1, 2, 3] {
@@ -152,61 +119,14 @@ async fn do_summarize(
     let source_level = source_level_for_target(target_level)?;
     let prompt_template = summary_prompt_for_level(target_level)?;
 
-    let rows = conn
-        .query(
-            "SELECT id, event_type, summary, metadata
-             FROM agent_events
-             WHERE session_id = $1
-               AND summary_level = $2
-               AND summarized = false
-               AND (
-                   ($2 = 0 AND event_type IN ('user_message', 'assistant_message'))
-                   OR ($2 > 0 AND event_type = 'summary')
-               )
-             ORDER BY created_at ASC
-             LIMIT $3",
-            &[
-                &session_id,
-                &source_level,
-                &crate::state::MAX_SUMMARIZER_EVENTS,
-            ],
-        )
-        .await?;
-    let source_count = rows.len();
-    let mut promotable_rows = Vec::new();
-    for row in rows {
-        let event_type: String = row.get("event_type");
-        let summary: String = row.get("summary");
-        let metadata: Value = row.get("metadata");
-        let accepted =
-            should_promote_to_level(target_level, &event_type, &summary, &metadata, source_count);
-        if target_level > 1 {
-            telemetry::record_promotion(&state.metrics, accepted, has_source_ids(&metadata));
-        }
-        if accepted {
-            promotable_rows.push(row);
-        }
-    }
-    let rows = promotable_rows;
+    let rows = promotable_source_rows(state, conn, session_id, target_level, source_level).await?;
 
     if rows.is_empty() {
         return Ok(());
     }
 
-    let event_ids: Vec<String> = rows.iter().map(|r| r.get("id")).collect();
-
-    let messages_text = rows
-        .iter()
-        .map(|r| {
-            let role = if r.get::<_, String>("event_type") == "user_message" {
-                "User"
-            } else {
-                "Assistant"
-            };
-            format!("{role}: {}", r.get::<_, String>("summary"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let event_ids = source_event_ids(&rows);
+    let messages_text = source_messages_text(&rows);
 
     let prompt = prompt_template.replace("{messages}", &messages_text);
 

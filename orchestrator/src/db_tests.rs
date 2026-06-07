@@ -202,14 +202,16 @@ mod context_tests;
 
 #[test]
 fn promoted_memory_requires_source_ids() {
-    assert!(!crate::summarizer::has_source_ids(&serde_json::json!({})));
-    assert!(!crate::summarizer::has_source_ids(
+    assert!(!crate::summarizer_promotion::has_source_ids(
+        &serde_json::json!({})
+    ));
+    assert!(!crate::summarizer_promotion::has_source_ids(
         &serde_json::json!({"summarized_event_ids": []})
     ));
-    assert!(crate::summarizer::has_source_ids(
+    assert!(crate::summarizer_promotion::has_source_ids(
         &serde_json::json!({"summarized_event_ids": ["e1"]})
     ));
-    assert!(crate::summarizer::has_source_ids(
+    assert!(crate::summarizer_promotion::has_source_ids(
         &serde_json::json!({"source_event_ids": ["e1"]})
     ));
 }

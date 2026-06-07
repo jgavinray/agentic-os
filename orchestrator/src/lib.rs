@@ -123,6 +123,7 @@ pub mod state;
 pub mod state_context;
 pub mod state_context_cache;
 pub mod summarizer;
+pub mod summarizer_candidates;
 pub mod summarizer_failures;
 pub mod summarizer_levels;
 pub mod summarizer_promotion;
