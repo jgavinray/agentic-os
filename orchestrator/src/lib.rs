@@ -125,6 +125,7 @@ pub mod request_classification_runtime;
 pub mod request_classification_store;
 pub mod request_classification_types;
 pub mod request_policy;
+pub mod request_policy_responses;
 pub mod routes;
 pub mod sampling;
 pub mod sentiment;
