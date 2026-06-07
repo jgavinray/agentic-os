@@ -1,112 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::orchestration_policy_context_types::ContextSource;
+pub use crate::orchestration_policy_tool_types::ToolCapability;
+
 /// Current orchestration policy schema version.
 pub const POLICY_SCHEMA_VERSION: i32 = 1;
 
 /// Source label for deterministic-rule derived policies.
 pub const POLICY_SOURCE_DETERMINISTIC_RULES: &str = "deterministic_rules";
-
-/// Sources of context that may be packed into the request.
-///
-/// These are eligibility labels, not a retrieval result. A source appearing in
-/// this list means the context compiler may draw from it for this request; the
-/// compiler still owns scoring, deduplication, and budget decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextSource {
-    /// Episodic memory from the Total Recall service.
-    TotalRecall,
-    /// Durable structured events stored in Postgres.
-    PostgresEvents,
-    /// Semantic recall from the Qdrant vector index.
-    QdrantSemantic,
-    /// Stable summaries or artifacts produced by the context compiler.
-    CompiledSummaries,
-    /// Prior context-selection decisions and candidate features.
-    ContextLedger,
-    /// Derived features from raw request/response capture, when enabled.
-    RawCaptureFeatures,
-    /// Fallback label for corrupt, missing, or future values.
-    #[default]
-    Unknown,
-}
-
-impl ContextSource {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::TotalRecall => "total_recall",
-            Self::PostgresEvents => "postgres_events",
-            Self::QdrantSemantic => "qdrant_semantic",
-            Self::CompiledSummaries => "compiled_summaries",
-            Self::ContextLedger => "context_ledger",
-            Self::RawCaptureFeatures => "raw_capture_features",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-/// Tool capabilities that may be offered to the model.
-///
-/// This is the request-level capability vocabulary. `tool_mediation.rs` keeps a
-/// smaller local vocabulary for client tool names and shell command shapes, then
-/// maps those local capabilities back into this enum when applying policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCapability {
-    /// Current external information lookup.
-    WebSearch,
-    /// Repository-scoped reading, searching, and listing.
-    RepoRead,
-    /// Direct file content read.
-    FileRead,
-    /// File write or patch application.
-    FileEdit,
-    /// Non-mutating shell execution, such as validation or safe inspection.
-    ShellRead,
-    /// Mutating or unclassified shell execution.
-    ShellMutation,
-    /// Docker inspection, logs, status, or compose reads.
-    DockerRead,
-    /// Docker mutation, including compose up/down/restart actions.
-    DockerMutation,
-    /// Metrics and telemetry reads.
-    MetricsRead,
-    /// Git status/log/diff style reads.
-    GitRead,
-    /// Git commit, push, branch, or PR mutation.
-    GitWrite,
-    /// Deployment actions.
-    Deploy,
-    /// Service restart actions.
-    RestartService,
-    /// SSH or remote host access.
-    RemoteHostAccess,
-    /// Fallback label for corrupt, missing, or future values.
-    #[default]
-    Unknown,
-}
-
-impl ToolCapability {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::WebSearch => "web_search",
-            Self::RepoRead => "repo_read",
-            Self::FileRead => "file_read",
-            Self::FileEdit => "file_edit",
-            Self::ShellRead => "shell_read",
-            Self::ShellMutation => "shell_mutation",
-            Self::DockerRead => "docker_read",
-            Self::DockerMutation => "docker_mutation",
-            Self::MetricsRead => "metrics_read",
-            Self::GitRead => "git_read",
-            Self::GitWrite => "git_write",
-            Self::Deploy => "deploy",
-            Self::RestartService => "restart_service",
-            Self::RemoteHostAccess => "remote_host_access",
-            Self::Unknown => "unknown",
-        }
-    }
-}
 
 /// How aggressively the model may edit files.
 ///
