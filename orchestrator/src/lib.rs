@@ -151,6 +151,7 @@ pub mod token_limits;
 pub mod tool_mediation;
 pub mod tool_mediation_authorization;
 pub mod tool_mediation_classification;
+pub mod tool_mediation_payload;
 pub mod tool_mediation_shaping;
 pub mod tool_mediation_types;
 pub mod total_recall;

@@ -1,11 +1,13 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::tool_mediation::{policy_allows_tool_capability, policy_blocks_tool_capability};
 use crate::tool_mediation_classification::{capability_for_tool_name, detect_tool_intent};
+use crate::tool_mediation_payload::{
+    normalize_tool_choice, outcome, tool_name, tool_summaries, WithHidden,
+};
 use crate::tool_mediation_types::{
     ToolCapability, ToolIntent, ToolMenuOutcome, ToolPayloadFormat, ToolSummary,
-    TOOL_MEDIATION_POLICY_VERSION,
 };
 
 pub fn shape_openai_request(req: &mut Value, user_content: &str) -> ToolMenuOutcome {
@@ -179,39 +181,6 @@ fn shape_request(
     .with_hidden(hidden)
 }
 
-fn outcome(
-    format: ToolPayloadFormat,
-    intent: ToolIntent,
-    decision: &'static str,
-    reason: &'static str,
-    offered_tools: Vec<ToolSummary>,
-    allowed_tools: Vec<ToolSummary>,
-    tool_choice_changed: bool,
-) -> ToolMenuOutcome {
-    ToolMenuOutcome {
-        policy_version: TOOL_MEDIATION_POLICY_VERSION,
-        endpoint_format: format.as_str(),
-        intent: intent.as_str(),
-        decision,
-        reason,
-        offered_tools,
-        allowed_tools,
-        hidden_tools: vec![],
-        tool_choice_changed,
-    }
-}
-
-trait WithHidden {
-    fn with_hidden(self, hidden_tools: Vec<ToolSummary>) -> Self;
-}
-
-impl WithHidden for ToolMenuOutcome {
-    fn with_hidden(mut self, hidden_tools: Vec<ToolSummary>) -> Self {
-        self.hidden_tools = hidden_tools;
-        self
-    }
-}
-
 fn hidden_tool_names(intent: ToolIntent, offered: &[ToolSummary]) -> BTreeSet<String> {
     let Some(canonical) = canonical_capability_for_intent(intent) else {
         return BTreeSet::new();
@@ -246,70 +215,4 @@ fn canonical_capability_for_intent(intent: ToolIntent) -> Option<ToolCapability>
         ToolIntent::Publishing => Some(ToolCapability::Publishing),
         ToolIntent::General | ToolIntent::Unknown => None,
     }
-}
-
-fn tool_summaries(tools: &[Value], format: ToolPayloadFormat) -> Vec<ToolSummary> {
-    tools
-        .iter()
-        .filter_map(|tool| {
-            tool_name(tool, format).map(|name| ToolSummary {
-                capability: capability_for_tool_name(&name).as_str(),
-                name,
-            })
-        })
-        .collect()
-}
-
-fn tool_name(tool: &Value, format: ToolPayloadFormat) -> Option<String> {
-    match format {
-        ToolPayloadFormat::OpenAi => tool
-            .get("function")
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .or_else(|| tool.get("name").and_then(Value::as_str))
-            .map(str::to_string),
-        ToolPayloadFormat::Anthropic => {
-            tool.get("name").and_then(Value::as_str).map(str::to_string)
-        }
-    }
-}
-
-fn normalize_tool_choice(
-    req: &mut Value,
-    format: ToolPayloadFormat,
-    hidden_names: &BTreeSet<String>,
-) -> bool {
-    let Some(choice) = req.get("tool_choice") else {
-        return false;
-    };
-    let hidden = match format {
-        ToolPayloadFormat::OpenAi => {
-            if let Some(name) = choice
-                .get("function")
-                .and_then(|function| function.get("name"))
-                .and_then(Value::as_str)
-            {
-                hidden_names.contains(name)
-            } else {
-                choice
-                    .as_str()
-                    .map(|name| hidden_names.contains(name))
-                    .unwrap_or(false)
-            }
-        }
-        ToolPayloadFormat::Anthropic => choice
-            .get("name")
-            .and_then(Value::as_str)
-            .map(|name| hidden_names.contains(name))
-            .unwrap_or(false),
-    };
-    if !hidden {
-        return false;
-    }
-
-    req["tool_choice"] = match format {
-        ToolPayloadFormat::OpenAi => Value::String("auto".to_string()),
-        ToolPayloadFormat::Anthropic => json!({"type": "auto"}),
-    };
-    true
 }
