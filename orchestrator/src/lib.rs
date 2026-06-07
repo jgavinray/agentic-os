@@ -136,6 +136,7 @@ pub mod request_policy;
 pub mod request_policy_responses;
 pub mod routes;
 pub mod sampling;
+pub mod sampling_audit;
 pub mod sentiment;
 pub mod sse;
 pub mod startup_backfill;
