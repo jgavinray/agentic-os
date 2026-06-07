@@ -25,6 +25,7 @@ pub mod event_capture;
 pub mod execution_feedback;
 pub mod execution_feedback_events;
 pub mod execution_feedback_fingerprints;
+pub mod execution_feedback_labels;
 pub mod execution_feedback_parsing;
 pub mod execution_feedback_payloads;
 pub mod execution_feedback_validators;
