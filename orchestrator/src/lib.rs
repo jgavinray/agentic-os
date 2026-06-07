@@ -103,4 +103,5 @@ pub mod tool_mediation_shaping;
 pub mod tool_mediation_types;
 pub mod total_recall;
 pub mod trajectory;
+pub mod trajectory_summary;
 pub mod vllm_metrics;
