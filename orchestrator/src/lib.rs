@@ -98,6 +98,7 @@ pub mod request_classification_composition;
 #[cfg(test)]
 mod request_classification_contract_tests;
 pub mod request_classification_feature_json;
+pub mod request_classification_feature_vocab;
 pub mod request_classification_features;
 pub mod request_classification_input;
 pub mod request_classification_labels;
