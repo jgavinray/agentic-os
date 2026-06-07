@@ -4,6 +4,8 @@
 //! metadata merging used before feature records are aggregated.
 
 use crate::db::AgentEvent;
+use crate::feature_detection_bootstrap::bootstrap_text_tags;
+use crate::feature_detection_producer_signals::explicit_producer_signal_tags;
 use crate::feature_extraction_metadata::{
     bool_path, context_pack_empty, context_pack_truncated, event_input_tokens_from_metadata,
     event_latency_ms_from_metadata, string_path, summarizer_shares_litellm_upstream,
@@ -241,131 +243,6 @@ fn deterministic_tags_for_event(
     }
 
     dedupe_tags_within_producer(tags)
-}
-
-fn explicit_producer_signal_tags(
-    metadata: &Value,
-    source_override: Option<&str>,
-) -> Vec<DetectionTag> {
-    let mut tags = Vec::new();
-    let Some(signals) = metadata.get("producer_signals").and_then(Value::as_object) else {
-        return tags;
-    };
-    for (source, value) in signals {
-        let source = source_override.unwrap_or(source.as_str());
-        match value {
-            Value::Array(values) => {
-                for value in values {
-                    if let Some(tag) = tag_from_signal_value(source, value) {
-                        tags.push(tag);
-                    }
-                }
-            }
-            Value::Object(_) => {
-                if let Some(tag) = tag_from_signal_value(source, value) {
-                    tags.push(tag);
-                }
-            }
-            Value::String(tag_type) => tags.push(DetectionTag::new(tag_type, source)),
-            _ => {}
-        }
-    }
-    tags
-}
-
-fn tag_from_signal_value(source: &str, value: &Value) -> Option<DetectionTag> {
-    let obj = value.as_object()?;
-    let tag_type = obj.get("type").and_then(Value::as_str)?;
-    if tag_type == "tool_loop" {
-        let tool = obj.get("tool").and_then(Value::as_str).unwrap_or("unknown");
-        Some(DetectionTag::tool_loop(source, tool))
-    } else {
-        Some(DetectionTag::new(tag_type, source))
-    }
-}
-
-fn bootstrap_text_tags(
-    summary: &str,
-    evidence: Option<&str>,
-    metadata: &Value,
-    source_override: Option<&str>,
-) -> Vec<DetectionTag> {
-    let source = source_override.unwrap_or("bootstrap_migration");
-    let haystack = format!(
-        "{}\n{}\n{}",
-        summary,
-        evidence.unwrap_or_default(),
-        metadata
-    )
-    .to_ascii_lowercase();
-    let mut tags = Vec::new();
-
-    if haystack.contains("repeated read")
-        || haystack.contains("read loop")
-        || haystack.contains("read tool loop")
-        || haystack.contains("tool 'read' called")
-        || haystack.contains("tool \"read\" called")
-        || haystack.contains("loop warning: tool 'read'")
-    {
-        tags.push(DetectionTag::tool_loop(source, "Read"));
-    } else if haystack.contains("repeated bash")
-        || haystack.contains("bash loop")
-        || haystack.contains("bash tool loop")
-        || haystack.contains("tool 'bash' called")
-        || haystack.contains("tool \"bash\" called")
-        || haystack.contains("loop warning: tool 'bash'")
-    {
-        tags.push(DetectionTag::tool_loop(source, "Bash"));
-    } else if haystack.contains("tool loop") || haystack.contains("repeat identical tool") {
-        tags.push(DetectionTag::tool_loop(source, "unknown"));
-    }
-
-    if haystack.contains("user interruption")
-        || haystack.contains("user interrupted")
-        || haystack.contains("user correction")
-        || haystack.contains("request interrupted by user")
-        || haystack.contains("interrupted by user for tool use")
-    {
-        tags.push(DetectionTag::new("user_interruption", source));
-    }
-    if haystack.contains("missing authorization")
-        || haystack.contains("missing auth")
-        || haystack.contains("authorization header")
-        || haystack.contains("unauthorized")
-        || haystack.contains("without authorization header")
-        || haystack.contains("without the authorization header")
-        || (haystack.contains("without") && haystack.contains("bearer"))
-    {
-        tags.push(DetectionTag::new("missing_auth", source));
-    }
-    if (haystack.contains("wrong endpoint") || haystack.contains("incorrect endpoint"))
-        || (haystack.contains("localhost") && haystack.contains("correct endpoint"))
-        || (haystack.contains("localhost") && haystack.contains("should be using"))
-        || haystack.contains("trying localhost")
-        || haystack.contains("not localhost")
-    {
-        tags.push(DetectionTag::new("wrong_endpoint", source));
-    }
-    if haystack.contains("summarization failure")
-        || haystack.contains("summary failure")
-        || haystack.contains("empty summary")
-        || (haystack.contains("summarization") && haystack.contains("empty response"))
-    {
-        tags.push(DetectionTag::new("summarization_failure", source));
-    }
-    if haystack.contains("migration failure")
-        || haystack.contains("baseline migration")
-        || haystack.contains("extension creation")
-    {
-        tags.push(DetectionTag::new("migration_failure", source));
-    }
-    if haystack.contains("acknowledge")
-        && (haystack.contains("correction") || haystack.contains("interruption"))
-    {
-        tags.push(DetectionTag::new("correction_acknowledged", source));
-    }
-
-    tags
 }
 
 fn merge_detection_tags(mut metadata: Value, new_tags: Vec<DetectionTag>) -> Value {
