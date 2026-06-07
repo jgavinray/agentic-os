@@ -123,6 +123,7 @@ pub mod request_classification_config;
 #[cfg(test)]
 mod request_classification_contract_tests;
 pub mod request_classification_feature_json;
+pub mod request_classification_feature_keys;
 pub mod request_classification_feature_vocab;
 pub mod request_classification_features;
 pub mod request_classification_input;
@@ -134,6 +135,7 @@ pub mod request_classification_routing;
 pub mod request_classification_rules;
 pub mod request_classification_runtime;
 pub mod request_classification_store;
+pub mod request_classification_taxonomy;
 pub mod request_classification_types;
 pub mod request_policy;
 pub mod request_policy_responses;
