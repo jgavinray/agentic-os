@@ -1,6 +1,9 @@
 use serde_json::Value;
 
 use crate::db::AgentEvent;
+pub(crate) use crate::feature_metadata_paths::{
+    array_path_has_values, bool_path, bool_path_value, i64_path, string_path,
+};
 
 pub const CONTEXT_PACK_EMPTY_TOKEN_THRESHOLD: i64 = 50;
 pub const HIGH_INPUT_TOKEN_THRESHOLD: i64 = 100_000;
@@ -184,58 +187,4 @@ pub(crate) fn summarizer_has_dedicated_upstream(metadata: &Value) -> bool {
 
 fn normalize_url_for_compare(value: &str) -> String {
     value.trim().trim_end_matches('/').to_ascii_lowercase()
-}
-
-pub(crate) fn string_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current.as_str()
-}
-
-fn i64_path(value: &Value, path: &[&str]) -> Option<i64> {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current
-        .as_i64()
-        .or_else(|| current.as_u64().and_then(|value| i64::try_from(value).ok()))
-        .or_else(|| {
-            current.as_f64().and_then(|value| {
-                if value.is_finite() && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
-                    Some(value as i64)
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| current.as_str().and_then(|value| value.parse::<i64>().ok()))
-}
-
-pub(crate) fn bool_path(value: &Value, path: &[&str]) -> bool {
-    bool_path_value(value, path).unwrap_or(false)
-}
-
-fn bool_path_value(value: &Value, path: &[&str]) -> Option<bool> {
-    let mut current = value;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current.as_bool()
-}
-
-pub(crate) fn array_path_has_values(value: &Value, path: &[&str]) -> bool {
-    let mut current = value;
-    for key in path {
-        let Some(next) = current.get(*key) else {
-            return false;
-        };
-        current = next;
-    }
-    current
-        .as_array()
-        .map(|items| !items.is_empty())
-        .unwrap_or(false)
 }
