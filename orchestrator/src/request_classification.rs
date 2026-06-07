@@ -16,9 +16,10 @@ pub use crate::request_classification_labels::{
     bounded_live_policy_bypass, bounded_live_policy_reason, bounded_risk, bounded_route,
 };
 pub use crate::request_classification_report::request_classification_report;
+use crate::request_classification_routing::{recommend_route, response_contract};
 use crate::request_classification_rules::{
     classify_artifact, classify_complexity, classify_domain, classify_intent, classify_risk,
-    detected_domains, recommend_route, response_contract,
+    detected_domains,
 };
 pub use crate::request_classification_runtime::{
     evaluate_live_policy, record_classification_metrics,
