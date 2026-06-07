@@ -4,11 +4,14 @@ use uuid::Uuid;
 
 pub use crate::context_artifacts::builders::{
     active_instruction_artifact, durable_project_memory_artifact, failure_history_artifact,
-    instruction_subject, repo_decisions_artifact, repo_map_artifact, service_topology_artifact,
-    session_state_artifact, RepoMapInput, ServiceTopologyInput,
+    instruction_subject, repo_decisions_artifact, session_state_artifact,
+};
+pub use crate::context_artifacts::static_builders::{
+    repo_map_artifact, service_topology_artifact, RepoMapInput, ServiceTopologyInput,
 };
 
 mod builders;
+mod static_builders;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextArtifact {
