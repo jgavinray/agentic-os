@@ -9,6 +9,7 @@ pub mod context_ledger;
 pub mod context_packing;
 pub mod context_packing_policy;
 pub mod context_rendering;
+pub mod context_rendering_sections;
 pub mod context_search;
 pub mod db;
 pub mod db_connection;
