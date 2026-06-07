@@ -1,9 +1,9 @@
-use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
 
+use crate::handlers_openai_upstream::dispatch_openai_streaming;
 use crate::handlers_stream_persistence::{
     persist_stream_completion, StreamCompletionPersistence, StreamResponseFormat,
 };
@@ -28,76 +28,17 @@ pub(crate) async fn handle_streaming(
     request_event_id: Option<uuid::Uuid>,
     context_pack_id: Option<uuid::Uuid>,
     user_content: String,
-    mut finalizer: crate::litellm::LiteLlmCallFinalizer,
+    finalizer: crate::litellm::LiteLlmCallFinalizer,
     vllm_cache_before: Option<(String, crate::vllm_metrics::VllmCacheSnapshot)>,
     capture: crate::client_capture::RawHttpCapture,
 ) -> Response {
-    let url = format!("{}/chat/completions", state.litellm_url);
-    let started = finalizer.attempt_mut().started_at;
-    let upstream = match state
-        .http_stream
-        .post(&url)
-        .bearer_auth(&state.litellm_key)
-        .json(&req)
-        .send()
-        .await
-    {
-        Ok(r) => {
-            let status = r.status();
-            telemetry::record_upstream_litellm(
-                "chat_completions",
-                started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            if !status.is_success() {
-                telemetry::record_upstream_litellm_error(
-                    "chat_completions",
-                    telemetry::upstream_error_kind(status),
-                );
-            }
-            r
-        }
-        Err(e) => {
-            telemetry::record_upstream_litellm("chat_completions", started.elapsed(), "error");
-            telemetry::record_upstream_litellm_error(
-                "chat_completions",
-                telemetry::reqwest_error_kind(&e),
-            );
-            finalizer
-                .finalize(
-                    crate::litellm::TerminalStatus::NetworkError,
-                    Some(telemetry::reqwest_error_kind(&e)),
-                    Some(&e.to_string()),
-                    crate::litellm::ProviderCacheCounters::default(),
-                )
-                .await;
-            return (
-                StatusCode::BAD_GATEWAY,
-                axum::Json(
-                    serde_json::json!({"error": "litellm_unreachable", "detail": e.to_string()}),
-                ),
-            )
-                .into_response();
-        }
+    let dispatch = match dispatch_openai_streaming(state, req, finalizer).await {
+        Ok(dispatch) => dispatch,
+        Err(response) => return response,
     };
-
-    if !upstream.status().is_success() {
-        let status = upstream.status();
-        telemetry::record_upstream_litellm_error(
-            "chat_completions",
-            telemetry::upstream_error_kind(status),
-        );
-        let body = upstream.text().await.unwrap_or_default();
-        finalizer
-            .finalize(
-                crate::litellm::TerminalStatus::HttpError,
-                Some(telemetry::upstream_error_kind(status)),
-                Some("upstream returned non-success status"),
-                crate::litellm::ProviderCacheCounters::default(),
-            )
-            .await;
-        return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
-    }
+    let upstream = dispatch.response;
+    let finalizer = dispatch.finalizer;
+    let started = dispatch.started;
 
     let bytes_stream = upstream.bytes_stream();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
