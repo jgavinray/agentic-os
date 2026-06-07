@@ -5,12 +5,14 @@
 //! routing are later phases.
 
 use chrono::Utc;
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 
 use crate::request_classification_composition::{
     decomposition_fragments, has_subtask_action_signal,
 };
+use crate::request_classification_feature_json::features_to_json;
 use crate::request_classification_features::{extract_features, RequestFeatures};
+use crate::request_classification_input::{event_text, has_request_text, metadata_key_text};
 pub use crate::request_classification_labels::{
     bounded_complexity, bounded_domain, bounded_intent, bounded_live_policy_action,
     bounded_live_policy_bypass, bounded_live_policy_reason, bounded_risk, bounded_route,
@@ -33,11 +35,11 @@ pub use crate::request_classification_types::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CompositeAnalysis {
-    is_composite: bool,
-    decomposition_candidate: bool,
-    reason: &'static str,
-    sub_intents: Vec<RequestIntent>,
+pub(crate) struct CompositeAnalysis {
+    pub(crate) is_composite: bool,
+    pub(crate) decomposition_candidate: bool,
+    pub(crate) reason: &'static str,
+    pub(crate) sub_intents: Vec<RequestIntent>,
 }
 
 /// Classify a loaded event into deterministic request-level features and labels.
@@ -113,143 +115,6 @@ pub fn is_classifiable_request_event(event: &crate::db::AgentEvent) -> bool {
         || (event.event_type == "context_pack"
             && event.event_role.as_deref() == Some("context_pack")
             && event.metadata.get("request").is_some())
-}
-
-fn event_text(event: &crate::db::AgentEvent) -> String {
-    match event.evidence.as_deref().filter(|value| !value.is_empty()) {
-        Some(evidence) => format!("{}\n{}", event.summary, evidence),
-        None => event.summary.clone(),
-    }
-}
-
-fn has_request_text(event: &crate::db::AgentEvent) -> bool {
-    !event_text(event).trim().is_empty()
-}
-
-fn metadata_key_text(value: &Value) -> String {
-    fn collect(value: &Value, keys: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                for (key, nested) in map {
-                    keys.push(key.clone());
-                    collect(nested, keys);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    collect(item, keys);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut keys = Vec::new();
-    collect(value, &mut keys);
-    keys.join(" ")
-}
-
-fn features_to_json(
-    features: &RequestFeatures,
-    detected_domains: &[RequestDomain],
-    composite: &CompositeAnalysis,
-) -> Value {
-    let mut object = Map::new();
-    object.insert("char_count".to_string(), json!(features.char_count));
-    object.insert("line_count".to_string(), json!(features.line_count));
-    object.insert(
-        "estimated_tokens".to_string(),
-        json!(features.estimated_tokens),
-    );
-    object.insert("has_code_block".to_string(), json!(features.has_code_block));
-    object.insert("has_yaml".to_string(), json!(features.has_yaml));
-    object.insert("has_json".to_string(), json!(features.has_json));
-    object.insert(
-        "has_stack_trace".to_string(),
-        json!(features.has_stack_trace),
-    );
-    object.insert("has_logs".to_string(), json!(features.has_logs));
-    object.insert(
-        "has_shell_command".to_string(),
-        json!(features.has_shell_command),
-    );
-    object.insert("has_url".to_string(), json!(features.has_url));
-    object.insert("has_file_path".to_string(), json!(features.has_file_path));
-    object.insert(
-        "has_secret_candidate".to_string(),
-        json!(features.has_secret_candidate),
-    );
-    object.insert(
-        "contains_error_words".to_string(),
-        json!(features.contains_error_words),
-    );
-    object.insert(
-        "contains_destructive_verbs".to_string(),
-        json!(features.contains_destructive_verbs),
-    );
-    object.insert(
-        "asks_for_latest".to_string(),
-        json!(features.asks_for_latest),
-    );
-    object.insert(
-        "asks_for_file_generation".to_string(),
-        json!(features.asks_for_file_generation),
-    );
-    object.insert(
-        "detected_domain_terms".to_string(),
-        json!(detected_domains
-            .iter()
-            .map(|domain| domain.as_str())
-            .collect::<Vec<_>>()),
-    );
-    object.insert(
-        "has_kubernetes_terms".to_string(),
-        json!(features.has_kubernetes_terms),
-    );
-    object.insert(
-        "has_docker_terms".to_string(),
-        json!(features.has_docker_terms),
-    );
-    object.insert("has_llm_terms".to_string(), json!(features.has_llm_terms));
-    object.insert(
-        "has_networking_terms".to_string(),
-        json!(features.has_networking_terms),
-    );
-    object.insert(
-        "has_security_terms".to_string(),
-        json!(features.has_security_terms),
-    );
-    object.insert(
-        "has_config_shape".to_string(),
-        json!(features.has_config_shape),
-    );
-    object.insert(
-        "has_diff_or_patch".to_string(),
-        json!(features.has_diff_or_patch),
-    );
-    object.insert(
-        "has_test_failure".to_string(),
-        json!(features.has_test_failure),
-    );
-    object.insert("is_composite".to_string(), json!(composite.is_composite));
-    object.insert(
-        "decomposition_candidate".to_string(),
-        json!(composite.decomposition_candidate),
-    );
-    object.insert("decomposition_reason".to_string(), json!(composite.reason));
-    object.insert(
-        "sub_intent_count".to_string(),
-        json!(composite.sub_intents.len()),
-    );
-    object.insert(
-        "sub_intents".to_string(),
-        json!(composite
-            .sub_intents
-            .iter()
-            .map(|intent| intent.as_str())
-            .collect::<Vec<_>>()),
-    );
-    Value::Object(object)
 }
 
 fn detected_domains(features: &RequestFeatures, lower: &str) -> Vec<RequestDomain> {
@@ -648,6 +513,7 @@ fn push_if<T: PartialEq + Copy>(items: &mut Vec<T>, condition: bool, item: T) {
 mod tests {
     use super::*;
     use crate::db::AgentEvent;
+    use serde_json::json;
     use std::collections::HashSet;
 
     const REQUEST_CLASSIFICATION_MIGRATIONS: &str = concat!(
