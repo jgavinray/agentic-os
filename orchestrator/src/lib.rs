@@ -123,6 +123,7 @@ pub mod sampling;
 pub mod sentiment;
 pub mod sse;
 pub mod startup_backfill;
+pub mod startup_env;
 pub mod state;
 pub mod state_context;
 pub mod state_context_cache;

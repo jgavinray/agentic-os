@@ -1,6 +1,7 @@
 use orchestrator::{
     app_router, client_capture, db, embedder, handlers, logging, migrations, qdrant, rate_limit,
-    request_classification, sampling, sentiment, startup_backfill, state, summarizer, telemetry,
+    request_classification, sampling, sentiment, startup_backfill, startup_env, state, summarizer,
+    telemetry,
 };
 use std::env;
 use std::sync::Arc;
@@ -25,19 +26,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .to_string();
     let litellm_key = env::var("LITELLM_KEY").expect("LITELLM_KEY must be set");
     // BUG-12: canonical model name matches litessh-prompt.md
-    // API_KEYS is semicolon-delimited entries: `token,namespace;token2,namespace2`
-    let api_keys: Vec<(String, String)> = env::var("API_KEYS")
-        .unwrap_or_else(|_| "agent-os,agentic-os".to_string())
-        .split(';')
-        .map(|s| {
-            let s = s.trim();
-            let mut parts = s.splitn(2, ',');
-            let token = parts.next().unwrap_or(s).trim().to_string();
-            let namespace = parts.next().unwrap_or(&token).trim().to_string();
-            (token, namespace)
-        })
-        .filter(|(t, _)| !t.is_empty())
-        .collect();
+    let api_keys = startup_env::api_keys_from_env();
     let default_model =
         env::var("DEFAULT_MODEL").unwrap_or_else(|_| "qwen36-35b-heretic".to_string());
     let summarizer_url = env::var("SUMMARIZER_BASE_URL")
@@ -45,118 +34,50 @@ async fn main() -> Result<(), anyhow::Error> {
         .trim_end_matches('/')
         .to_string();
     let summarizer_model = env::var("SUMMARIZER_MODEL").unwrap_or_else(|_| default_model.clone());
-    let total_recall_url = env::var("TOTAL_RECALL_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty());
-    let vllm_metrics_url = env::var("VLLM_METRICS_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let summarizer_key = env::var("SUMMARIZER_KEY")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            if summarizer_url == litellm_url {
-                Some(litellm_key.clone())
-            } else {
-                None
-            }
-        });
-    let summarizer_max_tokens = env::var("SUMMARIZER_MAX_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state::SUMMARIZER_MAX_TOKENS)
-        .max(1);
+    let total_recall_url = startup_env::optional_trimmed_url_env("TOTAL_RECALL_URL");
+    let vllm_metrics_url = startup_env::optional_trimmed_env("VLLM_METRICS_URL");
+    let summarizer_key = startup_env::optional_trimmed_env("SUMMARIZER_KEY").or_else(|| {
+        if summarizer_url == litellm_url {
+            Some(litellm_key.clone())
+        } else {
+            None
+        }
+    });
+    let summarizer_max_tokens =
+        startup_env::parsed_env_min("SUMMARIZER_MAX_TOKENS", state::SUMMARIZER_MAX_TOKENS, 1);
     let default_task = env::var("DEFAULT_TASK").unwrap_or_else(|_| "engineering".to_string());
-    let cache_ttl_ms = env::var("CONTEXT_CACHE_TTL_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state::CONTEXT_CACHE_TTL_MS);
-    let context_decay_rate = env::var("CONTEXT_DECAY_RATE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state::DEFAULT_CONTEXT_DECAY_RATE);
-    let rate_limit_per_minute = env::var("RATE_LIMIT_PER_MINUTE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60);
-    let rate_limit_burst = env::var("RATE_LIMIT_BURST")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
-    let execution_feedback_enabled = env::var("EXECUTION_FEEDBACK_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true);
-    let trajectory_capture_enabled = env::var("TRAJECTORY_CAPTURE_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true);
-    let trajectory_idle_timeout_sec = env::var("TRAJECTORY_IDLE_TIMEOUT_SEC")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(orchestrator::trajectory::DEFAULT_TRAJECTORY_IDLE_TIMEOUT_SEC);
+    let cache_ttl_ms = startup_env::parsed_env("CONTEXT_CACHE_TTL_MS", state::CONTEXT_CACHE_TTL_MS);
+    let context_decay_rate =
+        startup_env::parsed_env("CONTEXT_DECAY_RATE", state::DEFAULT_CONTEXT_DECAY_RATE);
+    let rate_limit_per_minute = startup_env::parsed_env("RATE_LIMIT_PER_MINUTE", 60);
+    let rate_limit_burst = startup_env::parsed_env("RATE_LIMIT_BURST", 30);
+    let execution_feedback_enabled = startup_env::bool_env("EXECUTION_FEEDBACK_ENABLED", true);
+    let trajectory_capture_enabled = startup_env::bool_env("TRAJECTORY_CAPTURE_ENABLED", true);
+    let trajectory_idle_timeout_sec = startup_env::parsed_env(
+        "TRAJECTORY_IDLE_TIMEOUT_SEC",
+        orchestrator::trajectory::DEFAULT_TRAJECTORY_IDLE_TIMEOUT_SEC,
+    );
     let sampling_config = sampling::SamplingConfig::from_env()?;
-    let failure_history_token_budget = env::var("FAILURE_HISTORY_TOKEN_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET);
+    let failure_history_token_budget = startup_env::parsed_env(
+        "FAILURE_HISTORY_TOKEN_BUDGET",
+        state::DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET,
+    );
     let feature_extraction_enabled =
         orchestrator::feature_extraction::feature_extraction_enabled_from_env();
-    let tool_mediation_enabled = env::var("TOOL_MEDIATION_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true);
-    let prefix_cache_canary_enabled = env::var("PREFIX_CACHE_CANARY_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
+    let tool_mediation_enabled = startup_env::bool_env("TOOL_MEDIATION_ENABLED", true);
+    let prefix_cache_canary_enabled = startup_env::bool_env("PREFIX_CACHE_CANARY_ENABLED", false);
     let prefix_cache_canary_namespace_allowlist =
-        env::var("PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .collect();
-    let summarizer_enabled = env::var("SUMMARIZER_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true);
+        startup_env::comma_list_env("PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST");
+    let summarizer_enabled = startup_env::bool_env("SUMMARIZER_ENABLED", true);
     let operational_constraints_token_budget =
         orchestrator::feature_extraction::operational_constraints_token_budget_from_env();
-    let background_work_concurrency = env::var("BACKGROUND_WORK_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(state::DEFAULT_BACKGROUND_WORK_CONCURRENCY)
-        .max(1);
-    let litellm_request_timeout_secs = env::var("LITELLM_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300)
-        .max(1);
+    let background_work_concurrency = startup_env::parsed_env_min(
+        "BACKGROUND_WORK_CONCURRENCY",
+        state::DEFAULT_BACKGROUND_WORK_CONCURRENCY,
+        1,
+    );
+    let litellm_request_timeout_secs =
+        startup_env::parsed_env_min("LITELLM_REQUEST_TIMEOUT_SECS", 300, 1);
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
