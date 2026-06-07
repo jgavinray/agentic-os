@@ -783,61 +783,6 @@ pub async fn context_pack(
 
 // ── Chat completions ────────────────────────────────────────────
 
-/// Return an Anthropic-shaped error response.
-fn anthropic_error_value(error_type: &'static str, message: impl Into<String>) -> Value {
-    serde_json::json!({
-        "type": "error",
-        "error": {"type": error_type, "message": message.into()}
-    })
-}
-
-fn anthropic_error(
-    status: StatusCode,
-    error_type: &'static str,
-    message: impl Into<String>,
-) -> Response {
-    (
-        status,
-        axum::Json(anthropic_error_value(error_type, message)),
-    )
-        .into_response()
-}
-
-/// BUG-4: Append context to an existing client system message rather than inserting
-/// a new one at position 0, which would demote the harness's carefully-tuned prompt.
-/// Ensure the request has a backend-safe max_tokens value.
-/// Anthropic requires `max_tokens`; OpenAI treats it as optional. Default omitted
-/// values, respect explicit small values, and cap oversized values.
-/// Normalise Responses API content types in message history before forwarding to LiteLLM.
-/// LiteLLM may return `"type": "output_text"` in assistant turns; if the client replays
-/// those turns in a subsequent request, some LiteLLM routing paths reject them. Convert
-/// to `"text"` defensively so the round-trip is always valid regardless of LiteLLM version.
-fn normalize_response_content_types(req: &mut Value) {
-    if let Some(messages) = req.get_mut("messages").and_then(|v| v.as_array_mut()) {
-        for msg in messages.iter_mut() {
-            if let Some(content) = msg.get_mut("content").and_then(|v| v.as_array_mut()) {
-                for block in content.iter_mut() {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                        block["type"] = Value::String("text".to_string());
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn sanitize_anthropic_litellm_request(req: &mut Value) {
-    if let Some(obj) = req.as_object_mut() {
-        // LiteLLM's Anthropic adapter forwards extended-thinking fields to
-        // OpenAI-compatible local backends as unsupported Responses API params
-        // such as `max_output_tokens`, which causes vLLM to return 500s.
-        obj.remove("thinking");
-        obj.remove("max_output_tokens");
-        obj.remove("reasoning_effort");
-        obj.remove("context_management");
-    }
-}
-
 fn baseline_arm_selection(
     headers: &HeaderMap,
 ) -> Result<crate::adversarial_harness::BaselineArm, String> {
@@ -2254,7 +2199,7 @@ pub async fn messages(
     let payload: Value = match serde_json::from_slice(&raw_client_body) {
         Ok(payload) => payload,
         Err(e) => {
-            let body = anthropic_error_value(
+            let body = anthropic::error_value(
                 "invalid_request_error",
                 format!("invalid JSON request body: {e}"),
             );
@@ -2266,7 +2211,7 @@ pub async fn messages(
                 crate::client_capture::to_json_bytes(&body),
             )
             .await;
-            return anthropic_error(
+            return anthropic::error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!("invalid JSON request body: {e}"),
@@ -2275,7 +2220,7 @@ pub async fn messages(
     };
     capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
-        let body = anthropic_error_value("authentication_error", "invalid or missing API key");
+        let body = anthropic::error_value("authentication_error", "invalid or missing API key");
         record_client_capture_response(
             &state,
             capture,
@@ -2284,7 +2229,7 @@ pub async fn messages(
             crate::client_capture::to_json_bytes(&body),
         )
         .await;
-        return anthropic_error(
+        return anthropic::error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             "invalid or missing API key",
@@ -2323,7 +2268,7 @@ pub async fn messages(
     let baseline_arm = match baseline_arm_selection(&headers) {
         Ok(arm) => arm,
         Err(e) => {
-            let body = anthropic_error_value(
+            let body = anthropic::error_value(
                 "invalid_request_error",
                 format!("invalid baseline arm: {e}"),
             );
@@ -2343,8 +2288,8 @@ pub async fn messages(
     req["model"] = Value::String(route.routed_model.clone());
     apply_local_reasoning_defaults(&mut req, reasoning_selection);
     enforce_min_max_tokens(&mut req);
-    normalize_response_content_types(&mut req);
-    sanitize_anthropic_litellm_request(&mut req);
+    anthropic::normalize_response_content_types(&mut req);
+    anthropic::sanitize_litellm_request(&mut req);
     inject_local_reasoning_contract_anthropic(&mut req, reasoning_selection);
     let session_id = if state.trajectory_capture_enabled {
         match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
@@ -2503,7 +2448,7 @@ pub async fn messages(
                     crate::litellm::ProviderCacheCounters::default(),
                 )
                 .await;
-            return anthropic_error(
+            return anthropic::error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 "upstream LiteLLM request failed",
@@ -2524,7 +2469,7 @@ pub async fn messages(
                     crate::litellm::ProviderCacheCounters::default(),
                 )
                 .await;
-            return anthropic_error(
+            return anthropic::error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 "invalid upstream response",
@@ -2595,7 +2540,7 @@ pub async fn messages(
                             crate::litellm::ProviderCacheCounters::default(),
                         )
                         .await;
-                    return anthropic_error(
+                    return anthropic::error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
                         "upstream LiteLLM retry failed",
@@ -2620,7 +2565,7 @@ pub async fn messages(
                             crate::litellm::ProviderCacheCounters::default(),
                         )
                         .await;
-                    return anthropic_error(
+                    return anthropic::error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
                         "invalid upstream retry response",
@@ -2815,7 +2760,7 @@ async fn handle_streaming_anthropic(
                     crate::litellm::ProviderCacheCounters::default(),
                 )
                 .await;
-            return anthropic_error(
+            return anthropic::error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 format!("upstream unreachable: {e}"),
@@ -2920,7 +2865,7 @@ async fn handle_streaming_anthropic(
                             crate::litellm::ProviderCacheCounters::default(),
                         )
                         .await;
-                    return anthropic_error(
+                    return anthropic::error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
                         format!("upstream retry unreachable: {e}"),
@@ -3689,7 +3634,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}]
         });
 
-        sanitize_anthropic_litellm_request(&mut req);
+        anthropic::sanitize_litellm_request(&mut req);
 
         assert!(req.get("thinking").is_none());
         assert!(req.get("max_output_tokens").is_none());
