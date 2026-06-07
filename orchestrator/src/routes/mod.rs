@@ -3,4 +3,5 @@ pub mod harness;
 pub mod health;
 pub mod observability;
 pub mod sessions;
+pub mod tools;
 pub mod validations;
