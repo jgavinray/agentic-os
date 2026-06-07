@@ -30,6 +30,10 @@ pub use crate::tool_mediation_types::{
 };
 
 #[cfg(test)]
+#[path = "tool_mediation_policy_enforcement_tests.rs"]
+mod policy_enforcement_tests;
+
+#[cfg(test)]
 #[path = "tool_mediation_policy_mapping_tests.rs"]
 mod policy_mapping_tests;
 
