@@ -60,6 +60,7 @@ pub mod handlers_trajectory;
 pub mod handlers_usage;
 pub mod harness_feedback;
 pub mod harness_feedback_classification;
+pub mod harness_feedback_guardrail;
 pub mod harness_feedback_metadata;
 pub mod harness_feedback_store;
 pub mod harness_feedback_taxonomy;
