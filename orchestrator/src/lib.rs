@@ -171,3 +171,4 @@ pub mod trajectory_summary;
 pub mod trajectory_types;
 pub mod vllm_cache_usage;
 pub mod vllm_metrics;
+pub mod vllm_metrics_snapshot;
