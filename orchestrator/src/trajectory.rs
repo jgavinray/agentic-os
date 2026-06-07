@@ -5,6 +5,7 @@
 //! replayable from the event log without learned classification or new storage.
 
 use crate::db::AgentEvent;
+use crate::trajectory_event_payload::{event_payload, event_success, payload_bool};
 use serde_json::Value;
 
 pub use crate::trajectory_events::{
@@ -70,24 +71,6 @@ pub fn is_failed_terminal_event(event: &AgentEvent) -> bool {
         Some(EventRole::Remediation) => !event_success(event),
         _ => false,
     }
-}
-
-fn event_success(event: &AgentEvent) -> bool {
-    event
-        .metadata
-        .get("success")
-        .and_then(Value::as_bool)
-        .or_else(|| event_payload(event).get("success").and_then(Value::as_bool))
-        .or_else(|| event_payload(event).get("pass").and_then(Value::as_bool))
-        .unwrap_or(false)
-}
-
-fn event_payload(event: &AgentEvent) -> &Value {
-    event.metadata.get("payload").unwrap_or(&event.metadata)
-}
-
-fn payload_bool(payload: &Value, key: &str) -> Option<bool> {
-    payload.get(key).and_then(Value::as_bool)
 }
 
 #[cfg(test)]

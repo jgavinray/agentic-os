@@ -1,4 +1,6 @@
 use crate::db::AgentEvent;
+use crate::trajectory_event_payload::{event_payload, metadata_i64, metadata_str, payload_str};
+use crate::trajectory_summary_status::derive_status;
 use crate::trajectory_types::{BoundaryReason, EventRole, FinalStatus};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -146,97 +148,4 @@ pub fn summarize_trajectory(
         remediation_count,
         final_attempt_index: max_attempt,
     }
-}
-
-fn derive_status(events: &[AgentEvent], boundary_reason: Option<BoundaryReason>) -> FinalStatus {
-    if has_reverted_patch(events) {
-        return FinalStatus::Reverted;
-    }
-    if has_successful_patch_with_latest_validation(events) {
-        return FinalStatus::Succeeded;
-    }
-    match boundary_reason {
-        Some(BoundaryReason::NewUserMessage) => FinalStatus::Abandoned,
-        Some(BoundaryReason::IdleTimeout) | None => FinalStatus::Unresolved,
-    }
-}
-
-fn has_reverted_patch(events: &[AgentEvent]) -> bool {
-    let mut applied_seen = false;
-    for event in events {
-        if event.event_role.as_deref() != Some(EventRole::Patch.as_str()) {
-            continue;
-        }
-        let payload = event_payload(event);
-        if payload_bool(payload, "patch_applied").unwrap_or(false) {
-            applied_seen = true;
-        }
-        if applied_seen && payload_bool(payload, "patch_reverted").unwrap_or(false) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_successful_patch_with_latest_validation(events: &[AgentEvent]) -> bool {
-    let mut latest_patch_applied = false;
-    for event in events {
-        if event.event_role.as_deref() == Some(EventRole::Patch.as_str()) {
-            let payload = event_payload(event);
-            if payload_bool(payload, "patch_reverted").unwrap_or(false) {
-                latest_patch_applied = false;
-            } else if payload_bool(payload, "patch_applied").unwrap_or(false) {
-                latest_patch_applied = true;
-            }
-        }
-    }
-    if !latest_patch_applied {
-        return false;
-    }
-    events
-        .iter()
-        .rev()
-        .find(|event| event.event_role.as_deref() == Some(EventRole::Validation.as_str()))
-        .map(event_success)
-        .unwrap_or(false)
-}
-
-fn event_success(event: &AgentEvent) -> bool {
-    event
-        .metadata
-        .get("success")
-        .and_then(Value::as_bool)
-        .or_else(|| event_payload(event).get("success").and_then(Value::as_bool))
-        .or_else(|| event_payload(event).get("pass").and_then(Value::as_bool))
-        .unwrap_or(false)
-}
-
-fn event_payload(event: &AgentEvent) -> &Value {
-    event.metadata.get("payload").unwrap_or(&event.metadata)
-}
-
-fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
-    payload.get(key).and_then(Value::as_str)
-}
-
-fn payload_bool(payload: &Value, key: &str) -> Option<bool> {
-    payload.get(key).and_then(Value::as_bool)
-}
-
-fn metadata_str<'a>(metadata: &'a Value, key: &str) -> Option<&'a str> {
-    metadata.get(key).and_then(Value::as_str).or_else(|| {
-        metadata
-            .get("payload")
-            .and_then(|p| p.get(key))
-            .and_then(Value::as_str)
-    })
-}
-
-fn metadata_i64(metadata: &Value, key: &str) -> Option<i64> {
-    metadata.get(key).and_then(Value::as_i64).or_else(|| {
-        metadata
-            .get("payload")
-            .and_then(|p| p.get(key))
-            .and_then(Value::as_i64)
-    })
 }
