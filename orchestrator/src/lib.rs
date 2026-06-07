@@ -7,6 +7,7 @@ pub mod context_artifacts;
 pub mod context_compiler;
 pub mod context_ledger;
 pub mod context_packing;
+pub mod context_packing_endpoint;
 pub mod context_packing_policy;
 pub mod context_rendering;
 pub mod context_rendering_sections;

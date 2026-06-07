@@ -1,10 +1,5 @@
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use std::sync::Arc;
-
-use crate::auth::check_auth;
 use crate::background::spawn_bounded_background;
+pub use crate::context_packing_endpoint::context_pack;
 pub(crate) use crate::context_packing_policy::{
     apply_orchestration_context_limits, context_task_category,
 };
@@ -48,7 +43,7 @@ fn context_cache_prefix(repo: &str, cache_task: &str) -> String {
     format!("{repo}:{cache_task}:")
 }
 
-async fn get_or_build_cached_context(
+pub(crate) async fn get_or_build_cached_context(
     state: &AppState,
     repo: &str,
     task: &str,
@@ -380,89 +375,6 @@ fn spawn_context_cache_refresh(
     });
 }
 
-#[tracing::instrument(name = "handler.context_pack", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
-pub async fn context_pack(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Json(req): axum::Json<ContextPackRequest>,
-) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    let task_category = TaskCategory::from_task(&req.task);
-    let task_config = TaskContextConfig::for_category(task_category);
-
-    let cached = match get_or_build_cached_context(
-        &state,
-        &req.repo,
-        &req.task,
-        None,
-        None,
-        req.limit,
-        &task_config,
-        None,
-        None,
-    )
-    .await
-    {
-        Ok(cached) => cached,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "failed_to_fetch_context", "detail": e.to_string()})),
-            ).into_response();
-        }
-    };
-
-    axum::Json(ContextPackResponse {
-        repo: req.repo,
-        task: req.task,
-        context: cached.context,
-        memories: cached.memories,
-    })
-    .into_response()
-}
-
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn context_pack_parallelizes_context_io_calls() {
-        let src = include_str!("context_packing.rs");
-        let ctx_start = src
-            .find("async fn get_or_build_cached_context")
-            .expect("get_or_build_cached_context not found in source");
-        let ctx_body: String = src[ctx_start..].chars().take(6500).collect();
-
-        assert!(ctx_body.contains("tokio::join!"));
-        assert!(ctx_body.contains("db::get_context_evidence_for_policy"));
-        assert!(ctx_body.contains("hybrid_search"));
-        assert!(ctx_body.contains("db::get_active_errors"));
-        assert!(ctx_body.contains("db::get_failure_history_for_signatures"));
-
-        let join_block_start = ctx_body
-            .find("tokio::join!")
-            .expect("tokio::join! not found");
-        let join_block: String = ctx_body[join_block_start..].chars().take(1500).collect();
-        assert!(
-            join_block.contains("get_context_evidence_for_policy")
-                && join_block.contains("hybrid_search")
-                && join_block.contains("get_active_errors")
-                && join_block.contains("get_failure_history_for_signatures")
-        );
-    }
-
-    #[test]
-    fn context_pack_preserves_error_propagation_for_events() {
-        let src = include_str!("context_packing.rs");
-        let ctx_start = src
-            .find("pub async fn context_pack")
-            .expect("context_pack not found");
-        let ctx_body = &src[ctx_start..ctx_start + 2000];
-        assert!(ctx_body.contains("INTERNAL_SERVER_ERROR"));
-    }
-}
+#[path = "context_packing_tests.rs"]
+mod tests;
