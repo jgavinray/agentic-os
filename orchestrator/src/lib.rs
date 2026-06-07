@@ -44,6 +44,7 @@ pub mod handlers;
 pub mod handlers_anthropic_dispatch;
 pub mod handlers_capture;
 pub mod handlers_context;
+pub mod handlers_openai_dispatch;
 pub mod handlers_request;
 pub mod handlers_streaming;
 pub mod handlers_trajectory;
