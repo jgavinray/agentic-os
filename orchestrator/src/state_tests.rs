@@ -1,4 +1,5 @@
 use super::*;
+use std::time::{Duration, Instant};
 
 #[test]
 fn context_cache_key_includes_repo_task_and_event_count() {

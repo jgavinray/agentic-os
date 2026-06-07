@@ -85,6 +85,7 @@ pub mod sampling;
 pub mod sentiment;
 pub mod sse;
 pub mod state;
+pub mod state_context;
 pub mod summarizer;
 pub mod system_context;
 pub mod telemetry;
