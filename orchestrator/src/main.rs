@@ -159,6 +159,11 @@ async fn main() -> Result<(), anyhow::Error> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(state::DEFAULT_BACKGROUND_WORK_CONCURRENCY)
         .max(1);
+    let litellm_request_timeout_secs = env::var("LITELLM_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+        .max(1);
     let embed_model_path = env::var("EMBED_MODEL_PATH").expect("EMBED_MODEL_PATH must be set");
 
     let pool = db::create_pool(&db_url)?;
@@ -203,7 +208,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(90))
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(litellm_request_timeout_secs))
         .build()?;
 
     let http_stream = reqwest::Client::builder()

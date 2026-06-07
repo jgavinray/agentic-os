@@ -2029,16 +2029,18 @@ fn inject_local_reasoning_contract_anthropic(req: &mut Value, selection: LocalRe
 
 fn enforce_min_max_tokens(req: &mut Value) {
     let requested = req.get("max_tokens").and_then(|v| v.as_u64());
+    let default_max_tokens = configured_default_max_tokens();
+    let max_max_tokens = configured_max_max_tokens();
     let effective = requested
-        .unwrap_or(DEFAULT_MAX_TOKENS)
-        .clamp(1, MAX_MAX_TOKENS);
+        .unwrap_or(default_max_tokens)
+        .clamp(1, max_max_tokens);
     let requested_for_log = requested.unwrap_or(0);
     if requested_for_log != effective {
         tracing::warn!(
             requested_max_tokens = requested_for_log,
             effective_max_tokens = effective,
-            default_max_tokens = DEFAULT_MAX_TOKENS,
-            max_max_tokens = MAX_MAX_TOKENS,
+            default_max_tokens = default_max_tokens,
+            max_max_tokens = max_max_tokens,
             "clamped max_tokens for backend capacity"
         );
     }
