@@ -34,6 +34,7 @@ pub mod db_execution_events;
 pub mod db_failures;
 pub mod db_sessions;
 pub mod db_trajectory;
+pub mod db_trajectory_queries;
 pub mod db_trajectory_results;
 pub mod db_types;
 pub mod db_usage;
