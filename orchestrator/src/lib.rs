@@ -42,6 +42,7 @@ pub mod proxy_support;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
+pub mod request_classification_labels;
 pub mod request_classification_store;
 pub mod request_classification_types;
 pub mod request_policy;
