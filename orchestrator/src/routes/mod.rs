@@ -1,3 +1,4 @@
+pub mod checkpoints;
 pub mod context;
 pub mod harness;
 pub mod health;
