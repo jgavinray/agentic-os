@@ -22,6 +22,7 @@ pub use crate::routes::context::context_artifacts;
 pub use crate::routes::harness::{harness_guardrail, harness_outcome, litellm_callback_payload};
 pub use crate::routes::health::{health, health_live, health_ready, list_models};
 pub use crate::routes::observability::{cache_stats, metrics, metrics_json};
+pub use crate::routes::search::search;
 pub use crate::routes::sessions::{append_event, start_session};
 pub use crate::routes::tools::authorize_tool;
 #[cfg(test)]
@@ -4909,40 +4910,4 @@ mod tests {
             summary_level,
         }
     }
-}
-
-// ── Semantic search ─────────────────────────────────────────────
-
-#[tracing::instrument(name = "handler.search", skip(state, headers, req))]
-pub async fn search(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Json(req): axum::Json<Value>,
-) -> Response {
-    if !check_auth(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-
-    let query = req.get("q").and_then(|v| v.as_str()).unwrap_or("");
-    let limit = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-
-    let results = match qdrant::search(&state.embedder, &state.qdrant_url, query, limit).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("qdrant search failed: {e}");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(
-                    serde_json::json!({"error": "search_unavailable", "detail": e.to_string()}),
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    axum::Json(serde_json::json!({"results": results})).into_response()
 }
