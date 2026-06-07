@@ -894,6 +894,10 @@ pub async fn messages(
 mod handlers_policy_tests;
 
 #[cfg(test)]
+#[path = "handlers_reasoning_tests.rs"]
+mod handlers_reasoning_tests;
+
+#[cfg(test)]
 #[path = "handlers_sse_tests.rs"]
 mod handlers_sse_tests;
 
