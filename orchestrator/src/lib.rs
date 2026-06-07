@@ -14,6 +14,7 @@ pub mod db_connection;
 pub mod db_context_artifacts;
 pub mod db_event_rows;
 pub mod db_execution_events;
+pub mod db_sessions;
 pub mod db_trajectory;
 pub mod db_types;
 pub mod db_usage;
