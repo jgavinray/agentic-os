@@ -40,8 +40,6 @@ use crate::state::*;
 #[cfg(test)]
 use crate::system_context::{inject_system_context, inject_system_context_anthropic};
 use crate::telemetry;
-#[cfg(test)]
-use crate::token_limits::enforce_min_max_tokens;
 
 pub use crate::background::trajectory::run_trajectory_idle_sweep;
 pub use crate::context_packing::context_pack;
@@ -293,6 +291,10 @@ mod handlers_policy_tests;
 #[cfg(test)]
 #[path = "handlers_reasoning_tests.rs"]
 mod handlers_reasoning_tests;
+
+#[cfg(test)]
+#[path = "handlers_request_preparation_tests.rs"]
+mod handlers_request_preparation_tests;
 
 #[cfg(test)]
 #[path = "handlers_sse_tests.rs"]
