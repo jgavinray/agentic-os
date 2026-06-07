@@ -7,9 +7,8 @@
 //! bootstrap tagging path for historical events that predate structured tags.
 
 use crate::db::AgentEvent;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeMap, BTreeSet};
-use uuid::Uuid;
 
 pub use crate::feature_constraints::enforce_constraint_token_budget;
 use crate::feature_constraints::{
@@ -19,6 +18,7 @@ pub use crate::feature_detection_tags::{
     annotate_event_metadata, bootstrap_annotate_event_metadata, bootstrap_detection_tags_for_event,
     live_detection_tags_for_event,
 };
+use crate::feature_extraction_grouping::{group_events_by_feature_window, FeatureGroupKey};
 use crate::feature_extraction_metadata::{
     context_pack_empty, context_pack_token_count, context_pack_truncated_value, event_endpoint,
     event_input_tokens_from_metadata, event_latency_ms_from_metadata, event_success,
@@ -49,42 +49,9 @@ pub use crate::feature_extraction_metadata::{
     SLOW_UPSTREAM_MODEL_MS_THRESHOLD,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum FeatureGroupKey {
-    Trajectory(Uuid),
-    SessionWindow {
-        repo: String,
-        session_id: String,
-        window_start: DateTime<Utc>,
-        window_end: DateTime<Utc>,
-    },
-}
-
 pub fn extract_records(events: &[AgentEvent], config: &ExtractionConfig) -> ExtractionReport {
-    let mut groups: BTreeMap<FeatureGroupKey, Vec<AgentEvent>> = BTreeMap::new();
-    for event in events {
-        let key = if let Some(trajectory_id) = event.trajectory_id {
-            FeatureGroupKey::Trajectory(trajectory_id)
-        } else {
-            let window_start = floor_to_window(event.created_at, config.feature_window_sec);
-            let window_end = window_start + Duration::seconds(config.feature_window_sec);
-            FeatureGroupKey::SessionWindow {
-                repo: event.repo.clone(),
-                session_id: event.session_id.clone(),
-                window_start,
-                window_end,
-            }
-        };
-        groups.entry(key).or_default().push(event.clone());
-    }
-
     let mut report = ExtractionReport::default();
-    for (key, mut grouped_events) in groups {
-        grouped_events.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+    for (key, grouped_events) in group_events_by_feature_window(events, config.feature_window_sec) {
         let (record, unknown) = extract_record_for_group(&key, &grouped_events, config);
         report.unknown_tag_schema_versions += unknown;
         report.records.push(record);
@@ -358,15 +325,10 @@ fn extract_record_for_group(
     (record, unknown_versions)
 }
 
-fn floor_to_window(ts: DateTime<Utc>, window_sec: i64) -> DateTime<Utc> {
-    let seconds = ts.timestamp();
-    let window_start = seconds - seconds.rem_euclid(window_sec);
-    Utc.timestamp_opt(window_start, 0).single().unwrap_or(ts)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use serde_json::json;
     use serde_json::Value;
 

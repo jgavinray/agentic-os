@@ -31,6 +31,7 @@ pub mod execution_feedback_validators;
 pub mod feature_constraints;
 pub mod feature_detection_tags;
 pub mod feature_extraction;
+pub mod feature_extraction_grouping;
 pub mod feature_extraction_metadata;
 pub mod feature_extraction_store;
 pub mod feature_extraction_tags;
