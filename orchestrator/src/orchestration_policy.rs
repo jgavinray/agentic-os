@@ -208,5 +208,9 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 mod tests;
 
 #[cfg(test)]
+#[path = "orchestration_policy_contract_tests.rs"]
+mod contract_tests;
+
+#[cfg(test)]
 #[path = "orchestration_policy_raw_capture_tests.rs"]
 mod raw_capture_tests;
