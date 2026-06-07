@@ -78,6 +78,7 @@ pub mod handlers_chat_completions;
 pub mod handlers_context;
 pub mod handlers_litellm_attempt;
 pub mod handlers_openai_dispatch;
+pub mod handlers_openai_persistence;
 pub mod handlers_openai_upstream;
 pub mod handlers_request;
 pub mod handlers_request_preparation;
