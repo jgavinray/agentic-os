@@ -1,7 +1,7 @@
 use orchestrator::execution_feedback;
 use std::ops::DerefMut;
 
-use super::BackfillOptions;
+use super::options::BackfillOptions;
 
 pub(super) struct BackfillReport {
     pub(super) pending: i64,
