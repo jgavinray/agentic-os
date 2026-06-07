@@ -24,6 +24,7 @@ use crate::event_capture::{
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 use crate::handlers_request::HandlerRequestScope;
 use crate::handlers_streaming::{handle_streaming, handle_streaming_anthropic};
+use crate::handlers_usage::record_success_usage;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
 #[cfg(test)]
@@ -317,20 +318,7 @@ pub async fn chat_completions(
                 provider_cache,
             )
             .await;
-            telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
-            if !usage.is_empty() {
-                let pool = state.pool.clone();
-                let actual = state.default_model.clone();
-                let rm = requested_model.clone();
-                let ns = namespace.clone();
-                let r = repo.clone();
-                let u = usage.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await {
-                        tracing::warn!("failed to record token usage: {e}");
-                    }
-                });
-            }
+            record_success_usage(&state, &usage, &requested_model, &namespace, &repo);
 
             let assistant_content: String = val["choices"][0]["message"]["content"]
                 .as_str()
@@ -834,20 +822,7 @@ pub async fn messages(
     capture.response_headers = Some(serde_json::json!({"content-type": ["application/json"]}));
     capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
     crate::client_capture::record_best_effort(state.capture_pool.as_ref(), capture).await;
-    telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
-    if !usage.is_empty() {
-        let pool = state.pool.clone();
-        let actual = state.default_model.clone();
-        let rm = model.clone();
-        let ns = namespace.clone();
-        let r = repo.clone();
-        let u = usage.clone();
-        tokio::spawn(async move {
-            if let Err(e) = db::record_token_usage(&pool, &rm, &actual, &ns, &r, &u).await {
-                tracing::warn!("failed to record token usage: {e}");
-            }
-        });
-    }
+    record_success_usage(&state, &usage, &model, &namespace, &repo);
 
     let assistant_content = extract_assistant_from_anthropic_response(&val);
     // LiteLLM may surface Anthropic tool results inside the response content.
