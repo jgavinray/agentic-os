@@ -64,6 +64,7 @@ pub mod feature_detection_producer_signals;
 pub mod feature_detection_tag_merge;
 pub mod feature_detection_tags;
 pub mod feature_extraction;
+pub mod feature_extraction_env;
 pub mod feature_extraction_grouping;
 pub mod feature_extraction_inline;
 pub mod feature_extraction_metadata;
