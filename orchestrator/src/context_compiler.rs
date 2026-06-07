@@ -1,4 +1,8 @@
 use crate::context_artifacts::{self, ContextArtifact};
+use crate::context_compiler_event_artifacts::{
+    compile_failure_history_artifact, compile_repo_decisions_artifact,
+    compile_session_state_artifact,
+};
 use crate::context_compiler_instructions::compile_active_instruction_artifact;
 use crate::context_compiler_support::{
     compile_repo_map, compile_service_topology, compiler_source_allowed, record_ledger,
@@ -81,49 +85,8 @@ impl<'a> ContextCompiler<'a> {
             &request,
             crate::orchestration_policy::ContextSource::ContextLedger,
         ) {
-            match db::get_recent_failure_history(self.pool, &request.repo, 12).await {
-                Ok(items) => {
-                    if let Some(artifact) =
-                        context_artifacts::failure_history_artifact(request.repo.clone(), &items)
-                    {
-                        for item in &items {
-                            let (decision, reason) = if item.remediation.is_some() {
-                                (
-                                "included",
-                                "promoted resolved failure/remediation pair into failure history artifact",
-                            )
-                            } else {
-                                (
-                                "suppressed",
-                                "failure has no known remediation and remains raw recent evidence",
-                            )
-                            };
-                            record_ledger(
-                            self.pool,
-                            &request.repo,
-                            &artifact,
-                            "agent_events",
-                            Some(&item.failure.id),
-                            decision,
-                            reason,
-                            serde_json::json!({
-                                "signature": item.signature,
-                                "category": item.category,
-                                "remediation_event_id": item.remediation.as_ref().map(|event| event.id.clone()),
-                            }),
-                        )
-                        .await;
-                        }
-                        artifacts.push(artifact);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "context_compiler",
-                        repo = %request.repo,
-                        "failed to fetch recent failure history: {e}"
-                    );
-                }
+            if let Some(artifact) = compile_failure_history_artifact(self.pool, &request).await {
+                artifacts.push(artifact);
             }
         }
 
@@ -131,34 +94,8 @@ impl<'a> ContextCompiler<'a> {
             &request,
             crate::orchestration_policy::ContextSource::CompiledSummaries,
         ) {
-            match db::get_recent_repo_decision_candidates(self.pool, &request.repo, 12).await {
-                Ok(events) => {
-                    if let Some(artifact) =
-                        context_artifacts::repo_decisions_artifact(request.repo.clone(), &events)
-                    {
-                        for event in &events {
-                            record_ledger(
-                            self.pool,
-                            &request.repo,
-                            &artifact,
-                            "agent_events",
-                            Some(&event.id),
-                            "included",
-                            "promoted repository decision candidate into repo_decisions artifact",
-                            serde_json::json!({"event_type": event.event_type}),
-                        )
-                        .await;
-                        }
-                        artifacts.push(artifact);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "context_compiler",
-                        repo = %request.repo,
-                        "failed to fetch repo decision candidates: {e}"
-                    );
-                }
+            if let Some(artifact) = compile_repo_decisions_artifact(self.pool, &request).await {
+                artifacts.push(artifact);
             }
         }
 
@@ -167,40 +104,10 @@ impl<'a> ContextCompiler<'a> {
             crate::orchestration_policy::ContextSource::CompiledSummaries,
         ) {
             if let Some(session_id) = request.session_id.as_deref() {
-                match db::get_recent_session_events(self.pool, session_id, 8).await {
-                    Ok(events) => {
-                        if let Some(artifact) = context_artifacts::session_state_artifact(
-                            request.repo.clone(),
-                            session_id,
-                            &events,
-                        ) {
-                            for event in &events {
-                                record_ledger(
-                                    self.pool,
-                                    &request.repo,
-                                    &artifact,
-                                    "agent_events",
-                                    Some(&event.id),
-                                    "included",
-                                    "promoted active session event into session_state artifact",
-                                    serde_json::json!({
-                                        "event_type": event.event_type,
-                                        "session_id": session_id,
-                                    }),
-                                )
-                                .await;
-                            }
-                            artifacts.push(artifact);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "context_compiler",
-                            repo = %request.repo,
-                            session_id = %session_id,
-                            "failed to fetch session state candidates: {e}"
-                        );
-                    }
+                if let Some(artifact) =
+                    compile_session_state_artifact(self.pool, &request, session_id).await
+                {
+                    artifacts.push(artifact);
                 }
             }
         }

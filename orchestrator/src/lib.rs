@@ -7,6 +7,7 @@ pub mod background;
 pub mod client_capture;
 pub mod context_artifacts;
 pub mod context_compiler;
+pub mod context_compiler_event_artifacts;
 pub mod context_compiler_instructions;
 pub mod context_compiler_support;
 pub mod context_ledger;
