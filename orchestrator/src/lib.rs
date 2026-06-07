@@ -115,6 +115,7 @@ pub mod sse;
 pub mod startup_backfill;
 pub mod state;
 pub mod state_context;
+pub mod state_context_cache;
 pub mod summarizer;
 pub mod summarizer_failures;
 pub mod summarizer_levels;

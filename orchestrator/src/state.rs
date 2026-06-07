@@ -5,10 +5,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub use crate::state_context::{
-    context_cache_key, CacheStats, CachedContext, ContextCache, ContextPackStats, ContextPolicy,
-    EventMemory, MemoryLevel, MemoryScope, PromotionReason, TaskCategory, TaskContextConfig,
-    CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_DECAY_RATE, DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET,
-    DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET,
+    ContextPolicy, EventMemory, MemoryLevel, MemoryScope, PromotionReason, TaskCategory,
+    TaskContextConfig, CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_DECAY_RATE,
+    DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET, DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET,
+};
+pub use crate::state_context_cache::{
+    context_cache_key, CacheStats, CachedContext, ContextCache, ContextPackStats,
 };
 
 /// Default max_tokens for proxied completion requests when the client omits it.
