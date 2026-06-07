@@ -28,10 +28,10 @@ pub use crate::db_sessions::{
     start_session_from_request,
 };
 pub use crate::db_trajectory::{
-    emit_trajectory_result_once, get_event_chain_by_event_id, get_trajectory,
-    get_trajectory_attempts, get_trajectory_result, idle_trajectory_ids,
-    latest_trajectory_event_for_session, order_event_chain,
+    get_event_chain_by_event_id, get_trajectory, get_trajectory_attempts, get_trajectory_result,
+    idle_trajectory_ids, latest_trajectory_event_for_session, order_event_chain,
 };
+pub use crate::db_trajectory_results::emit_trajectory_result_once;
 pub use crate::db_types::{
     AgentEvent, ContextCompilerLedgerEntry, ContextEvidence, FailureHistoryItem,
     VllmCacheObservationInput, VllmCacheStats,
