@@ -10,10 +10,26 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_MAX_TOKENS: u64 = 8192;
 
 /// Maximum max_tokens this backend can safely serve for Claude Code traffic.
-pub const MAX_MAX_TOKENS: u64 = 8192;
+pub const MAX_MAX_TOKENS: u64 = 32768;
 
 /// Default max_tokens used by the internal summarizer — summaries are short.
 pub const SUMMARIZER_MAX_TOKENS: u64 = 384;
+
+pub fn configured_default_max_tokens() -> u64 {
+    std::env::var("DEFAULT_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .max(1)
+}
+
+pub fn configured_max_max_tokens() -> u64 {
+    std::env::var("MAX_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(MAX_MAX_TOKENS)
+        .max(1)
+}
 
 /// Default TTL for cached context packs: 5 minutes.
 pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
