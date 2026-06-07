@@ -10,6 +10,7 @@ pub mod context_packing;
 pub mod context_search;
 pub mod db;
 pub mod embedder;
+pub mod event_capture;
 pub mod execution_feedback;
 pub mod feature_extraction;
 pub mod handlers;

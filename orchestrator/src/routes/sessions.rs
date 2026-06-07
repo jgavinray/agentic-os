@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::auth::check_auth;
 use crate::db;
-use crate::handlers::spawn_feature_extraction;
+use crate::event_capture::spawn_feature_extraction;
 use crate::state::{AppState, AppendEventRequest, StartSessionRequest, StartSessionResponse};
 
 #[tracing::instrument(name = "handler.start_session", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]
