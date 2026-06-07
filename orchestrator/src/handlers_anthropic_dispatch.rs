@@ -5,6 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::anthropic;
+use crate::handlers_anthropic_json_upstream::{finalize_network_error, send_json_messages_request};
 use crate::litellm::{LiteLlmCallFinalizer, ProviderCacheCounters, RouteSelection, TerminalStatus};
 use crate::state::AppState;
 use crate::telemetry;
@@ -35,40 +36,10 @@ pub(crate) async fn dispatch_anthropic_messages_with_retry(
 ) -> Result<AnthropicMessagesDispatch, Response> {
     let url = format!("{}/messages", state.litellm_url);
     let started = std::time::Instant::now();
-    let upstream_resp = match state
-        .http
-        .post(&url)
-        .bearer_auth(&state.litellm_key)
-        .json(req)
-        .send()
-        .await
-    {
-        Ok(r) => {
-            let status = r.status();
-            telemetry::record_upstream_litellm(
-                "messages",
-                started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            if !status.is_success() {
-                telemetry::record_upstream_litellm_error(
-                    "messages",
-                    telemetry::upstream_error_kind(status),
-                );
-            }
-            r
-        }
+    let upstream_resp = match send_json_messages_request(state, &url, req).await {
+        Ok(r) => r,
         Err(e) => {
-            telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
-            telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
-            finalizer
-                .finalize(
-                    TerminalStatus::NetworkError,
-                    Some(telemetry::reqwest_error_kind(&e)),
-                    Some(&e.to_string()),
-                    ProviderCacheCounters::default(),
-                )
-                .await;
+            finalize_network_error(&mut finalizer, &e).await;
             return Err(anthropic::error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -133,34 +104,10 @@ pub(crate) async fn dispatch_anthropic_messages_with_retry(
             finalizer =
                 crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), retry_attempt)
                     .await;
-            let retry_started = std::time::Instant::now();
-            let retry_resp = match state
-                .http
-                .post(&url)
-                .bearer_auth(&state.litellm_key)
-                .json(req)
-                .send()
-                .await
-            {
+            let retry_resp = match send_json_messages_request(state, &url, req).await {
                 Ok(r) => r,
                 Err(e) => {
-                    telemetry::record_upstream_litellm(
-                        "messages",
-                        retry_started.elapsed(),
-                        "error",
-                    );
-                    telemetry::record_upstream_litellm_error(
-                        "messages",
-                        telemetry::reqwest_error_kind(&e),
-                    );
-                    finalizer
-                        .finalize(
-                            TerminalStatus::NetworkError,
-                            Some(telemetry::reqwest_error_kind(&e)),
-                            Some(&e.to_string()),
-                            ProviderCacheCounters::default(),
-                        )
-                        .await;
+                    finalize_network_error(&mut finalizer, &e).await;
                     return Err(anthropic::error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
@@ -169,11 +116,6 @@ pub(crate) async fn dispatch_anthropic_messages_with_retry(
                 }
             };
             status = retry_resp.status();
-            telemetry::record_upstream_litellm(
-                "messages",
-                retry_started.elapsed(),
-                &status.as_u16().to_string(),
-            );
             val = match retry_resp.json().await {
                 Ok(v) => v,
                 Err(_) => {
