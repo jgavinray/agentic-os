@@ -127,6 +127,7 @@ pub mod telemetry;
 pub mod telemetry_descriptions;
 pub mod telemetry_execution;
 pub mod telemetry_feature_feedback;
+pub mod telemetry_http;
 pub mod telemetry_infrastructure;
 pub mod telemetry_model_services;
 pub mod telemetry_recorder;
