@@ -27,6 +27,7 @@ pub mod feature_constraints;
 pub mod feature_detection_tags;
 pub mod feature_extraction;
 pub mod feature_extraction_metadata;
+pub mod feature_extraction_tags;
 pub mod feature_extraction_types;
 pub mod handlers;
 pub mod handlers_context;
