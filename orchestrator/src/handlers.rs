@@ -890,6 +890,10 @@ pub async fn messages(
 }
 
 #[cfg(test)]
+#[path = "handlers_auth_tests.rs"]
+mod handlers_auth_tests;
+
+#[cfg(test)]
 #[path = "handlers_policy_tests.rs"]
 mod handlers_policy_tests;
 
