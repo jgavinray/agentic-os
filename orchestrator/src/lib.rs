@@ -128,6 +128,7 @@ pub mod telemetry_infrastructure;
 pub mod telemetry_model_services;
 pub mod telemetry_recorder;
 pub mod telemetry_request_classification;
+pub mod telemetry_request_policy_prime;
 pub mod telemetry_runtime_metrics;
 pub mod telemetry_setup;
 pub mod telemetry_streaming;
