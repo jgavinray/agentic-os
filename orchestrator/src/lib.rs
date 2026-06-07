@@ -72,6 +72,8 @@ pub mod request_classification_feature_json;
 pub mod request_classification_features;
 pub mod request_classification_input;
 pub mod request_classification_labels;
+#[cfg(test)]
+mod request_classification_live_policy_tests;
 pub mod request_classification_rules;
 pub mod request_classification_runtime;
 pub mod request_classification_store;
