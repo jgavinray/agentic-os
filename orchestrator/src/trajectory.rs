@@ -10,56 +10,14 @@ use serde_json::Value;
 pub use crate::trajectory_events::{
     context_pack_event, make_request_metadata, model_response_metadata, trajectory_result_event,
 };
+pub use crate::trajectory_roles::{
+    default_role_for_event_type, is_trajectory_participating_event_type, validate_event_role,
+};
 pub use crate::trajectory_summary::{summarize_trajectory, TrajectoryResultSummary};
 pub use crate::trajectory_types::{
     BoundaryReason, EventRole, FinalStatus, TrajectoryContext, DEFAULT_TRAJECTORY_IDLE_TIMEOUT_SEC,
     EVENT_ROLES, EVENT_TYPE_CONTEXT_PACK, EVENT_TYPE_TRAJECTORY_RESULT, FINAL_STATUSES,
 };
-
-pub fn validate_event_role(role: Option<&str>) -> Result<(), anyhow::Error> {
-    if let Some(role) = role {
-        if EventRole::from_str(role).is_none() {
-            anyhow::bail!("invalid event_role `{role}`");
-        }
-    }
-    Ok(())
-}
-
-pub fn is_trajectory_participating_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "user_message"
-            | "assistant_message"
-            | "failed_attempt"
-            | EVENT_TYPE_CONTEXT_PACK
-            | EVENT_TYPE_TRAJECTORY_RESULT
-            | crate::execution_feedback::EVENT_TYPE_TOOL_RESULT
-            | crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT
-            | crate::execution_feedback::EVENT_TYPE_TEST_RESULT
-            | crate::execution_feedback::EVENT_TYPE_LINT_RESULT
-            | crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT
-            | crate::execution_feedback::EVENT_TYPE_PATCH_RESULT
-            | crate::execution_feedback::EVENT_TYPE_REMEDIATION
-    )
-}
-
-pub fn default_role_for_event_type(event_type: &str) -> Option<EventRole> {
-    Some(match event_type {
-        "user_message" => EventRole::Request,
-        "assistant_message" => EventRole::ModelResponse,
-        "failed_attempt" => EventRole::Failure,
-        EVENT_TYPE_CONTEXT_PACK => EventRole::ContextPack,
-        EVENT_TYPE_TRAJECTORY_RESULT => EventRole::TrajectoryResult,
-        crate::execution_feedback::EVENT_TYPE_TOOL_RESULT => EventRole::ToolResult,
-        crate::execution_feedback::EVENT_TYPE_COMPILE_RESULT
-        | crate::execution_feedback::EVENT_TYPE_TEST_RESULT
-        | crate::execution_feedback::EVENT_TYPE_LINT_RESULT
-        | crate::execution_feedback::EVENT_TYPE_VALIDATION_RESULT => EventRole::Validation,
-        crate::execution_feedback::EVENT_TYPE_PATCH_RESULT => EventRole::Patch,
-        crate::execution_feedback::EVENT_TYPE_REMEDIATION => EventRole::Remediation,
-        _ => return None,
-    })
-}
 
 pub fn optional_token_counts_from_value(value: &Value) -> (Option<i64>, Option<i64>) {
     let usage = value.get("usage");
