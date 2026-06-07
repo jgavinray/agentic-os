@@ -1,6 +1,6 @@
 use serde_json::{json, Map, Value};
 
-use crate::request_classification::CompositeAnalysis;
+use crate::request_classification_composition::CompositeAnalysis;
 use crate::request_classification_features::RequestFeatures;
 use crate::request_classification_types::RequestDomain;
 
