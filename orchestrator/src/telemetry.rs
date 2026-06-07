@@ -19,6 +19,10 @@ pub use crate::telemetry_runtime_metrics::{record_pool_gauges, record_process_me
 pub use crate::telemetry_setup::{install_recorder, prime_metrics};
 pub use crate::telemetry_streaming::StreamTracker;
 pub use crate::telemetry_tool_mediation::{record_tool_authorization, record_tool_menu_outcome};
+pub use crate::telemetry_upstream::{
+    record_upstream_litellm, record_upstream_litellm_error, record_upstream_summarizer,
+    record_upstream_summarizer_error, reqwest_error_kind, upstream_error_kind,
+};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct MetricsSnapshot {
@@ -603,57 +607,6 @@ pub fn record_db_query(op: &'static str, elapsed: Duration, success: bool) {
 pub fn record_qdrant_request(op: &'static str, elapsed: Duration, status: &str) {
     histogram!("qdrant_request_duration_seconds", "op" => op).record(elapsed.as_secs_f64());
     counter!("qdrant_requests_total", "op" => op, "status" => status.to_string()).increment(1);
-}
-
-pub fn record_upstream_litellm(path: &'static str, elapsed: Duration, status: &str) {
-    histogram!("upstream_litellm_duration_seconds", "path" => path).record(elapsed.as_secs_f64());
-    counter!(
-        "upstream_litellm_requests_total",
-        "path" => path,
-        "status" => status.to_string()
-    )
-    .increment(1);
-}
-
-pub fn record_upstream_litellm_error(path: &'static str, kind: &'static str) {
-    counter!("upstream_litellm_errors_total", "path" => path, "kind" => kind).increment(1);
-}
-
-pub fn record_upstream_summarizer(path: &'static str, elapsed: Duration, status: &str) {
-    histogram!("summarizer_upstream_duration_seconds", "path" => path)
-        .record(elapsed.as_secs_f64());
-    counter!(
-        "summarizer_upstream_requests_total",
-        "path" => path,
-        "status" => status.to_string()
-    )
-    .increment(1);
-}
-
-pub fn record_upstream_summarizer_error(path: &'static str, kind: &'static str) {
-    counter!("summarizer_upstream_errors_total", "path" => path, "kind" => kind).increment(1);
-}
-
-pub fn upstream_error_kind(status: reqwest::StatusCode) -> &'static str {
-    if status.is_client_error() {
-        "4xx"
-    } else if status.is_server_error() {
-        "5xx"
-    } else {
-        "parse"
-    }
-}
-
-pub fn reqwest_error_kind(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
-        "timeout"
-    } else if err.is_connect() {
-        "connection"
-    } else if err.is_status() {
-        "5xx"
-    } else {
-        "parse"
-    }
 }
 
 pub fn record_embedder_input_tokens(tokens: usize) {

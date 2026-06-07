@@ -81,6 +81,7 @@ pub mod telemetry_runtime_metrics;
 pub mod telemetry_setup;
 pub mod telemetry_streaming;
 pub mod telemetry_tool_mediation;
+pub mod telemetry_upstream;
 pub mod token_limits;
 pub mod tool_mediation;
 pub mod tool_mediation_authorization;
