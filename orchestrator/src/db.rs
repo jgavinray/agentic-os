@@ -3,9 +3,12 @@ use deadpool_postgres::Pool;
 pub use crate::context_rendering::{build_context, build_layered_context, estimate_tokens};
 pub use crate::db_connection::{acquire_single_writer_lock, create_pool, SingleWriterGuard};
 pub use crate::db_context_artifacts::{
-    get_active_context_artifacts, get_context_artifacts_for_repo, get_context_compiler_ledger,
+    get_active_context_artifacts, get_context_artifacts_for_repo,
     get_recent_instruction_candidates, get_recent_repo_decision_candidates,
-    get_recent_session_events, insert_context_compiler_ledger_entry, upsert_context_artifact,
+    get_recent_session_events, upsert_context_artifact,
+};
+pub use crate::db_context_compiler_ledger::{
+    get_context_compiler_ledger, insert_context_compiler_ledger_entry,
 };
 pub use crate::db_context_events::{
     count_events_for_repo, get_context_events_for_repo, get_context_evidence_for_policy,
