@@ -37,6 +37,7 @@ pub mod event_capture;
 pub mod event_capture_background;
 pub mod event_capture_context;
 pub mod event_capture_exchange;
+pub mod event_capture_request;
 pub mod event_capture_tool_results;
 pub mod execution_feedback;
 pub mod execution_feedback_chain;
