@@ -69,6 +69,7 @@ pub mod handlers;
 pub mod handlers_anthropic_completion;
 pub mod handlers_anthropic_dispatch;
 pub mod handlers_anthropic_messages;
+pub mod handlers_anthropic_persistence;
 pub mod handlers_anthropic_streaming;
 pub mod handlers_anthropic_upstream;
 pub mod handlers_capture;
