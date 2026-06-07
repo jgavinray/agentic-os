@@ -9,11 +9,12 @@ use crate::anthropic;
 use crate::auth::{authenticate, check_rate_limit};
 use crate::handlers_anthropic_completion::handle_anthropic_non_streaming;
 use crate::handlers_context::pack_context_into_anthropic_req;
+use crate::handlers_litellm_attempt::prepare_litellm_attempt;
 use crate::handlers_request::HandlerRequestScope;
 use crate::handlers_request_preparation::prepare_anthropic_litellm_request;
 use crate::handlers_streaming::handle_streaming_anthropic;
 use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
-use crate::local_reasoning::{add_local_reasoning_metadata, local_reasoning_selection};
+use crate::local_reasoning::local_reasoning_selection;
 use crate::proxy_support::{baseline_arm_selection, litellm_route, merge_request_metadata};
 use crate::request_policy::{
     classify_and_derive_request_policy, maybe_anthropic_live_policy_response,
@@ -162,27 +163,24 @@ pub async fn messages(
     let correlation_id = trajectory
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
-    let cache_policy = crate::litellm::exact_cache_decision("messages", &req, false);
-    let mut attempt = crate::litellm::new_attempt(
-        request_event_id,
-        trajectory.map(|trajectory| trajectory.trajectory_id),
-        context_pack_id,
+    let prepared_attempt = prepare_litellm_attempt(
+        &state,
+        &mut req,
+        &mut capture,
+        "messages",
+        model.clone(),
         namespace.clone(),
         repo.clone(),
         task.clone(),
-        "messages",
-        model.clone(),
+        request_event_id,
+        trajectory,
+        context_pack_id,
         &route,
-        cache_policy,
         context_pack_hash.clone(),
         Some(baseline_arm.as_str().to_string()),
-    );
-    add_local_reasoning_metadata(&mut attempt, reasoning_selection);
-    capture.attempt_id = Some(attempt.attempt_id);
-    crate::litellm::add_agentic_os_metadata(&mut req, &attempt);
-    capture.forwarded_request_body = Some(crate::client_capture::to_json_bytes(&req));
-    let vllm_cache_before = crate::vllm_metrics::cache_snapshot(&state).await;
-    let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
+        reasoning_selection,
+    )
+    .await;
 
     if is_stream {
         return handle_streaming_anthropic(
@@ -199,8 +197,8 @@ pub async fn messages(
             trajectory,
             request_event_id,
             context_pack_id,
-            finalizer,
-            vllm_cache_before,
+            prepared_attempt.finalizer,
+            prepared_attempt.vllm_cache_before,
             capture,
         )
         .await;
@@ -220,8 +218,8 @@ pub async fn messages(
         request_event_id,
         context_pack_id,
         user_content,
-        finalizer,
-        vllm_cache_before,
+        prepared_attempt.finalizer,
+        prepared_attempt.vllm_cache_before,
         capture,
         route,
         context_pack_hash.clone(),
