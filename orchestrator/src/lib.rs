@@ -45,6 +45,7 @@ pub mod handlers_capture;
 pub mod handlers_context;
 pub mod handlers_request;
 pub mod handlers_streaming;
+pub mod handlers_trajectory;
 pub mod handlers_usage;
 pub mod harness_feedback;
 pub mod harness_feedback_classification;

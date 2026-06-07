@@ -18,13 +18,14 @@ use crate::context_packing::apply_orchestration_context_limits;
 use crate::context_packing::context_task_category;
 use crate::db;
 use crate::event_capture::{
-    begin_trajectory_for_request, capture_tool_results_background,
-    persist_exchange_with_correlation, persist_model_response_event, persist_request_event,
+    capture_tool_results_background, persist_exchange_with_correlation,
+    persist_model_response_event,
 };
 use crate::handlers_capture::record_json_success_capture;
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 use crate::handlers_request::HandlerRequestScope;
 use crate::handlers_streaming::{handle_streaming, handle_streaming_anthropic};
+use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
 use crate::handlers_usage::record_success_usage;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
@@ -174,17 +175,7 @@ pub async fn chat_completions(
             &route.routed_model,
         )
     });
-    let session_id = if state.trajectory_capture_enabled {
-        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-            Ok(session_id) => Some(session_id),
-            Err(e) => {
-                tracing::warn!("find_or_create_session failed before trajectory capture: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let session_id = find_or_create_capture_session(&state, &repo, &task).await;
     let request_classification = crate::request_classification::classify_request_text(
         &repo,
         session_id.as_deref().unwrap_or("unknown"),
@@ -219,25 +210,14 @@ pub async fn chat_completions(
         tool_mediation_metadata,
         baseline_metadata,
     ]);
-    let trajectory = if let Some(session_id) = session_id.as_deref() {
-        Some(begin_trajectory_for_request(&state, session_id).await)
-    } else {
-        None
-    };
-    let request_event_id =
-        if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-            persist_request_event(
-                &state,
-                session_id,
-                &repo,
-                &user_content,
-                trajectory,
-                request_metadata.clone(),
-            )
-            .await
-        } else {
-            None
-        };
+    let (trajectory, request_event_id) = begin_and_persist_request(
+        &state,
+        session_id.as_deref(),
+        &repo,
+        &user_content,
+        request_metadata.clone(),
+    )
+    .await;
     let (context_pack_id, context_pack_hash) = pack_context_into_req(
         &state,
         &mut req,
@@ -494,17 +474,7 @@ pub async fn messages(
     anthropic::normalize_response_content_types(&mut req);
     anthropic::sanitize_litellm_request(&mut req);
     inject_contract_anthropic(&mut req, reasoning_selection);
-    let session_id = if state.trajectory_capture_enabled {
-        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-            Ok(session_id) => Some(session_id),
-            Err(e) => {
-                tracing::warn!("find_or_create_session failed before trajectory capture: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let session_id = find_or_create_capture_session(&state, &repo, &task).await;
     let request_classification = crate::request_classification::classify_request_text(
         &repo,
         session_id.as_deref().unwrap_or("unknown"),
@@ -535,25 +505,14 @@ pub async fn messages(
         "baseline_arm": baseline_arm.as_str(),
     }));
     let request_metadata = merge_request_metadata([tool_mediation_metadata, baseline_metadata]);
-    let trajectory = if let Some(session_id) = session_id.as_deref() {
-        Some(begin_trajectory_for_request(&state, session_id).await)
-    } else {
-        None
-    };
-    let request_event_id =
-        if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-            persist_request_event(
-                &state,
-                session_id,
-                &repo,
-                &user_content,
-                trajectory,
-                request_metadata.clone(),
-            )
-            .await
-        } else {
-            None
-        };
+    let (trajectory, request_event_id) = begin_and_persist_request(
+        &state,
+        session_id.as_deref(),
+        &repo,
+        &user_content,
+        request_metadata.clone(),
+    )
+    .await;
     let (context_pack_id, context_pack_hash) = pack_context_into_anthropic_req(
         &state,
         &mut req,
