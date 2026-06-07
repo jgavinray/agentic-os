@@ -21,6 +21,7 @@ pub mod local_reasoning;
 pub mod logging;
 pub mod migrations;
 pub mod orchestration_policy;
+pub mod proxy_support;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
