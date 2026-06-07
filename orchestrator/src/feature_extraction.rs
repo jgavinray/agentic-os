@@ -14,11 +14,12 @@ pub use crate::feature_detection_tags::{
     live_detection_tags_for_event,
 };
 use crate::feature_extraction_grouping::group_events_by_feature_window;
+pub use crate::feature_extraction_inline::run_inline_extraction_best_effort;
 pub use crate::feature_extraction_persistence::persist_feature_record;
 use crate::feature_extraction_records::extract_record_for_group;
 pub use crate::feature_extraction_store::{
     bootstrap_tag_events, extract_and_persist_scope, load_events_for_scope,
-    operational_constraints_for_context, run_backfill, run_inline_extraction_best_effort,
+    operational_constraints_for_context, run_backfill,
 };
 pub use crate::feature_extraction_types::{
     constraint_freshness_window_sec_from_env, feature_extraction_enabled_from_env,
