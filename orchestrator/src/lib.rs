@@ -64,6 +64,7 @@ pub mod feature_extraction_grouping;
 pub mod feature_extraction_inline;
 pub mod feature_extraction_metadata;
 pub mod feature_extraction_persistence;
+pub mod feature_extraction_record_init;
 pub mod feature_extraction_records;
 pub mod feature_extraction_store;
 pub mod feature_extraction_tags;
