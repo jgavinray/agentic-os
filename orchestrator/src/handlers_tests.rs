@@ -194,12 +194,12 @@ fn cache_hit_rate_updates() {
 
 #[test]
 fn failure_history_and_validation_capture_are_feature_flagged() {
-    let context_src = include_str!("context_packing.rs");
+    let context_src = include_str!("context_packing_build.rs");
     let validations_src = include_str!("routes/validations.rs");
     assert!(context_src.contains("state.execution_feedback_enabled"));
     let ctx_start = context_src
-        .find("async fn get_or_build_cached_context")
-        .expect("get_or_build_cached_context not found");
+        .find("async fn build_cached_context")
+        .expect("build_cached_context not found");
     let ctx_body: String = context_src[ctx_start..].chars().take(4500).collect();
     assert!(ctx_body.contains("state.execution_feedback_enabled"));
 

@@ -1,9 +1,9 @@
 #[test]
 fn context_pack_parallelizes_context_io_calls() {
-    let src = include_str!("context_packing.rs");
+    let src = include_str!("context_packing_build.rs");
     let ctx_start = src
-        .find("async fn get_or_build_cached_context")
-        .expect("get_or_build_cached_context not found in source");
+        .find("async fn build_cached_context")
+        .expect("build_cached_context not found in source");
     let ctx_body: String = src[ctx_start..].chars().take(6500).collect();
 
     assert!(ctx_body.contains("tokio::join!"));

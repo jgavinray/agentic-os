@@ -6,9 +6,9 @@ use axum::http::{HeaderMap, StatusCode};
 #[cfg(test)]
 use crate::auth::{provided_api_token, rate_limited_response};
 #[cfg(test)]
-use crate::context_packing::apply_orchestration_context_limits;
-#[cfg(test)]
 use crate::context_packing::context_task_category;
+#[cfg(test)]
+use crate::context_packing_policy::apply_orchestration_context_limits;
 #[cfg(test)]
 use crate::local_reasoning::local_reasoning_selection;
 #[cfg(test)]
