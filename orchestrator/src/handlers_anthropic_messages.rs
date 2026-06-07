@@ -1,88 +1,43 @@
 use axum::extract::State;
-#[cfg(test)]
-use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::anthropic;
 use crate::auth::{authenticate, check_rate_limit};
-#[cfg(test)]
-use crate::auth::{provided_api_token, rate_limited_response};
-#[cfg(test)]
-use crate::context_packing::apply_orchestration_context_limits;
-#[cfg(test)]
-use crate::context_packing::context_task_category;
-use crate::handlers_context::pack_context_into_req;
-use crate::handlers_openai_dispatch::handle_openai_non_streaming;
+use crate::handlers_anthropic_completion::handle_anthropic_non_streaming;
+use crate::handlers_context::pack_context_into_anthropic_req;
 use crate::handlers_request::HandlerRequestScope;
-use crate::handlers_request_preparation::prepare_openai_litellm_request;
-use crate::handlers_streaming::handle_streaming;
+use crate::handlers_request_preparation::prepare_anthropic_litellm_request;
+use crate::handlers_streaming::handle_streaming_anthropic;
 use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
-#[cfg(test)]
-use crate::local_reasoning::LocalReasoningPolicy;
-#[cfg(test)]
-use crate::local_reasoning::LocalReasoningSelection;
 use crate::local_reasoning::{add_local_reasoning_metadata, local_reasoning_selection};
 use crate::orchestration_policy;
-use crate::proxy_support::{
-    baseline_arm_selection, extract_user_content_openai, litellm_route, merge_request_metadata,
-};
-use crate::request_policy::maybe_openai_live_policy_response;
-#[cfg(test)]
-use crate::sse::{
-    extract_assistant_from_anthropic_sse, extract_assistant_from_sse,
-    extract_token_usage_from_anthropic_sse, extract_token_usage_from_sse,
-};
-use crate::state::*;
-#[cfg(test)]
-use crate::system_context::{inject_system_context, inject_system_context_anthropic};
+use crate::proxy_support::{baseline_arm_selection, litellm_route, merge_request_metadata};
+use crate::request_policy::maybe_anthropic_live_policy_response;
+use crate::state::AppState;
 use crate::telemetry;
-#[cfg(test)]
-use crate::token_limits::enforce_min_max_tokens;
 
-pub use crate::background::trajectory::run_trajectory_idle_sweep;
-pub use crate::context_packing::context_pack;
-pub use crate::handlers_anthropic_messages::messages;
-pub use crate::routes::checkpoints::checkpoint;
-pub use crate::routes::context::context_artifacts;
-pub use crate::routes::harness::{harness_guardrail, harness_outcome, litellm_callback_payload};
-pub use crate::routes::health::{health, health_live, health_ready, list_models};
-pub use crate::routes::observability::{cache_stats, metrics, metrics_json};
-pub use crate::routes::search::search;
-pub use crate::routes::sessions::{append_event, start_session};
-pub use crate::routes::tools::authorize_tool;
-#[cfg(test)]
-pub(crate) use crate::routes::tools::{
-    derive_tool_authorization_policy, tool_authorization_classification_text,
-};
-pub use crate::routes::validations::validations;
+// ── Anthropic /v1/messages ──────────────────────────────────────
 
-// ── Chat completions ────────────────────────────────────────────
-
-#[tracing::instrument(name = "handler.chat_completions", skip(state, headers, body))]
-pub async fn chat_completions(
+#[tracing::instrument(name = "handler.messages", skip(state, headers, body))]
+pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let raw_client_body = body.to_vec();
-    let mut capture = crate::client_capture::RawHttpCapture::new(
-        "chat/completions",
-        &headers,
-        raw_client_body.clone(),
-    );
+    let mut capture =
+        crate::client_capture::RawHttpCapture::new("messages", &headers, raw_client_body.clone());
     let payload: Value = match serde_json::from_slice(&raw_client_body) {
         Ok(payload) => payload,
         Err(e) => {
-            let body = serde_json::json!({
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": format!("invalid JSON request body: {e}")
-                }
-            });
+            let body = anthropic::error_value(
+                "invalid_request_error",
+                format!("invalid JSON request body: {e}"),
+            );
             crate::client_capture::record_response_best_effort(
                 state.capture_pool.as_ref(),
                 capture,
@@ -91,12 +46,16 @@ pub async fn chat_completions(
                 crate::client_capture::to_json_bytes(&body),
             )
             .await;
-            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+            return anthropic::error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("invalid JSON request body: {e}"),
+            );
         }
     };
     capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
-        let body = serde_json::json!({"error": "unauthorized"});
+        let body = anthropic::error_value("authentication_error", "invalid or missing API key");
         crate::client_capture::record_response_best_effort(
             state.capture_pool.as_ref(),
             capture,
@@ -105,7 +64,11 @@ pub async fn chat_completions(
             crate::client_capture::to_json_bytes(&body),
         )
         .await;
-        return (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
+        return anthropic::error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid or missing API key",
+        );
     };
     if let Some(response) = check_rate_limit(&state, &caller_token) {
         return response;
@@ -120,45 +83,36 @@ pub async fn chat_completions(
     let namespace = scope.namespace.clone();
     let repo = scope.repo.clone();
     let task = scope.task.clone();
-    tracing::info!(repo = %repo, task = %task, "routing request");
+    tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
     scope.apply_to_capture(&mut capture);
 
-    let requested_model = payload
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&state.default_model)
-        .to_string();
-    let user_content = extract_user_content_openai(&payload);
+    let user_content = anthropic::extract_user_content_from_anthropic(&payload);
     if let Some(response) =
-        maybe_openai_live_policy_response(&state, &repo, &namespace, &user_content)
+        maybe_anthropic_live_policy_response(&state, &repo, &namespace, &user_content)
     {
         return response;
     }
     let baseline_arm = match baseline_arm_selection(&headers) {
         Ok(arm) => arm,
         Err(e) => {
-            let body = serde_json::json!({"error": "invalid_baseline_arm", "detail": e});
+            let body = anthropic::error_value(
+                "invalid_request_error",
+                format!("invalid baseline arm: {e}"),
+            );
             return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
         }
     };
     let reasoning_selection = local_reasoning_selection(&headers, &payload);
-    // Always route to the configured backend model regardless of what the client sent.
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&state.default_model)
+        .to_string();
+
     let route = litellm_route(&state, &namespace);
+    // Stay in Anthropic format — no translation.
     let mut req =
-        prepare_openai_litellm_request(&payload, &route.routed_model, reasoning_selection);
-    let sampling_audit = crate::sampling::capture_and_maybe_override(
-        &payload,
-        &mut req,
-        state.sampling_config,
-        state.sampling_policy.as_ref(),
-    );
-    let sampling_metadata = sampling_audit.as_ref().map(|audit| {
-        audit.metadata(
-            "/v1/chat/completions",
-            &requested_model,
-            &route.routed_model,
-        )
-    });
+        prepare_anthropic_litellm_request(payload, &route.routed_model, reasoning_selection);
     let session_id = find_or_create_capture_session(&state, &repo, &task).await;
     let request_classification = crate::request_classification::classify_request_text(
         &repo,
@@ -173,10 +127,10 @@ pub async fn chat_completions(
         state.capture_pool.is_some(),
     );
     let tool_mediation_metadata = if state.tool_mediation_enabled {
-        // Shape the OpenAI tool menu with the same policy model used by
-        // `/tools/authorize`. This only removes tools from the client-provided
-        // menu; proxy mode cannot invent tools the client did not offer.
-        let outcome = crate::tool_mediation::shape_openai_request_with_policy(
+        // Same policy-aware shaping as the OpenAI endpoint, but applied to the
+        // Anthropic `tools` shape. The payload stays Anthropic-formatted all the
+        // way through this handler.
+        let outcome = crate::tool_mediation::shape_anthropic_request_with_policy(
             &mut req,
             &user_content,
             Some(&request_policy),
@@ -189,11 +143,7 @@ pub async fn chat_completions(
     let baseline_metadata = Some(serde_json::json!({
         "baseline_arm": baseline_arm.as_str(),
     }));
-    let request_metadata = merge_request_metadata([
-        sampling_metadata,
-        tool_mediation_metadata,
-        baseline_metadata,
-    ]);
+    let request_metadata = merge_request_metadata([tool_mediation_metadata, baseline_metadata]);
     let (trajectory, request_event_id) = begin_and_persist_request(
         &state,
         session_id.as_deref(),
@@ -202,7 +152,7 @@ pub async fn chat_completions(
         request_metadata.clone(),
     )
     .await;
-    let (context_pack_id, context_pack_hash) = pack_context_into_req(
+    let (context_pack_id, context_pack_hash) = pack_context_into_anthropic_req(
         &state,
         &mut req,
         session_id.as_deref(),
@@ -217,7 +167,7 @@ pub async fn chat_completions(
     let correlation_id = trajectory
         .map(|trajectory| trajectory.trajectory_id)
         .or_else(|| state.execution_feedback_enabled.then(uuid::Uuid::new_v4));
-    let cache_policy = crate::litellm::exact_cache_decision("chat_completions", &req, false);
+    let cache_policy = crate::litellm::exact_cache_decision("messages", &req, false);
     let mut attempt = crate::litellm::new_attempt(
         request_event_id,
         trajectory.map(|trajectory| trajectory.trajectory_id),
@@ -225,8 +175,8 @@ pub async fn chat_completions(
         namespace.clone(),
         repo.clone(),
         task.clone(),
-        "chat_completions",
-        requested_model.clone(),
+        "messages",
+        model.clone(),
         &route,
         cache_policy,
         context_pack_hash.clone(),
@@ -240,12 +190,13 @@ pub async fn chat_completions(
     let finalizer = crate::litellm::LiteLlmCallFinalizer::begin(state.pool.clone(), attempt).await;
 
     if is_stream {
-        return handle_streaming(
+        return handle_streaming_anthropic(
             &state,
             req,
+            user_content,
             repo,
             task,
-            requested_model,
+            model,
             namespace,
             correlation_id,
             request_metadata,
@@ -253,7 +204,6 @@ pub async fn chat_completions(
             trajectory,
             request_event_id,
             context_pack_id,
-            user_content,
             finalizer,
             vllm_cache_before,
             capture,
@@ -261,12 +211,12 @@ pub async fn chat_completions(
         .await;
     }
 
-    handle_openai_non_streaming(
+    handle_anthropic_non_streaming(
         &state,
         req,
         repo,
         task,
-        requested_model,
+        model,
         namespace,
         correlation_id,
         request_metadata,
@@ -278,26 +228,9 @@ pub async fn chat_completions(
         finalizer,
         vllm_cache_before,
         capture,
+        route,
+        context_pack_hash.clone(),
+        Some(baseline_arm.as_str().to_string()),
     )
     .await
 }
-
-#[cfg(test)]
-#[path = "handlers_auth_tests.rs"]
-mod handlers_auth_tests;
-
-#[cfg(test)]
-#[path = "handlers_policy_tests.rs"]
-mod handlers_policy_tests;
-
-#[cfg(test)]
-#[path = "handlers_reasoning_tests.rs"]
-mod handlers_reasoning_tests;
-
-#[cfg(test)]
-#[path = "handlers_sse_tests.rs"]
-mod handlers_sse_tests;
-
-#[cfg(test)]
-#[path = "handlers_tests.rs"]
-mod handlers_tests;
