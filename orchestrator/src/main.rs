@@ -1,16 +1,10 @@
-use axum::http::HeaderValue;
-use axum::middleware;
-use axum::routing::{get, post};
-use axum::Router;
 use orchestrator::{
-    client_capture, db, embedder, handlers, logging, migrations, qdrant, rate_limit,
+    app_router, client_capture, db, embedder, handlers, logging, migrations, qdrant, rate_limit,
     request_classification, sampling, sentiment, startup_backfill, state, summarizer, telemetry,
 };
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 
 use orchestrator::state::AppState;
 
@@ -279,37 +273,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     startup_backfill::spawn_harness_feedback_background_repair(Arc::clone(&state));
 
-    // ADD-5: TraceLayer emits structured per-request logs (method, path, status, latency).
-    let cors = cors_layer_from_env()?;
-
-    let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/health/live", get(handlers::health_live))
-        .route("/health/ready", get(handlers::health_ready))
-        .route("/v1/models", get(handlers::list_models))
-        .route("/v1/chat/completions", post(handlers::chat_completions))
-        .route("/v1/messages", post(handlers::messages))
-        .route("/v1/validations", post(handlers::validations))
-        .route("/tools/authorize", post(handlers::authorize_tool))
-        .route("/sessions/start", post(handlers::start_session))
-        .route("/events/append", post(handlers::append_event))
-        .route("/harness/guardrail", post(handlers::harness_guardrail))
-        .route("/harness/outcomes", post(handlers::harness_outcome))
-        .route(
-            "/harness/litellm-callbacks",
-            post(handlers::litellm_callback_payload),
-        )
-        .route("/context/pack", post(handlers::context_pack))
-        .route("/context/artifacts", get(handlers::context_artifacts))
-        .route("/cache/stats", get(handlers::cache_stats))
-        .route("/metrics", get(handlers::metrics))
-        .route("/metrics/json", get(handlers::metrics_json))
-        .route("/summaries/checkpoint", post(handlers::checkpoint))
-        .route("/search", post(handlers::search))
-        .route_layer(middleware::from_fn(telemetry::http_metrics_middleware))
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state);
+    let app = app_router::build_router(state)?;
 
     let addr: std::net::SocketAddr = "0.0.0.0:8088".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -327,36 +291,6 @@ async fn main() -> Result<(), anyhow::Error> {
     server_result?;
 
     Ok(())
-}
-
-fn cors_layer_from_env() -> Result<CorsLayer, anyhow::Error> {
-    let allowed = env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "*".to_string());
-    if allowed.trim() == "*" {
-        tracing::warn!(
-            target: "security",
-            "ALLOWED_ORIGINS=* permits any browser origin; restrict it before exposing the orchestrator beyond a single-user local node"
-        );
-        return Ok(CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any));
-    }
-
-    let origins: Vec<HeaderValue> = allowed
-        .split(',')
-        .map(str::trim)
-        .filter(|origin| !origin.is_empty())
-        .map(HeaderValue::from_str)
-        .collect::<Result<_, _>>()?;
-
-    if origins.is_empty() {
-        anyhow::bail!("ALLOWED_ORIGINS must be '*' or a comma-separated origin list");
-    }
-
-    Ok(CorsLayer::new()
-        .allow_origin(origins)
-        .allow_methods(Any)
-        .allow_headers(Any))
 }
 
 async fn shutdown_signal() {

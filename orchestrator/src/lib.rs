@@ -1,6 +1,7 @@
 pub mod adversarial_harness;
 pub mod adversarial_harness_callbacks;
 pub mod anthropic;
+pub mod app_router;
 pub mod auth;
 pub mod background;
 pub mod client_capture;
