@@ -4,6 +4,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::anthropic;
+use crate::handlers_anthropic_stream_upstream::{
+    finalize_stream_network_error, send_streaming_messages_request,
+};
 use crate::litellm::{LiteLlmCallFinalizer, ProviderCacheCounters, RouteSelection, TerminalStatus};
 use crate::state::AppState;
 use crate::telemetry;
@@ -30,10 +33,10 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
 ) -> Result<AnthropicStreamingUpstream, Response> {
     let url = format!("{}/messages", state.litellm_url);
     let started = finalizer.attempt_mut().started_at;
-    let mut upstream = match send_streaming_request(state, &url, &req, started).await {
+    let mut upstream = match send_streaming_messages_request(state, &url, &req, started).await {
         Ok(r) => r,
         Err(e) => {
-            finalize_network_error(&mut finalizer, &e).await;
+            finalize_stream_network_error(&mut finalizer, &e).await;
             return Err(anthropic::error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -89,10 +92,10 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
         )
         .await;
         let retry_started = std::time::Instant::now();
-        upstream = match send_streaming_request(state, &url, &req, retry_started).await {
+        upstream = match send_streaming_messages_request(state, &url, &req, retry_started).await {
             Ok(r) => r,
             Err(e) => {
-                finalize_network_error(&mut finalizer, &e).await;
+                finalize_stream_network_error(&mut finalizer, &e).await;
                 return Err(anthropic::error(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
@@ -147,54 +150,6 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
         body,
     )
         .into_response())
-}
-
-async fn send_streaming_request(
-    state: &AppState,
-    url: &str,
-    req: &Value,
-    started: std::time::Instant,
-) -> Result<reqwest::Response, reqwest::Error> {
-    match state
-        .http_stream
-        .post(url)
-        .bearer_auth(&state.litellm_key)
-        .json(req)
-        .send()
-        .await
-    {
-        Ok(r) => {
-            let status = r.status();
-            telemetry::record_upstream_litellm(
-                "messages",
-                started.elapsed(),
-                &status.as_u16().to_string(),
-            );
-            if !status.is_success() {
-                telemetry::record_upstream_litellm_error(
-                    "messages",
-                    telemetry::upstream_error_kind(status),
-                );
-            }
-            Ok(r)
-        }
-        Err(e) => {
-            telemetry::record_upstream_litellm("messages", started.elapsed(), "error");
-            telemetry::record_upstream_litellm_error("messages", telemetry::reqwest_error_kind(&e));
-            Err(e)
-        }
-    }
-}
-
-async fn finalize_network_error(finalizer: &mut LiteLlmCallFinalizer, e: &reqwest::Error) {
-    finalizer
-        .finalize(
-            TerminalStatus::NetworkError,
-            Some(telemetry::reqwest_error_kind(e)),
-            Some(&e.to_string()),
-            ProviderCacheCounters::default(),
-        )
-        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
