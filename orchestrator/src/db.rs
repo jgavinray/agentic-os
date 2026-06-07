@@ -4,6 +4,7 @@ use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 pub use crate::context_rendering::{build_context, build_layered_context, estimate_tokens};
+use crate::db_event_rows::{row_to_event, rows_to_events};
 pub use crate::db_execution_events::{
     append_execution_event, insert_compile_result_event, insert_execution_artifact_event,
     insert_lint_result_event, insert_patch_result_event, insert_remediation_event,
@@ -835,28 +836,6 @@ async fn get_events_for_repo_by_levels(
     Ok(rows_to_events(rows))
 }
 
-fn rows_to_events(rows: Vec<tokio_postgres::Row>) -> Vec<AgentEvent> {
-    rows.into_iter()
-        .map(|row| AgentEvent {
-            id: row.get("id"),
-            session_id: row.get("session_id"),
-            repo: row.get("repo"),
-            actor: row.get("actor"),
-            event_type: row.get("event_type"),
-            summary: row.get("summary"),
-            evidence: row.get("evidence"),
-            metadata: row.get("metadata"),
-            correlation_id: row.get("correlation_id"),
-            parent_event_id: row.get("parent_event_id"),
-            trajectory_id: row.get("trajectory_id"),
-            attempt_index: row.get("attempt_index"),
-            event_role: row.get("event_role"),
-            created_at: row.get("created_at"),
-            summary_level: row.get("summary_level"),
-        })
-        .collect()
-}
-
 /// Full-text search on agent_events.summary and evidence for a given repo.
 /// Returns results ordered by ts_rank DESC.
 pub async fn search_events_fts(
@@ -996,7 +975,7 @@ async fn get_event_by_id(pool: &Pool, event_id: &str) -> Result<AgentEvent, anyh
             &[&event_id],
         )
         .await?;
-    Ok(rows_to_events(vec![row]).remove(0))
+    Ok(row_to_event(row))
 }
 
 pub async fn get_trajectory(
@@ -1067,7 +1046,7 @@ pub async fn get_trajectory_result(
                 &[&trajectory_id],
             )
             .await?;
-        Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+        Ok(row.map(row_to_event))
     }
     .await;
     crate::telemetry::record_db_query("get_trajectory_result", started.elapsed(), result.is_ok());
@@ -1092,7 +1071,7 @@ pub async fn latest_trajectory_event_for_session(
                 &[&session_id],
             )
             .await?;
-        Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+        Ok(row.map(row_to_event))
     }
     .await;
     crate::telemetry::record_db_query(
@@ -1447,7 +1426,7 @@ async fn remediation_for_failure(
             &[&failure.repo, &signature],
         )
         .await?;
-    Ok(row.map(|row| rows_to_events(vec![row]).remove(0)))
+    Ok(row.map(row_to_event))
 }
 
 fn event_payload_str<'a>(event: &'a AgentEvent, key: &str) -> Option<&'a str> {
