@@ -16,6 +16,7 @@ pub mod db_usage;
 pub mod embedder;
 pub mod event_capture;
 pub mod execution_feedback;
+pub mod feature_detection_tags;
 pub mod feature_extraction;
 pub mod feature_extraction_metadata;
 pub mod feature_extraction_types;
