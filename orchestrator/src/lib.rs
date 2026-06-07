@@ -96,6 +96,7 @@ pub mod rate_limit;
 pub mod request_classification;
 pub mod request_classification_backfill;
 pub mod request_classification_composition;
+pub mod request_classification_config;
 #[cfg(test)]
 mod request_classification_contract_tests;
 pub mod request_classification_feature_json;

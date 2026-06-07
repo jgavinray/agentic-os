@@ -8,6 +8,10 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::request_classification_composition::analyze_composition;
+pub use crate::request_classification_config::{
+    live_policy_config_from_env, request_classification_startup_backfill_enabled,
+    request_classification_startup_batch_size,
+};
 use crate::request_classification_feature_json::features_to_json;
 use crate::request_classification_features::extract_features;
 use crate::request_classification_input::{event_text, has_request_text, metadata_key_text};
@@ -29,13 +33,11 @@ pub use crate::request_classification_store::{
     update_classification_if_changed,
 };
 pub use crate::request_classification_types::{
-    enum_inventory, live_policy_config_from_env, request_classification_startup_backfill_enabled,
-    request_classification_startup_batch_size, BackfillOptions, BackfillReport, LabelCount,
-    LivePolicyConfig, LivePolicyDecision, PersistOutcome, RecommendedRoute, ReportOptions,
-    RequestArtifactType, RequestClassification, RequestClassificationReport, RequestComplexity,
-    RequestDomain, RequestIntent, RequestRisk, ResponseContract, SessionRouteCount,
-    CLASSIFICATION_SCHEMA_VERSION, CLASSIFIER_SOURCE_DETERMINISTIC_RULES, FEATURE_KEYS,
-    ROUTING_POLICY_VERSION,
+    enum_inventory, BackfillOptions, BackfillReport, LabelCount, LivePolicyConfig,
+    LivePolicyDecision, PersistOutcome, RecommendedRoute, ReportOptions, RequestArtifactType,
+    RequestClassification, RequestClassificationReport, RequestComplexity, RequestDomain,
+    RequestIntent, RequestRisk, ResponseContract, SessionRouteCount, CLASSIFICATION_SCHEMA_VERSION,
+    CLASSIFIER_SOURCE_DETERMINISTIC_RULES, FEATURE_KEYS, ROUTING_POLICY_VERSION,
 };
 
 /// Classify a loaded event into deterministic request-level features and labels.
