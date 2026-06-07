@@ -123,7 +123,7 @@ services:
       LITELLM_URL: http://litellm:4000/v1
       LITELLM_KEY: sk-local-agentstack
       API_KEYS: sk-local-orchestrator,agent-os;sk-agent-clean-001,agent-os-clean-001;sk-agent-clean-002,agent-os-clean-002;sk-crusoe,crusoe
-      DEFAULT_MODEL: qwen36-35b-heretic
+      DEFAULT_MODEL: glm-4.5-air
       DEFAULT_TASK: engineering
       SUMMARIZER_ENABLED: "${SUMMARIZER_ENABLED:-true}"
       SUMMARIZER_BASE_URL: "${SUMMARIZER_BASE_URL:-http://summarizer:8080/v1}"

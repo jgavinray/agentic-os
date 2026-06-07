@@ -1,4 +1,18 @@
 model_list:
+  - model_name: glm-4.5-air
+    litellm_params:
+      model: openai/glm-4.5-air
+      api_base: http://192.168.0.196:8000/v1
+      api_key: local-key
+      timeout: 900
+      stream_timeout: 900
+    model_info:
+      id: glm-4.5-air
+      base_model: glm-4.5-air
+      mode: chat
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      max_input_tokens: 131072
   - model_name: qwen36-35b-heretic
     litellm_params:
       model: openai/qwen36-35b-heretic
@@ -43,4 +57,4 @@ litellm_settings:
 router_settings:
   routing_strategy: simple-shuffle
   num_retries: 2
-  timeout: 300
+  timeout: 900
