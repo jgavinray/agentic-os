@@ -2,15 +2,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub use crate::context_artifacts::active_instruction_builder::{
+    active_instruction_artifact, instruction_subject,
+};
 pub use crate::context_artifacts::builders::{
-    active_instruction_artifact, durable_project_memory_artifact, instruction_subject,
-    repo_decisions_artifact, session_state_artifact,
+    durable_project_memory_artifact, repo_decisions_artifact, session_state_artifact,
 };
 pub use crate::context_artifacts::failure_history_builder::failure_history_artifact;
 pub use crate::context_artifacts::static_builders::{
     repo_map_artifact, service_topology_artifact, RepoMapInput, ServiceTopologyInput,
 };
 
+mod active_instruction_builder;
 mod builders;
 mod failure_history_builder;
 mod static_builders;
