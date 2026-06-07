@@ -63,13 +63,25 @@ fn retry_backoff_durations_are_correct() {
 
 #[test]
 fn model_substituted_with_default_in_chat_completions() {
-    let mut req = json!({
+    let payload = json!({
         "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hi"}]
     });
     let default_model = "qwen36-35b-heretic";
-    req["model"] = Value::String(default_model.to_string());
+    let req = prepare_openai_litellm_request(
+        &payload,
+        default_model,
+        LocalReasoningSelection {
+            policy: LocalReasoningPolicy::Medium,
+            source: "test",
+        },
+    );
+
     assert_eq!(req["model"].as_str().unwrap(), default_model);
+    assert!(req["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Local harness reasoning policy: medium"));
 }
 
 #[test]
@@ -82,11 +94,18 @@ fn model_substituted_with_default_for_any_client_model_name() {
     ];
     let default_model = "qwen36-35b-heretic";
     for client_model in client_models {
-        let mut req = json!({
+        let payload = json!({
             "model": client_model,
             "messages": [{"role": "user", "content": "hi"}]
         });
-        req["model"] = Value::String(default_model.to_string());
+        let req = prepare_openai_litellm_request(
+            &payload,
+            default_model,
+            LocalReasoningSelection {
+                policy: LocalReasoningPolicy::Medium,
+                source: "test",
+            },
+        );
         assert_eq!(
             req["model"].as_str().unwrap(),
             default_model,
@@ -97,7 +116,7 @@ fn model_substituted_with_default_for_any_client_model_name() {
 
 #[test]
 fn anthropic_sanitize_removes_local_backend_incompatible_params() {
-    let mut req = json!({
+    let payload = json!({
         "model": "qwen36-27b",
         "max_tokens": 1024,
         "max_output_tokens": 1024,
@@ -107,7 +126,14 @@ fn anthropic_sanitize_removes_local_backend_incompatible_params() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    anthropic::sanitize_litellm_request(&mut req);
+    let req = prepare_anthropic_litellm_request(
+        payload,
+        "qwen36-35b-heretic",
+        LocalReasoningSelection {
+            policy: LocalReasoningPolicy::Medium,
+            source: "test",
+        },
+    );
 
     assert!(req.get("thinking").is_none());
     assert!(req.get("max_output_tokens").is_none());
@@ -115,6 +141,15 @@ fn anthropic_sanitize_removes_local_backend_incompatible_params() {
     assert!(req.get("context_management").is_none());
     assert_eq!(req["max_tokens"], json!(1024));
     assert_eq!(req["messages"][0]["content"], "hi");
+    assert_eq!(req["model"], json!("qwen36-35b-heretic"));
+    assert!(req["system"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Local harness reasoning policy: medium")));
 }
 
 #[test]

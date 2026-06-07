@@ -20,16 +20,16 @@ use crate::handlers_anthropic_completion::handle_anthropic_non_streaming;
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 use crate::handlers_openai_dispatch::handle_openai_non_streaming;
 use crate::handlers_request::HandlerRequestScope;
+use crate::handlers_request_preparation::{
+    prepare_anthropic_litellm_request, prepare_openai_litellm_request,
+};
 use crate::handlers_streaming::{handle_streaming, handle_streaming_anthropic};
 use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningSelection;
-use crate::local_reasoning::{
-    add_local_reasoning_metadata, apply_local_reasoning_defaults, inject_contract_anthropic,
-    inject_contract_openai, local_reasoning_selection,
-};
+use crate::local_reasoning::{add_local_reasoning_metadata, local_reasoning_selection};
 use crate::orchestration_policy;
 use crate::proxy_support::{
     baseline_arm_selection, extract_user_content_openai, litellm_route, merge_request_metadata,
@@ -46,6 +46,7 @@ use crate::state::*;
 #[cfg(test)]
 use crate::system_context::{inject_system_context, inject_system_context_anthropic};
 use crate::telemetry;
+#[cfg(test)]
 use crate::token_limits::enforce_min_max_tokens;
 
 pub use crate::background::trajectory::run_trajectory_idle_sweep;
@@ -146,13 +147,10 @@ pub async fn chat_completions(
         }
     };
     let reasoning_selection = local_reasoning_selection(&headers, &payload);
-    let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
     let route = litellm_route(&state, &namespace);
-    req["model"] = Value::String(route.routed_model.clone());
-    apply_local_reasoning_defaults(&mut req, reasoning_selection);
-    enforce_min_max_tokens(&mut req);
-    inject_contract_openai(&mut req, reasoning_selection);
+    let mut req =
+        prepare_openai_litellm_request(&payload, &route.routed_model, reasoning_selection);
     let sampling_audit = crate::sampling::capture_and_maybe_override(
         &payload,
         &mut req,
@@ -378,15 +376,10 @@ pub async fn messages(
         .unwrap_or(&state.default_model)
         .to_string();
 
-    // Stay in Anthropic format — no translation.
-    let mut req = payload;
     let route = litellm_route(&state, &namespace);
-    req["model"] = Value::String(route.routed_model.clone());
-    apply_local_reasoning_defaults(&mut req, reasoning_selection);
-    enforce_min_max_tokens(&mut req);
-    anthropic::normalize_response_content_types(&mut req);
-    anthropic::sanitize_litellm_request(&mut req);
-    inject_contract_anthropic(&mut req, reasoning_selection);
+    // Stay in Anthropic format — no translation.
+    let mut req =
+        prepare_anthropic_litellm_request(payload, &route.routed_model, reasoning_selection);
     let session_id = find_or_create_capture_session(&state, &repo, &task).await;
     let request_classification = crate::request_classification::classify_request_text(
         &repo,
