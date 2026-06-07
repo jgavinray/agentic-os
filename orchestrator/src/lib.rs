@@ -10,6 +10,7 @@ pub mod context_compiler;
 pub mod context_compiler_support;
 pub mod context_ledger;
 pub mod context_packing;
+pub mod context_packing_cache;
 pub mod context_packing_endpoint;
 pub mod context_packing_policy;
 pub mod context_rendering;

@@ -250,7 +250,7 @@ fn pack_context_into_req_uses_async_cache_refresh() {
         "pack_context_into_req should not await full context construction"
     );
     assert!(
-        include_str!("context_packing.rs").contains("fn spawn_context_cache_refresh")
+        include_str!("context_packing_cache.rs").contains("fn spawn_context_cache_refresh")
             && include_str!("context_packing.rs").contains("get_or_build_cached_context_inner")
             && include_str!("background/mod.rs").contains("tokio::spawn(async move"),
         "context cache refresh should run in the background"
