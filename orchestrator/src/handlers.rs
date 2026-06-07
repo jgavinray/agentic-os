@@ -16,19 +16,12 @@ use crate::auth::{provided_api_token, rate_limited_response};
 use crate::context_packing::apply_orchestration_context_limits;
 #[cfg(test)]
 use crate::context_packing::context_task_category;
-use crate::db;
-use crate::event_capture::{
-    capture_tool_results_background, persist_exchange_with_correlation,
-    persist_model_response_event,
-};
-use crate::handlers_anthropic_dispatch::dispatch_anthropic_messages_with_retry;
-use crate::handlers_capture::record_json_success_capture;
+use crate::handlers_anthropic_completion::handle_anthropic_non_streaming;
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 use crate::handlers_openai_dispatch::handle_openai_non_streaming;
 use crate::handlers_request::HandlerRequestScope;
 use crate::handlers_streaming::{handle_streaming, handle_streaming_anthropic};
 use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
-use crate::handlers_usage::record_success_usage;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
 #[cfg(test)]
@@ -44,7 +37,6 @@ use crate::proxy_support::{
 use crate::request_policy::{
     maybe_anthropic_live_policy_response, maybe_openai_live_policy_response,
 };
-use crate::sse::extract_assistant_from_anthropic_response;
 #[cfg(test)]
 use crate::sse::{
     extract_assistant_from_anthropic_sse, extract_assistant_from_sse,
@@ -493,119 +485,28 @@ pub async fn messages(
         .await;
     }
 
-    // ── Non-streaming: passthrough to LiteLLM /messages ────────
-    let dispatch = match dispatch_anthropic_messages_with_retry(
+    handle_anthropic_non_streaming(
         &state,
-        &mut req,
-        finalizer,
-        request_event_id,
+        req,
+        repo,
+        task,
+        model,
+        namespace,
+        correlation_id,
+        request_metadata,
+        session_id,
         trajectory,
+        request_event_id,
         context_pack_id,
-        &namespace,
-        &repo,
-        &task,
-        &model,
-        &route,
+        user_content,
+        finalizer,
+        vllm_cache_before,
+        capture,
+        route,
         context_pack_hash.clone(),
         Some(baseline_arm.as_str().to_string()),
     )
     .await
-    {
-        Ok(dispatch) => dispatch,
-        Err(response) => return response,
-    };
-    let mut val = dispatch.value;
-    let finalizer = dispatch.finalizer;
-
-    let usage = TokenUsage::from_openai_value(&val);
-    let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
-    let vllm_delta = crate::vllm_metrics::record_cache_observation(
-        &state,
-        vllm_cache_before,
-        session_id.as_deref(),
-        &namespace,
-        &repo,
-        &task,
-        finalizer.attempt(),
-        &usage,
-        provider_cache,
-    )
-    .await;
-    let provider_cache =
-        crate::vllm_metrics::merge_provider_cache_from_delta(provider_cache, vllm_delta);
-    crate::vllm_metrics::inject_anthropic_cache_usage(&mut val, provider_cache);
-    record_json_success_capture(&state, capture, &val).await;
-    record_success_usage(&state, &usage, &model, &namespace, &repo);
-
-    let assistant_content = extract_assistant_from_anthropic_response(&val);
-    // LiteLLM may surface Anthropic tool results inside the response content.
-    // Feed them through the same deterministic parser used for OpenAI results.
-    let tool_results = crate::execution_feedback::tool_results_from_value(&val);
-    if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-        let (input_tokens, output_tokens) =
-            crate::trajectory::optional_token_counts_from_value(&val);
-        let metadata = crate::trajectory::model_response_metadata(
-            &state.default_model,
-            "litellm",
-            input_tokens,
-            output_tokens,
-            Some(dispatch.latency_ms),
-            crate::trajectory::model_finish_reason(&val),
-            request_metadata.clone(),
-            context_pack_id,
-            Some(trajectory),
-        );
-        let assistant_event_id = persist_model_response_event(
-            &state,
-            session_id,
-            &repo,
-            &assistant_content,
-            metadata,
-            trajectory,
-            request_event_id,
-        )
-        .await;
-        capture_tool_results_background(
-            state.as_ref().clone(),
-            session_id.to_string(),
-            repo.clone(),
-            task.clone(),
-            trajectory.trajectory_id,
-            assistant_event_id,
-            Some(trajectory),
-            tool_results,
-        );
-    } else {
-        match db::find_or_create_session(&state.pool, &repo, &task, "agent").await {
-            Ok(sid) => {
-                let assistant_event_id = persist_exchange_with_correlation(
-                    &state,
-                    &sid,
-                    &repo,
-                    &user_content,
-                    &assistant_content,
-                    correlation_id,
-                    None,
-                )
-                .await;
-                if let Some(correlation_id) = correlation_id {
-                    capture_tool_results_background(
-                        state.as_ref().clone(),
-                        sid,
-                        repo.clone(),
-                        task.clone(),
-                        correlation_id,
-                        assistant_event_id,
-                        None,
-                        tool_results,
-                    );
-                }
-            }
-            Err(e) => tracing::warn!("messages: find_or_create_session failed: {e}"),
-        }
-    }
-
-    axum::Json(val).into_response()
 }
 
 #[cfg(test)]

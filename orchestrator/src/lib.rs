@@ -41,6 +41,7 @@ pub mod feature_extraction_store;
 pub mod feature_extraction_tags;
 pub mod feature_extraction_types;
 pub mod handlers;
+pub mod handlers_anthropic_completion;
 pub mod handlers_anthropic_dispatch;
 pub mod handlers_capture;
 pub mod handlers_context;

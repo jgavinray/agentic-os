@@ -1,4 +1,5 @@
 use super::*;
+use crate::sse::extract_assistant_from_anthropic_response;
 use serde_json::json;
 
 #[test]
