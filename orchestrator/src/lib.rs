@@ -89,6 +89,7 @@ pub mod migrations;
 pub mod orchestration_policy;
 pub mod orchestration_policy_base;
 pub mod orchestration_policy_context_types;
+pub mod orchestration_policy_intents;
 pub mod orchestration_policy_store;
 pub mod orchestration_policy_tool_types;
 pub mod orchestration_policy_types;
