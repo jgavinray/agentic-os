@@ -21,6 +21,7 @@ use crate::event_capture::{
     begin_trajectory_for_request, capture_tool_results_background,
     persist_exchange_with_correlation, persist_model_response_event, persist_request_event,
 };
+use crate::handlers_capture::record_json_success_capture;
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 use crate::handlers_request::HandlerRequestScope;
 use crate::handlers_streaming::{handle_streaming, handle_streaming_anthropic};
@@ -299,11 +300,7 @@ pub async fn chat_completions(
     // ── Non-streaming ───────────────────────────────────────────
     match dispatch_non_streaming_raw(&state, &req, &finalizer).await {
         Ok((val, latency_ms)) => {
-            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
-            capture.response_headers =
-                Some(serde_json::json!({"content-type": ["application/json"]}));
-            capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
-            crate::client_capture::record_best_effort(state.capture_pool.as_ref(), capture).await;
+            record_json_success_capture(&state, capture, &val).await;
             let usage = TokenUsage::from_openai_value(&val);
             let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
             crate::vllm_metrics::record_cache_observation(
@@ -818,10 +815,7 @@ pub async fn messages(
     let provider_cache =
         crate::vllm_metrics::merge_provider_cache_from_delta(provider_cache, vllm_delta);
     crate::vllm_metrics::inject_anthropic_cache_usage(&mut val, provider_cache);
-    capture.response_status = Some(StatusCode::OK.as_u16() as i32);
-    capture.response_headers = Some(serde_json::json!({"content-type": ["application/json"]}));
-    capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
-    crate::client_capture::record_best_effort(state.capture_pool.as_ref(), capture).await;
+    record_json_success_capture(&state, capture, &val).await;
     record_success_usage(&state, &usage, &model, &namespace, &repo);
 
     let assistant_content = extract_assistant_from_anthropic_response(&val);
