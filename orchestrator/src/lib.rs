@@ -11,6 +11,7 @@ pub mod context_rendering;
 pub mod context_search;
 pub mod db;
 pub mod db_types;
+pub mod db_usage;
 pub mod embedder;
 pub mod event_capture;
 pub mod execution_feedback;
