@@ -21,6 +21,7 @@ use crate::event_capture::{
     persist_exchange_with_correlation, persist_model_response_event, persist_request_event,
 };
 use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
+use crate::handlers_request::HandlerRequestScope;
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
 #[cfg(test)]
@@ -122,22 +123,12 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Explicit headers take precedence; fall back to token-bound namespace so
-    // standard clients (OpenCode, curl) get memory without custom headers.
-    let repo = headers
-        .get("x-agent-repo")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| namespace.clone());
-    let task = headers
-        .get("x-agent-task")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| state.default_task.clone());
+    let scope = HandlerRequestScope::from_headers(&headers, namespace, &state.default_task);
+    let namespace = scope.namespace.clone();
+    let repo = scope.repo.clone();
+    let task = scope.task.clone();
     tracing::info!(repo = %repo, task = %task, "routing request");
-    capture.namespace = Some(namespace.clone());
-    capture.repo = Some(repo.clone());
-    capture.task = Some(task.clone());
+    scope.apply_to_capture(&mut capture);
 
     let requested_model = payload
         .get("model")
@@ -738,20 +729,12 @@ pub async fn messages(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let repo = headers
-        .get("x-agent-repo")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| namespace.clone());
-    let task = headers
-        .get("x-agent-task")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| state.default_task.clone());
+    let scope = HandlerRequestScope::from_headers(&headers, namespace, &state.default_task);
+    let namespace = scope.namespace.clone();
+    let repo = scope.repo.clone();
+    let task = scope.task.clone();
     tracing::info!(repo = %repo, task = %task, endpoint = "messages", "routing request");
-    capture.namespace = Some(namespace.clone());
-    capture.repo = Some(repo.clone());
-    capture.task = Some(task.clone());
+    scope.apply_to_capture(&mut capture);
 
     let user_content = anthropic::extract_user_content_from_anthropic(&payload);
     if let Some(response) =

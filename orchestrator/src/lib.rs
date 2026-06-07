@@ -30,6 +30,7 @@ pub mod feature_extraction_metadata;
 pub mod feature_extraction_types;
 pub mod handlers;
 pub mod handlers_context;
+pub mod handlers_request;
 pub mod harness_feedback;
 pub mod hybrid;
 pub mod litellm;
