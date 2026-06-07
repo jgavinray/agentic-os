@@ -75,6 +75,7 @@ pub mod harness_feedback_guardrail;
 pub mod harness_feedback_metadata;
 pub mod harness_feedback_store;
 pub mod harness_feedback_taxonomy;
+pub mod harness_feedback_text_signals;
 pub mod hybrid;
 pub mod litellm;
 pub mod litellm_cache;
