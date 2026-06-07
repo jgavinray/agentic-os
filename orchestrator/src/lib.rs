@@ -28,6 +28,7 @@ pub mod sentiment;
 pub mod state;
 pub mod summarizer;
 pub mod telemetry;
+pub mod token_limits;
 pub mod tool_mediation;
 pub mod total_recall;
 pub mod trajectory;
