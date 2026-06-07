@@ -5,13 +5,13 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
-use std::future::Future;
 use std::sync::Arc;
 
 use crate::anthropic;
 use crate::auth::{authenticate, check_auth, check_rate_limit};
 #[cfg(test)]
 use crate::auth::{provided_api_token, rate_limited_response};
+use crate::background::spawn_bounded_background;
 use crate::context_search::{hybrid_search, HybridSearchResult};
 use crate::db;
 #[cfg(test)]
@@ -132,23 +132,6 @@ fn spawn_trajectory_result_emit(
                 "failed to emit trajectory result: {e}"
             );
         }
-    });
-}
-
-pub(crate) fn spawn_bounded_background<F>(state: &AppState, job: &'static str, fut: F)
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    let gate = state.background_work.clone();
-    tokio::spawn(async move {
-        let _permit = match gate.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(e) => {
-                tracing::warn!(job, "background work gate closed: {e}");
-                return;
-            }
-        };
-        fut.await;
     });
 }
 

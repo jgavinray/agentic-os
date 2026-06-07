@@ -5,7 +5,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::auth::authenticate;
-use crate::handlers::{spawn_bounded_background, spawn_feature_extraction};
+use crate::background::spawn_bounded_background;
+use crate::handlers::spawn_feature_extraction;
 use crate::orchestration_policy;
 use crate::state::{AppState, AppendEventRequest};
 use crate::{db, telemetry};
