@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod harness_feedback;
 pub mod hybrid;
 pub mod litellm;
+pub mod local_reasoning;
 pub mod logging;
 pub mod migrations;
 pub mod orchestration_policy;
