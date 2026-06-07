@@ -28,6 +28,7 @@ pub mod db_usage;
 pub mod embedder;
 pub mod event_capture;
 pub mod event_capture_background;
+pub mod event_capture_exchange;
 pub mod execution_feedback;
 pub mod execution_feedback_chain;
 pub mod execution_feedback_events;
