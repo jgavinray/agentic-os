@@ -8,6 +8,9 @@ use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+pub use crate::telemetry_infrastructure::{
+    record_db_query, record_qdrant_request, record_rate_limited, record_sampling_param_override,
+};
 pub use crate::telemetry_model_services::{
     record_embedder_inference, record_embedder_input_tokens, record_sentiment,
     record_summarizer_candidate, record_summarizer_duration, record_summarizer_tick,
@@ -591,25 +594,4 @@ pub fn record_promotion(registry: &MetricsRegistry, accepted: bool, has_sources:
     metrics.memory_source_coverage =
         metrics.memory_source_items_with_sources as f64 / metrics.memory_source_items as f64;
     gauge!("memory_source_coverage").set(metrics.memory_source_coverage);
-}
-
-pub fn record_rate_limited(key_hash: &str) {
-    counter!("rate_limited_total", "key_hash" => key_hash.to_string()).increment(1);
-}
-
-pub fn record_sampling_param_override(parameter: &'static str, reason: &'static str) {
-    counter!("sampling_param_overrides_total", "parameter" => parameter, "reason" => reason)
-        .increment(1);
-}
-
-pub fn record_db_query(op: &'static str, elapsed: Duration, success: bool) {
-    histogram!("db_query_duration_seconds", "op" => op).record(elapsed.as_secs_f64());
-    if !success {
-        counter!("db_query_errors_total", "op" => op).increment(1);
-    }
-}
-
-pub fn record_qdrant_request(op: &'static str, elapsed: Duration, status: &str) {
-    histogram!("qdrant_request_duration_seconds", "op" => op).record(elapsed.as_secs_f64());
-    counter!("qdrant_requests_total", "op" => op, "status" => status.to_string()).increment(1);
 }
