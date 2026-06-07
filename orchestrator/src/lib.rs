@@ -117,6 +117,7 @@ pub mod orchestration_policy_context_types;
 pub mod orchestration_policy_intents;
 pub mod orchestration_policy_intents_mutating;
 pub mod orchestration_policy_intents_read;
+pub mod orchestration_policy_overlay_types;
 pub mod orchestration_policy_overlays;
 pub mod orchestration_policy_posture_types;
 pub mod orchestration_policy_store;
