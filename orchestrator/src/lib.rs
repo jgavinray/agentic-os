@@ -55,6 +55,7 @@ pub mod state;
 pub mod summarizer;
 pub mod system_context;
 pub mod telemetry;
+pub mod telemetry_runtime_metrics;
 pub mod token_limits;
 pub mod tool_mediation;
 pub mod tool_mediation_classification;
