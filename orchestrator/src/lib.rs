@@ -102,6 +102,7 @@ pub mod summarizer_promotion;
 pub mod system_context;
 pub mod telemetry;
 pub mod telemetry_descriptions;
+pub mod telemetry_execution;
 pub mod telemetry_feature_feedback;
 pub mod telemetry_infrastructure;
 pub mod telemetry_model_services;
