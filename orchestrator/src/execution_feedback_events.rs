@@ -2,7 +2,7 @@ use crate::db::AgentEvent;
 use crate::execution_feedback_fingerprints::{
     inline_signature_payload, outcome_raw_text_from_payload, summarize_text,
 };
-use crate::execution_feedback_payloads::event_summary;
+use crate::execution_feedback_summaries::event_summary;
 use serde_json::{json, Value};
 use uuid::Uuid;
 

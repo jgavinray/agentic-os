@@ -8,7 +8,8 @@ use crate::execution_feedback_fingerprints::{
     fingerprint, inline_signature_payload, summarize_text,
 };
 use crate::execution_feedback_parsing::{exit_code_from_text, CapturedToolResult};
-use crate::execution_feedback_payloads::{event_summary, validation_result_payload};
+use crate::execution_feedback_payloads::validation_result_payload;
+use crate::execution_feedback_summaries::event_summary;
 use crate::execution_feedback_validators::{
     classify_validator, validate_validator_type, ValidationKind, ValidatorSpec,
 };

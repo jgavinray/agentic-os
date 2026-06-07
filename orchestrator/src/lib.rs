@@ -40,6 +40,7 @@ pub mod execution_feedback_labels;
 pub mod execution_feedback_parsing;
 pub mod execution_feedback_payloads;
 pub mod execution_feedback_reports;
+pub mod execution_feedback_summaries;
 pub mod execution_feedback_validators;
 pub mod feature_constraint_budget;
 pub mod feature_constraints;
