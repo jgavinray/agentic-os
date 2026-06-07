@@ -1,7 +1,11 @@
-use metrics::{counter, gauge, histogram};
+use metrics::counter;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
+pub use crate::telemetry_context::{
+    record_cache_invalidation, record_context_cache_replacement, record_context_pack,
+    record_promotion,
+};
 pub use crate::telemetry_execution::record_execution_artifact;
 pub use crate::telemetry_feature_feedback::{
     record_feature_extraction_duration, record_feature_extraction_failure,
@@ -34,6 +38,10 @@ pub use crate::telemetry_tool_mediation::{record_tool_authorization, record_tool
 pub use crate::telemetry_upstream::{
     record_upstream_litellm, record_upstream_litellm_error, record_upstream_summarizer,
     record_upstream_summarizer_error, reqwest_error_kind, upstream_error_kind,
+};
+pub use crate::telemetry_usage::{
+    record_tokens, record_trajectory_feature_written, record_trajectory_result,
+    record_vllm_cache_delta, record_vllm_cache_token_flow,
 };
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -106,6 +114,10 @@ impl MetricsRegistry {
     pub(crate) fn increment_tool_mediation_tools(&self) {
         self.inner.write().unwrap().tool_mediation_tools += 1;
     }
+
+    pub(crate) fn with_snapshot_mut(&self, update: impl FnOnce(&mut MetricsSnapshot)) {
+        update(&mut self.inner.write().unwrap());
+    }
 }
 
 impl Default for MetricsRegistry {
@@ -117,193 +129,4 @@ impl Default for MetricsRegistry {
 pub fn record_auth_attempt(accepted: bool) {
     let result = if accepted { "accepted" } else { "rejected" };
     counter!("auth_attempts_total", "result" => result).increment(1);
-}
-
-pub fn record_context_pack(registry: &MetricsRegistry, stats: &crate::state::ContextPackStats) {
-    counter!("context_pack_requests_total").increment(1);
-    if stats.cache_hit {
-        counter!("context_pack_cache_hits_total").increment(1);
-    } else {
-        counter!("context_pack_cache_misses_total").increment(1);
-    }
-    histogram!("context_pack_build_duration_seconds").record(stats.build_ms as f64 / 1000.0);
-    histogram!("context_pack_tokens_estimate").record(stats.context_tokens_estimate as f64);
-    record_items("l0", stats.l0_items_injected);
-    record_items("l1", stats.l1_items_injected);
-    record_items("l2", stats.l2_items_injected);
-    record_items("l3", stats.l3_items_injected);
-    record_items("failed_attempt", stats.failed_attempts_injected);
-    record_items("remediation", stats.remediations_injected);
-    record_items("failure_history", stats.failure_history_items_injected);
-    record_items(
-        "operational_constraints",
-        stats.operational_constraints_injected,
-    );
-    for signature in &stats.failure_history_remediation_signatures {
-        counter!(
-            "remediation_reuse_total",
-            "signature" => crate::execution_feedback::bounded_failure_signature_label(signature)
-        )
-        .increment(1);
-    }
-    counter!("retrieval_hits_total", "source" => "semantic")
-        .increment(stats.retrieval_semantic_hits as u64);
-    counter!("retrieval_hits_total", "source" => "fts").increment(stats.retrieval_fts_hits as u64);
-    counter!("retrieval_hits_total", "source" => "deduped")
-        .increment(stats.retrieval_deduped_hits as u64);
-
-    let mut metrics = registry.inner.write().unwrap();
-    metrics.context_pack_requests += 1;
-    if stats.cache_hit {
-        metrics.context_cache_hits += 1;
-    } else {
-        metrics.context_cache_misses += 1;
-    }
-    metrics.context_pack_build_ms_total += stats.build_ms;
-    metrics.context_pack_chars_total += stats.context_chars as u64;
-    metrics.context_pack_tokens_estimate_total += stats.context_tokens_estimate as u64;
-    metrics.l0_items_injected += stats.l0_items_injected as u64;
-    metrics.l1_items_injected += stats.l1_items_injected as u64;
-    metrics.l2_items_injected += stats.l2_items_injected as u64;
-    metrics.l3_items_injected += stats.l3_items_injected as u64;
-    metrics.failed_attempts_injected += stats.failed_attempts_injected as u64;
-    metrics.remediations_injected += stats.remediations_injected as u64;
-    metrics.failure_history_items_injected += stats.failure_history_items_injected as u64;
-    metrics.operational_constraints_injected += stats.operational_constraints_injected as u64;
-    metrics.remediation_reuse += stats.failure_history_remediation_signatures.len() as u64;
-    metrics.retrieval_semantic_hits += stats.retrieval_semantic_hits as u64;
-    metrics.retrieval_fts_hits += stats.retrieval_fts_hits as u64;
-    metrics.retrieval_deduped_hits += stats.retrieval_deduped_hits as u64;
-}
-
-pub fn record_trajectory_result(summary: &crate::trajectory::TrajectoryResultSummary) {
-    counter!(
-        "trajectory_results_total",
-        "status" => summary.final_status.as_str()
-    )
-    .increment(1);
-    counter!("trajectory_attempts_total").increment(summary.final_attempt_index.max(1) as u64);
-    counter!("trajectory_tokens_total", "direction" => "input")
-        .increment(summary.total_input_tokens.max(0) as u64);
-    counter!("trajectory_tokens_total", "direction" => "output")
-        .increment(summary.total_output_tokens.max(0) as u64);
-}
-
-pub fn record_trajectory_feature_written(registry: &MetricsRegistry) {
-    counter!("trajectory_features_total").increment(1);
-    registry.inner.write().unwrap().trajectory_features += 1;
-}
-
-fn record_items(layer: &'static str, count: usize) {
-    counter!("context_pack_items_injected_total", "layer" => layer).increment(count as u64);
-}
-
-pub fn record_tokens(registry: &MetricsRegistry, usage: &crate::state::TokenUsage, model: &str) {
-    if usage.is_empty() {
-        return;
-    }
-    counter!("inference_tokens_total", "kind" => "processed", "model" => model.to_string())
-        .increment(usage.processed_tokens);
-    counter!("inference_tokens_total", "kind" => "cached", "model" => model.to_string())
-        .increment(usage.cached_tokens);
-    counter!("inference_tokens_total", "kind" => "generated", "model" => model.to_string())
-        .increment(usage.generated_tokens);
-
-    let mut metrics = registry.inner.write().unwrap();
-    metrics.processed_tokens += usage.processed_tokens;
-    metrics.cached_tokens += usage.cached_tokens;
-    metrics.generated_tokens += usage.generated_tokens;
-}
-
-pub fn record_vllm_cache_delta(delta: &crate::vllm_metrics::VllmCacheDelta, model: &str) {
-    counter!(
-        "vllm_prefix_cache_tokens_total",
-        "kind" => "queries",
-        "model" => model.to_string()
-    )
-    .increment(delta.prefix_cache_queries_delta.max(0) as u64);
-    counter!(
-        "vllm_prefix_cache_tokens_total",
-        "kind" => "hits",
-        "model" => model.to_string()
-    )
-    .increment(delta.prefix_cache_hits_delta.max(0) as u64);
-    for (source, value) in [
-        ("total", delta.prompt_tokens_total_delta),
-        ("cached", delta.prompt_tokens_cached_delta),
-        ("local_compute", delta.prompt_tokens_local_compute_delta),
-        ("local_cache_hit", delta.prompt_tokens_local_cache_hit_delta),
-        (
-            "external_kv_transfer",
-            delta.prompt_tokens_external_kv_delta,
-        ),
-    ] {
-        counter!(
-            "vllm_prompt_tokens_by_cache_source_total",
-            "source" => source,
-            "model" => model.to_string()
-        )
-        .increment(value.max(0) as u64);
-    }
-}
-
-pub fn record_vllm_cache_token_flow(
-    input_tokens: u64,
-    output_tokens: u64,
-    provider_cache: crate::litellm::ProviderCacheCounters,
-    model: &str,
-) {
-    for (kind, value) in [
-        ("request_input", input_tokens),
-        ("request_output", output_tokens),
-        (
-            "provider_cached",
-            provider_cache.provider_cached_tokens.max(0) as u64,
-        ),
-        (
-            "provider_cache_created",
-            provider_cache.provider_cache_created_tokens.max(0) as u64,
-        ),
-        (
-            "provider_cache_read",
-            provider_cache.provider_cache_read_tokens.max(0) as u64,
-        ),
-    ] {
-        counter!(
-            "vllm_prompt_tokens_by_cache_source_total",
-            "source" => kind,
-            "model" => model.to_string()
-        )
-        .increment(value);
-    }
-}
-
-pub fn record_cache_invalidation(registry: &MetricsRegistry) {
-    counter!("context_cache_stale_invalidations_total").increment(1);
-    registry.inner.write().unwrap().stale_cache_invalidations += 1;
-}
-
-pub fn record_context_cache_replacement(registry: &MetricsRegistry, replaced: usize) {
-    counter!("context_cache_replacements_total").increment(replaced as u64);
-    registry.inner.write().unwrap().context_cache_replacements += replaced as u64;
-}
-
-pub fn record_promotion(registry: &MetricsRegistry, accepted: bool, has_sources: bool) {
-    let result = if accepted { "accepted" } else { "rejected" };
-    counter!("memory_promotions_total", "result" => result).increment(1);
-
-    let mut metrics = registry.inner.write().unwrap();
-    metrics.promotion_attempts += 1;
-    if accepted {
-        metrics.promotion_accepted += 1;
-    } else {
-        metrics.promotion_rejected += 1;
-    }
-    metrics.memory_source_items += 1;
-    if has_sources {
-        metrics.memory_source_items_with_sources += 1;
-    }
-    metrics.memory_source_coverage =
-        metrics.memory_source_items_with_sources as f64 / metrics.memory_source_items as f64;
-    gauge!("memory_source_coverage").set(metrics.memory_source_coverage);
 }
