@@ -18,6 +18,7 @@ pub use crate::telemetry_request_classification::{
 pub use crate::telemetry_runtime_metrics::{record_pool_gauges, record_process_metrics};
 pub use crate::telemetry_setup::{install_recorder, prime_metrics};
 pub use crate::telemetry_streaming::StreamTracker;
+pub use crate::telemetry_tool_mediation::{record_tool_authorization, record_tool_menu_outcome};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct MetricsSnapshot {
@@ -80,6 +81,14 @@ impl MetricsRegistry {
 
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.inner.read().unwrap().clone()
+    }
+
+    pub(crate) fn increment_tool_mediation_decisions(&self) {
+        self.inner.write().unwrap().tool_mediation_decisions += 1;
+    }
+
+    pub(crate) fn increment_tool_mediation_tools(&self) {
+        self.inner.write().unwrap().tool_mediation_tools += 1;
     }
 }
 
@@ -404,63 +413,6 @@ pub fn record_harness_guardrail_decision(action: &str, reason: &str) {
         "reason" => reason
     )
     .increment(1);
-}
-
-pub fn record_tool_menu_outcome(
-    registry: &MetricsRegistry,
-    outcome: &crate::tool_mediation::ToolMenuOutcome,
-) {
-    let decision = crate::tool_mediation::bounded_decision(outcome.decision);
-    let reason = crate::tool_mediation::bounded_reason(outcome.reason);
-    counter!(
-        "tool_mediation_decisions_total",
-        "decision" => decision,
-        "reason" => reason
-    )
-    .increment(1);
-    registry.inner.write().unwrap().tool_mediation_decisions += 1;
-    for capability in outcome.offered_capabilities() {
-        record_tool_mediation_tool(registry, "offered", capability);
-    }
-    for capability in outcome.allowed_capabilities() {
-        record_tool_mediation_tool(registry, "allowed", capability);
-    }
-    for capability in outcome.hidden_capabilities() {
-        record_tool_mediation_tool(registry, "hidden", capability);
-    }
-}
-
-pub fn record_tool_authorization(
-    registry: &MetricsRegistry,
-    response: &crate::tool_mediation::ToolAuthorizeResponse,
-) {
-    let decision = crate::tool_mediation::bounded_decision(response.decision);
-    let reason = crate::tool_mediation::bounded_reason(response.reason);
-    counter!(
-        "tool_mediation_decisions_total",
-        "decision" => decision,
-        "reason" => reason
-    )
-    .increment(1);
-    registry.inner.write().unwrap().tool_mediation_decisions += 1;
-    let action = if response.decision == "deny" {
-        "denied"
-    } else {
-        "allowed"
-    };
-    record_tool_mediation_tool(registry, action, response.capability);
-}
-
-fn record_tool_mediation_tool(registry: &MetricsRegistry, action: &str, capability: &str) {
-    let action = crate::tool_mediation::bounded_tool_action(action);
-    let capability = crate::tool_mediation::bounded_capability(capability);
-    counter!(
-        "tool_mediation_tools_total",
-        "action" => action,
-        "capability" => capability
-    )
-    .increment(1);
-    registry.inner.write().unwrap().tool_mediation_tools += 1;
 }
 
 fn bounded_feature_failure_class(value: &str) -> &'static str {
