@@ -37,6 +37,7 @@ pub mod handlers_context;
 pub mod handlers_request;
 pub mod handlers_streaming;
 pub mod harness_feedback;
+pub mod harness_feedback_store;
 pub mod harness_feedback_taxonomy;
 pub mod hybrid;
 pub mod litellm;
