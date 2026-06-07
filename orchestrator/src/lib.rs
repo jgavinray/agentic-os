@@ -6,6 +6,7 @@ pub mod client_capture;
 pub mod context_artifacts;
 pub mod context_compiler;
 pub mod context_ledger;
+pub mod context_search;
 pub mod db;
 pub mod embedder;
 pub mod execution_feedback;
