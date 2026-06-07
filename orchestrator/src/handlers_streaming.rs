@@ -5,16 +5,10 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::anthropic;
-use crate::db;
-use crate::event_capture::{
-    capture_tool_results_background, persist_exchange_with_correlation,
-    persist_model_response_event,
+use crate::handlers_stream_persistence::{
+    persist_stream_completion, StreamCompletionPersistence, StreamResponseFormat,
 };
-use crate::sse::{
-    extract_assistant_from_anthropic_sse, extract_assistant_from_sse,
-    extract_token_usage_from_anthropic_sse, extract_token_usage_from_sse,
-    optional_token_usage_from_sse,
-};
+use crate::sse::{extract_token_usage_from_anthropic_sse, extract_token_usage_from_sse};
 use crate::state::AppState;
 use crate::telemetry;
 use crate::token_limits::{context_window_retry_max_tokens, set_max_tokens};
@@ -39,8 +33,6 @@ pub(crate) async fn handle_streaming(
     capture: crate::client_capture::RawHttpCapture,
 ) -> Response {
     let url = format!("{}/chat/completions", state.litellm_url);
-    let mut capture = capture;
-
     let started = finalizer.attempt_mut().started_at;
     let upstream = match state
         .http_stream
@@ -165,12 +157,6 @@ pub(crate) async fn handle_streaming(
     let state_bg = state.clone();
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
-            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
-            capture.response_headers =
-                Some(serde_json::json!({"content-type": ["text/event-stream"]}));
-            capture.raw_response_body = Some(raw_bytes.clone());
-            crate::client_capture::record_best_effort(state_bg.capture_pool.as_ref(), capture)
-                .await;
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_sse(&raw);
             let provider_cache = crate::litellm::provider_counters_from_sse(&raw);
@@ -186,85 +172,25 @@ pub(crate) async fn handle_streaming(
                 provider_cache,
             )
             .await;
-            telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
-            if !usage.is_empty() {
-                if let Err(e) = db::record_token_usage(
-                    &state_bg.pool,
-                    &requested_model,
-                    &state_bg.default_model,
-                    &namespace,
-                    &repo,
-                    &usage,
-                )
-                .await
-                {
-                    tracing::warn!("failed to record token usage: {e}");
-                }
-            }
-            let assistant_content = extract_assistant_from_sse(&raw);
-            let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
-            if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-                let (input_tokens, output_tokens) = optional_token_usage_from_sse(&raw);
-                let metadata = crate::trajectory::model_response_metadata(
-                    &state_bg.default_model,
-                    "litellm",
-                    input_tokens,
-                    output_tokens,
-                    Some(started.elapsed().as_millis() as i64),
-                    None,
-                    request_metadata.clone(),
-                    context_pack_id,
-                    Some(trajectory),
-                );
-                let assistant_event_id = persist_model_response_event(
-                    &state_bg,
-                    session_id,
-                    &repo,
-                    &assistant_content,
-                    metadata,
-                    trajectory,
-                    request_event_id,
-                )
-                .await;
-                capture_tool_results_background(
-                    state_bg.clone(),
-                    session_id.to_string(),
-                    repo.clone(),
-                    task.clone(),
-                    trajectory.trajectory_id,
-                    assistant_event_id,
-                    Some(trajectory),
-                    tool_results,
-                );
-            } else {
-                match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
-                    Ok(sid) => {
-                        let assistant_event_id = persist_exchange_with_correlation(
-                            &state_bg,
-                            &sid,
-                            &repo,
-                            &user_content,
-                            &assistant_content,
-                            correlation_id,
-                            request_metadata,
-                        )
-                        .await;
-                        if let Some(correlation_id) = correlation_id {
-                            capture_tool_results_background(
-                                state_bg.clone(),
-                                sid,
-                                repo.clone(),
-                                task.clone(),
-                                correlation_id,
-                                assistant_event_id,
-                                None,
-                                tool_results,
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!("stream: find_or_create_session failed: {e}"),
-                }
-            }
+            persist_stream_completion(StreamCompletionPersistence {
+                state: state_bg,
+                raw_bytes,
+                capture,
+                response_format: StreamResponseFormat::ChatCompletions,
+                requested_model,
+                namespace,
+                repo,
+                task,
+                user_content,
+                correlation_id,
+                request_metadata,
+                session_id,
+                trajectory,
+                request_event_id,
+                context_pack_id,
+                started,
+            })
+            .await;
         }
     });
 
@@ -300,8 +226,6 @@ pub(crate) async fn handle_streaming_anthropic(
 ) -> Response {
     let url = format!("{}/messages", state.litellm_url);
     let mut req = req;
-    let mut capture = capture;
-
     let started = finalizer.attempt_mut().started_at;
     let mut upstream = match state
         .http_stream
@@ -576,93 +500,25 @@ pub(crate) async fn handle_streaming_anthropic(
     let state_bg = state.clone();
     tokio::spawn(async move {
         if let Ok(raw_bytes) = done_rx.await {
-            capture.response_status = Some(StatusCode::OK.as_u16() as i32);
-            capture.response_headers =
-                Some(serde_json::json!({"content-type": ["text/event-stream"]}));
-            capture.raw_response_body = Some(raw_bytes.clone());
-            crate::client_capture::record_best_effort(state_bg.capture_pool.as_ref(), capture)
-                .await;
-            let raw = String::from_utf8_lossy(&raw_bytes);
-            let usage = extract_token_usage_from_anthropic_sse(&raw);
-            telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
-            if !usage.is_empty() {
-                if let Err(e) = db::record_token_usage(
-                    &state_bg.pool,
-                    &model,
-                    &state_bg.default_model,
-                    &namespace,
-                    &repo,
-                    &usage,
-                )
-                .await
-                {
-                    tracing::warn!("failed to record token usage: {e}");
-                }
-            }
-            let assistant_content = extract_assistant_from_anthropic_sse(&raw);
-            let tool_results = crate::execution_feedback::tool_results_from_sse(&raw);
-            if let (Some(session_id), Some(trajectory)) = (session_id.as_deref(), trajectory) {
-                let (input_tokens, output_tokens) = optional_token_usage_from_sse(&raw);
-                let metadata = crate::trajectory::model_response_metadata(
-                    &state_bg.default_model,
-                    "litellm",
-                    input_tokens,
-                    output_tokens,
-                    Some(started.elapsed().as_millis() as i64),
-                    None,
-                    request_metadata.clone(),
-                    context_pack_id,
-                    Some(trajectory),
-                );
-                let assistant_event_id = persist_model_response_event(
-                    &state_bg,
-                    session_id,
-                    &repo,
-                    &assistant_content,
-                    metadata,
-                    trajectory,
-                    request_event_id,
-                )
-                .await;
-                capture_tool_results_background(
-                    state_bg.clone(),
-                    session_id.to_string(),
-                    repo.clone(),
-                    task.clone(),
-                    trajectory.trajectory_id,
-                    assistant_event_id,
-                    Some(trajectory),
-                    tool_results,
-                );
-            } else {
-                match db::find_or_create_session(&state_bg.pool, &repo, &task, "agent").await {
-                    Ok(sid) => {
-                        let assistant_event_id = persist_exchange_with_correlation(
-                            &state_bg,
-                            &sid,
-                            &repo,
-                            &user_content,
-                            &assistant_content,
-                            correlation_id,
-                            None,
-                        )
-                        .await;
-                        if let Some(correlation_id) = correlation_id {
-                            capture_tool_results_background(
-                                state_bg.clone(),
-                                sid,
-                                repo.clone(),
-                                task.clone(),
-                                correlation_id,
-                                assistant_event_id,
-                                None,
-                                tool_results,
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!("messages stream: find_or_create_session failed: {e}"),
-                }
-            }
+            persist_stream_completion(StreamCompletionPersistence {
+                state: state_bg,
+                raw_bytes,
+                capture,
+                response_format: StreamResponseFormat::AnthropicMessages,
+                requested_model: model,
+                namespace,
+                repo,
+                task,
+                user_content,
+                correlation_id,
+                request_metadata,
+                session_id,
+                trajectory,
+                request_event_id,
+                context_pack_id,
+                started,
+            })
+            .await;
         }
     });
 
