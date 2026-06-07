@@ -89,6 +89,7 @@ pub mod startup_backfill;
 pub mod state;
 pub mod state_context;
 pub mod summarizer;
+pub mod summarizer_promotion;
 pub mod system_context;
 pub mod telemetry;
 pub mod telemetry_descriptions;
