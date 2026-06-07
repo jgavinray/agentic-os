@@ -22,6 +22,7 @@ pub mod execution_feedback;
 pub mod execution_feedback_fingerprints;
 pub mod execution_feedback_parsing;
 pub mod execution_feedback_validators;
+pub mod feature_constraints;
 pub mod feature_detection_tags;
 pub mod feature_extraction;
 pub mod feature_extraction_metadata;
