@@ -1,4 +1,4 @@
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use deadpool_postgres::Pool;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -130,6 +130,32 @@ pub async fn record(pool: &Pool, capture: &RawHttpCapture) -> Result<(), anyhow:
     )
     .await?;
     Ok(())
+}
+
+pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
+    let Some(pool) = pool else {
+        return;
+    };
+    if let Err(e) = record(pool, &capture).await {
+        tracing::warn!(
+            exchange_id = %capture.exchange_id,
+            endpoint = %capture.endpoint,
+            "failed to record raw client capture: {e}"
+        );
+    }
+}
+
+pub async fn record_response_best_effort(
+    pool: Option<&Pool>,
+    mut capture: RawHttpCapture,
+    status: StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) {
+    capture.response_status = Some(status.as_u16() as i32);
+    capture.response_headers = Some(serde_json::json!({"content-type": [content_type]}));
+    capture.raw_response_body = Some(body);
+    record_best_effort(pool, capture).await;
 }
 
 pub fn headers_to_json(headers: &HeaderMap) -> Value {

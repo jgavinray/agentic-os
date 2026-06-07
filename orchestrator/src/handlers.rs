@@ -1341,32 +1341,6 @@ async fn dispatch_non_streaming_raw(
     Ok((value, latency_ms))
 }
 
-async fn record_client_capture(state: &AppState, capture: crate::client_capture::RawHttpCapture) {
-    let Some(pool) = state.capture_pool.as_ref() else {
-        return;
-    };
-    if let Err(e) = crate::client_capture::record(pool, &capture).await {
-        tracing::warn!(
-            exchange_id = %capture.exchange_id,
-            endpoint = %capture.endpoint,
-            "failed to record raw client capture: {e}"
-        );
-    }
-}
-
-async fn record_client_capture_response(
-    state: &AppState,
-    mut capture: crate::client_capture::RawHttpCapture,
-    status: StatusCode,
-    content_type: &'static str,
-    body: Vec<u8>,
-) {
-    capture.response_status = Some(status.as_u16() as i32);
-    capture.response_headers = Some(serde_json::json!({"content-type": [content_type]}));
-    capture.raw_response_body = Some(body);
-    record_client_capture(state, capture).await;
-}
-
 #[tracing::instrument(name = "handler.chat_completions", skip(state, headers, body))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
@@ -1388,8 +1362,8 @@ pub async fn chat_completions(
                     "message": format!("invalid JSON request body: {e}")
                 }
             });
-            record_client_capture_response(
-                &state,
+            crate::client_capture::record_response_best_effort(
+                state.capture_pool.as_ref(),
                 capture,
                 StatusCode::BAD_REQUEST,
                 "application/json",
@@ -1402,8 +1376,8 @@ pub async fn chat_completions(
     capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
         let body = serde_json::json!({"error": "unauthorized"});
-        record_client_capture_response(
-            &state,
+        crate::client_capture::record_response_best_effort(
+            state.capture_pool.as_ref(),
             capture,
             StatusCode::UNAUTHORIZED,
             "application/json",
@@ -1607,7 +1581,7 @@ pub async fn chat_completions(
             capture.response_headers =
                 Some(serde_json::json!({"content-type": ["application/json"]}));
             capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
-            record_client_capture(&state, capture).await;
+            crate::client_capture::record_best_effort(state.capture_pool.as_ref(), capture).await;
             let usage = TokenUsage::from_openai_value(&val);
             let provider_cache = crate::litellm::ProviderCacheCounters::from_value(&val);
             crate::vllm_metrics::record_cache_observation(
@@ -1866,7 +1840,8 @@ async fn handle_streaming(
             capture.response_headers =
                 Some(serde_json::json!({"content-type": ["text/event-stream"]}));
             capture.raw_response_body = Some(raw_bytes.clone());
-            record_client_capture(&state_bg, capture).await;
+            crate::client_capture::record_best_effort(state_bg.capture_pool.as_ref(), capture)
+                .await;
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_sse(&raw);
             let provider_cache = crate::litellm::provider_counters_from_sse(&raw);
@@ -1995,8 +1970,8 @@ pub async fn messages(
                 "invalid_request_error",
                 format!("invalid JSON request body: {e}"),
             );
-            record_client_capture_response(
-                &state,
+            crate::client_capture::record_response_best_effort(
+                state.capture_pool.as_ref(),
                 capture,
                 StatusCode::BAD_REQUEST,
                 "application/json",
@@ -2013,8 +1988,8 @@ pub async fn messages(
     capture.parsed_request_body = Some(payload.clone());
     let Some((caller_token, namespace)) = authenticate(&state, &headers) else {
         let body = anthropic::error_value("authentication_error", "invalid or missing API key");
-        record_client_capture_response(
-            &state,
+        crate::client_capture::record_response_best_effort(
+            state.capture_pool.as_ref(),
             capture,
             StatusCode::UNAUTHORIZED,
             "application/json",
@@ -2407,7 +2382,7 @@ pub async fn messages(
     capture.response_status = Some(StatusCode::OK.as_u16() as i32);
     capture.response_headers = Some(serde_json::json!({"content-type": ["application/json"]}));
     capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&val));
-    record_client_capture(&state, capture).await;
+    crate::client_capture::record_best_effort(state.capture_pool.as_ref(), capture).await;
     telemetry::record_tokens(&state.metrics, &usage, &state.default_model);
     if !usage.is_empty() {
         let pool = state.pool.clone();
@@ -2797,7 +2772,8 @@ async fn handle_streaming_anthropic(
             capture.response_headers =
                 Some(serde_json::json!({"content-type": ["text/event-stream"]}));
             capture.raw_response_body = Some(raw_bytes.clone());
-            record_client_capture(&state_bg, capture).await;
+            crate::client_capture::record_best_effort(state_bg.capture_pool.as_ref(), capture)
+                .await;
             let raw = String::from_utf8_lossy(&raw_bytes);
             let usage = extract_token_usage_from_anthropic_sse(&raw);
             telemetry::record_tokens(&state_bg.metrics, &usage, &state_bg.default_model);
