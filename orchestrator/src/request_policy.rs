@@ -1,8 +1,31 @@
 use axum::response::{IntoResponse, Response};
 
+use crate::orchestration_policy::OrchestrationPolicy;
+use crate::request_classification::RequestClassification;
 use crate::request_policy_responses::{live_policy_anthropic_body, live_policy_openai_body};
 use crate::state::AppState;
 use crate::telemetry;
+
+pub(crate) fn classify_and_derive_request_policy(
+    repo: &str,
+    session_id: &str,
+    user_content: &str,
+    raw_capture_enabled: bool,
+) -> (RequestClassification, OrchestrationPolicy) {
+    let classification = crate::request_classification::classify_request_text(
+        repo,
+        session_id,
+        user_content,
+        None,
+        "user_message",
+    );
+    let policy = crate::orchestration_policy::derive_orchestration_policy(
+        &classification,
+        user_content,
+        raw_capture_enabled,
+    );
+    (classification, policy)
+}
 
 pub(crate) fn maybe_openai_live_policy_response(
     state: &AppState,

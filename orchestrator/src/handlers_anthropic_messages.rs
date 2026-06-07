@@ -14,9 +14,10 @@ use crate::handlers_request_preparation::prepare_anthropic_litellm_request;
 use crate::handlers_streaming::handle_streaming_anthropic;
 use crate::handlers_trajectory::{begin_and_persist_request, find_or_create_capture_session};
 use crate::local_reasoning::{add_local_reasoning_metadata, local_reasoning_selection};
-use crate::orchestration_policy;
 use crate::proxy_support::{baseline_arm_selection, litellm_route, merge_request_metadata};
-use crate::request_policy::maybe_anthropic_live_policy_response;
+use crate::request_policy::{
+    classify_and_derive_request_policy, maybe_anthropic_live_policy_response,
+};
 use crate::state::AppState;
 use crate::telemetry;
 
@@ -114,15 +115,9 @@ pub async fn messages(
     let mut req =
         prepare_anthropic_litellm_request(payload, &route.routed_model, reasoning_selection);
     let session_id = find_or_create_capture_session(&state, &repo, &task).await;
-    let request_classification = crate::request_classification::classify_request_text(
+    let (request_classification, request_policy) = classify_and_derive_request_policy(
         &repo,
         session_id.as_deref().unwrap_or("unknown"),
-        &user_content,
-        None,
-        "user_message",
-    );
-    let request_policy = orchestration_policy::derive_orchestration_policy(
-        &request_classification,
         &user_content,
         state.capture_pool.is_some(),
     );
