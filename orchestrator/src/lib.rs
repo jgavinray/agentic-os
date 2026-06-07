@@ -54,6 +54,7 @@ pub mod system_context;
 pub mod telemetry;
 pub mod token_limits;
 pub mod tool_mediation;
+pub mod tool_mediation_types;
 pub mod total_recall;
 pub mod trajectory;
 pub mod vllm_metrics;
