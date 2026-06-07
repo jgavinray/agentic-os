@@ -84,6 +84,7 @@ pub mod routes;
 pub mod sampling;
 pub mod sentiment;
 pub mod sse;
+pub mod startup_backfill;
 pub mod state;
 pub mod state_context;
 pub mod summarizer;
