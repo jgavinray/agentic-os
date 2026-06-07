@@ -1,7 +1,8 @@
 use crate::context_artifacts::{self, ContextArtifact};
+use crate::context_compiler_instructions::compile_active_instruction_artifact;
 use crate::context_compiler_support::{
-    artifact_source_event_ids, compile_repo_map, compile_service_topology, compiler_source_allowed,
-    record_ledger, total_recall_candidates,
+    compile_repo_map, compile_service_topology, compiler_source_allowed, record_ledger,
+    total_recall_candidates,
 };
 use crate::db;
 
@@ -71,59 +72,8 @@ impl<'a> ContextCompiler<'a> {
             &request,
             crate::orchestration_policy::ContextSource::CompiledSummaries,
         ) {
-            match db::get_recent_instruction_candidates(self.pool, &request.repo, 25).await {
-                Ok(events) => {
-                    if let Some(artifact) = context_artifacts::active_instruction_artifact(
-                        request.repo.clone(),
-                        &events,
-                    ) {
-                        let included_event_ids = artifact_source_event_ids(&artifact);
-                        let mut seen_subjects = std::collections::HashSet::new();
-                        for event in &events {
-                            let text = event
-                                .evidence
-                                .as_deref()
-                                .filter(|value| !value.trim().is_empty())
-                                .unwrap_or(&event.summary);
-                            let subject = context_artifacts::instruction_subject(text);
-                            let is_first_subject = seen_subjects.insert(subject);
-                            let included = included_event_ids.contains(&event.id);
-                            let (decision, reason) = if included && is_first_subject {
-                                (
-                                    "included",
-                                    "promoted newest explicit user instruction for this subject",
-                                )
-                            } else {
-                                (
-                                    "superseded",
-                                    "newer explicit user instruction for this subject was promoted",
-                                )
-                            };
-                            record_ledger(
-                                self.pool,
-                                &request.repo,
-                                &artifact,
-                                "agent_events",
-                                Some(&event.id),
-                                decision,
-                                reason,
-                                serde_json::json!({
-                                    "event_type": event.event_type,
-                                    "subject": subject,
-                                }),
-                            )
-                            .await;
-                        }
-                        artifacts.push(artifact);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "context_compiler",
-                        repo = %request.repo,
-                        "failed to fetch instruction candidates: {e}"
-                    );
-                }
+            if let Some(artifact) = compile_active_instruction_artifact(self.pool, &request).await {
+                artifacts.push(artifact);
             }
         }
 
