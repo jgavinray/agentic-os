@@ -45,6 +45,7 @@ pub mod execution_feedback_reports;
 pub mod execution_feedback_summaries;
 pub mod execution_feedback_validators;
 pub mod feature_constraint_budget;
+pub mod feature_constraint_failures;
 pub mod feature_constraints;
 pub mod feature_detection_bootstrap;
 pub mod feature_detection_producer_signals;
