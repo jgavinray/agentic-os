@@ -1,0 +1,291 @@
+use crate::db_event_rows::rows_to_events;
+use crate::db_types::{AgentEvent, ContextEvidence};
+use deadpool_postgres::Pool;
+
+#[allow(dead_code)]
+pub async fn get_events_for_repo(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND summarized = false
+               AND summary_level = 0
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+             ORDER BY created_at DESC
+             LIMIT $2",
+            &[&repo, &limit],
+        )
+        .await?;
+
+    Ok(rows_to_events(rows))
+}
+
+pub async fn count_events_for_repo(pool: &Pool, repo: &str) -> Result<i64, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT AS count
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'",
+                &[&repo],
+            )
+            .await?;
+        Ok(row.get("count"))
+    }
+    .await;
+    crate::telemetry::record_db_query("count_events_for_repo", started.elapsed(), result.is_ok());
+    result
+}
+
+pub fn preferred_summary_levels(event_count: i64) -> Vec<i32> {
+    match event_count {
+        n if n < 20 => vec![0],
+        n if n < 200 => vec![1],
+        n if n < 2000 => vec![2],
+        _ => vec![3, 2],
+    }
+}
+
+#[allow(dead_code)]
+pub async fn get_context_events_for_repo(
+    pool: &Pool,
+    repo: &str,
+    event_count: i64,
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let levels = preferred_summary_levels(event_count);
+    let mut events = get_events_for_repo_by_levels(pool, repo, &levels, limit).await?;
+
+    // Fresh or partially migrated repositories may not yet have promoted summaries.
+    // Fall back through lower levels so context remains available while the
+    // background summarizer catches up.
+    if events.is_empty() && !levels.contains(&0) {
+        events = get_events_for_repo_by_levels(pool, repo, &[1, 0], limit).await?;
+    }
+    if events.is_empty() {
+        events = get_events_for_repo(pool, repo, limit).await?;
+    }
+
+    Ok(events)
+}
+
+pub async fn get_context_evidence_for_policy(
+    pool: &Pool,
+    repo: &str,
+    policy: &crate::state::ContextPolicy,
+) -> Result<ContextEvidence, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let (l0_recent, l1_matching, l2_repo, l3_project, failures) = tokio::join!(
+        get_events_for_repo_by_level(
+            pool,
+            repo,
+            crate::state::MemoryLevel::L0,
+            policy.l0_recent_limit
+        ),
+        get_events_for_repo_by_level(pool, repo, crate::state::MemoryLevel::L1, policy.l1_limit),
+        get_events_for_repo_by_level(pool, repo, crate::state::MemoryLevel::L2, policy.l2_limit),
+        get_events_for_repo_by_level(pool, repo, crate::state::MemoryLevel::L3, policy.l3_limit),
+        get_failure_events_for_repo(pool, repo, policy.failure_limit),
+    );
+
+    let result: Result<ContextEvidence, anyhow::Error> = Ok(ContextEvidence {
+        l0_recent: l0_recent?,
+        l1_matching: l1_matching?,
+        l2_repo: l2_repo?,
+        l3_project: l3_project?,
+        failures: failures?,
+        failure_history: vec![],
+        operational_constraints: vec![],
+    });
+    crate::telemetry::record_db_query("get_context_evidence", started.elapsed(), result.is_ok());
+    result
+}
+
+async fn get_events_for_repo_by_level(
+    pool: &Pool,
+    repo: &str,
+    level: crate::state::MemoryLevel,
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    if limit <= 0 {
+        return Ok(vec![]);
+    }
+
+    let conn = pool.get().await?;
+    let level = level.as_i32();
+    let rows = conn
+        .query(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND summary_level = $2
+               AND event_type NOT IN ('failed_attempt', 'remediation')
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+             ORDER BY created_at DESC
+             LIMIT $3",
+            &[&repo, &level, &limit],
+        )
+        .await?;
+
+    Ok(rows_to_events(rows))
+}
+
+async fn get_failure_events_for_repo(
+    pool: &Pool,
+    repo: &str,
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    if limit <= 0 {
+        return Ok(vec![]);
+    }
+
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND event_type IN ('failed_attempt', 'remediation')
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+             ORDER BY created_at DESC
+             LIMIT $2",
+            &[&repo, &limit],
+        )
+        .await?;
+
+    Ok(rows_to_events(rows))
+}
+
+#[allow(dead_code)]
+async fn get_events_for_repo_by_levels(
+    pool: &Pool,
+    repo: &str,
+    levels: &[i32],
+    limit: i64,
+) -> Result<Vec<AgentEvent>, anyhow::Error> {
+    let conn = pool.get().await?;
+    let rows = conn
+        .query(
+            "SELECT id, session_id, repo, actor, event_type, summary, evidence, metadata, correlation_id, parent_event_id, trajectory_id, attempt_index, event_role, created_at, summary_level
+             FROM agent_events
+             WHERE repo = $1
+               AND summarized = false
+               AND summary_level = ANY($2)
+               AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+             ORDER BY summary_level DESC, created_at DESC
+             LIMIT $3",
+            &[&repo, &levels, &limit],
+        )
+        .await?;
+
+    Ok(rows_to_events(rows))
+}
+
+/// Full-text search on agent_events.summary and evidence for a given repo.
+/// Returns results ordered by ts_rank DESC.
+pub async fn search_events_fts(
+    pool: &Pool,
+    repo: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<crate::state::SearchHit>, anyhow::Error> {
+    let started = std::time::Instant::now();
+    let result = async {
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "WITH docs AS (
+                     SELECT id, event_type, summary, created_at,
+                            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(evidence, '')) AS tsv
+                     FROM agent_events
+                     WHERE repo = $1
+                       AND summarized = false
+                       AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+                 )
+                 SELECT id, event_type, summary, created_at
+                 FROM docs
+                 WHERE tsv @@ plainto_tsquery('english', $2)
+                 ORDER BY ts_rank(tsv, plainto_tsquery('english', $2)) DESC
+                 LIMIT $3",
+                &[&repo, &query, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::state::SearchHit {
+                event_id: row.get("id"),
+                event_type: row.get("event_type"),
+                summary: row.get("summary"),
+                created_at: Some(row.get("created_at")),
+            })
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query("search_events_fts", started.elapsed(), result.is_ok());
+    result
+}
+
+pub async fn hydrate_active_search_hits(
+    pool: &Pool,
+    repo: &str,
+    hits: Vec<crate::state::SearchHit>,
+) -> Result<Vec<crate::state::SearchHit>, anyhow::Error> {
+    if hits.is_empty() {
+        return Ok(hits);
+    }
+
+    let started = std::time::Instant::now();
+    let result = async {
+        let ids: Vec<String> = hits.iter().map(|h| h.event_id.clone()).collect();
+        let conn = pool.get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, event_type, summary, created_at
+                 FROM agent_events
+                 WHERE repo = $1
+                   AND summarized = false
+                   AND metadata->'harness_feedback'->>'quarantined' IS DISTINCT FROM 'true'
+                   AND id = ANY($2)",
+                &[&repo, &ids],
+            )
+            .await?;
+
+        let by_id: std::collections::HashMap<String, crate::state::SearchHit> = rows
+            .into_iter()
+            .map(|row| {
+                let id: String = row.get("id");
+                (
+                    id.clone(),
+                    crate::state::SearchHit {
+                        event_id: id,
+                        event_type: row.get("event_type"),
+                        summary: row.get("summary"),
+                        created_at: Some(row.get("created_at")),
+                    },
+                )
+            })
+            .collect();
+
+        Ok(hits
+            .into_iter()
+            .filter_map(|hit| by_id.get(&hit.event_id).cloned())
+            .collect())
+    }
+    .await;
+    crate::telemetry::record_db_query(
+        "hydrate_active_search_hits",
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
