@@ -159,4 +159,5 @@ pub mod trajectory;
 pub mod trajectory_events;
 pub mod trajectory_summary;
 pub mod trajectory_types;
+pub mod vllm_cache_usage;
 pub mod vllm_metrics;
