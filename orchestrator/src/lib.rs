@@ -21,6 +21,7 @@ pub mod context_rendering_sections;
 pub mod context_search;
 pub mod db;
 pub mod db_connection;
+pub mod db_context_artifact_candidates;
 pub mod db_context_artifacts;
 pub mod db_context_compiler_ledger;
 pub mod db_context_events;
