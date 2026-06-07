@@ -60,6 +60,7 @@ pub mod feature_constraint_budget;
 pub mod feature_constraint_failures;
 pub mod feature_constraints;
 pub mod feature_detection_bootstrap;
+pub mod feature_detection_event_rules;
 pub mod feature_detection_producer_signals;
 pub mod feature_detection_tag_merge;
 pub mod feature_detection_tags;
