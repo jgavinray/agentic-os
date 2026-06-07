@@ -1,6 +1,5 @@
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use bytes::Bytes;
@@ -8,13 +7,14 @@ use futures::StreamExt;
 use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
-use subtle::ConstantTimeEq;
 
 use crate::anthropic;
+use crate::auth::{authenticate, check_auth, check_rate_limit};
+#[cfg(test)]
+use crate::auth::{provided_api_token, rate_limited_response};
 use crate::db;
 use crate::orchestration_policy;
 use crate::qdrant;
-use crate::rate_limit;
 use crate::state::*;
 use crate::telemetry;
 
@@ -31,67 +31,6 @@ pub(crate) use crate::routes::tools::{
     derive_tool_authorization_policy, tool_authorization_classification_text,
 };
 pub use crate::routes::validations::validations;
-
-// ── Auth helpers ───────────────────────────────────────────────
-
-fn bearer_token(headers: &HeaderMap) -> &str {
-    headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .unwrap_or("")
-}
-
-fn provided_api_token(headers: &HeaderMap) -> &str {
-    let bearer = bearer_token(headers);
-    if !bearer.is_empty() {
-        return bearer;
-    }
-    headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-}
-
-// Returns the (token, namespace) pair if auth passes; None otherwise.
-// Constant-time comparison prevents timing-based key recovery.
-pub(crate) fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
-    let provided = provided_api_token(headers).as_bytes();
-    for (token, namespace) in &state.api_keys {
-        let expected = token.as_bytes();
-        if expected.len() == provided.len() && expected.ct_eq(provided).into() {
-            telemetry::record_auth_attempt(true);
-            return Some((token.clone(), namespace.clone()));
-        }
-    }
-    telemetry::record_auth_attempt(false);
-    None
-}
-
-pub(crate) fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
-    authenticate(state, headers).is_some()
-}
-
-pub(crate) fn check_rate_limit(state: &AppState, token: &str) -> Option<Response> {
-    match state.rate_limiter.check(token) {
-        Ok(()) => None,
-        Err(retry_after) => Some(rate_limited_response(token, retry_after)),
-    }
-}
-
-fn rate_limited_response(token: &str, retry_after: u64) -> Response {
-    let key_hash = rate_limit::key_hash(token);
-    telemetry::record_rate_limited(&key_hash);
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, retry_after.to_string())],
-        axum::Json(serde_json::json!({
-            "error": "rate_limited",
-            "retry_after": retry_after
-        })),
-    )
-        .into_response()
-}
 
 fn maybe_openai_live_policy_response(
     state: &AppState,

@@ -3,7 +3,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
-use crate::handlers::check_auth;
+use crate::auth::check_auth;
 use crate::state::AppState;
 use crate::{db, telemetry};
 

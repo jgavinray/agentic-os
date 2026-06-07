@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::handlers::check_auth;
+use crate::auth::check_auth;
 use crate::qdrant;
 use crate::state::AppState;
 

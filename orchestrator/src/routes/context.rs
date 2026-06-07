@@ -3,8 +3,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
+use crate::auth::check_auth;
 use crate::db;
-use crate::handlers::check_auth;
 use crate::state::AppState;
 
 #[derive(Debug, serde::Deserialize)]

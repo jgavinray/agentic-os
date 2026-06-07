@@ -3,8 +3,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
+use crate::auth::check_auth;
 use crate::db;
-use crate::handlers::{check_auth, spawn_feature_extraction};
+use crate::handlers::spawn_feature_extraction;
 use crate::state::AppState;
 
 #[tracing::instrument(name = "handler.validations", skip(state, headers, req), fields(repo = %req.repo, task = %req.task))]

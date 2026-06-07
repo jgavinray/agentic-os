@@ -4,7 +4,8 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::handlers::{authenticate, spawn_bounded_background, spawn_feature_extraction};
+use crate::auth::authenticate;
+use crate::handlers::{spawn_bounded_background, spawn_feature_extraction};
 use crate::orchestration_policy;
 use crate::state::{AppState, AppendEventRequest};
 use crate::{db, telemetry};
