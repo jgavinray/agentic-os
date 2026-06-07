@@ -115,6 +115,7 @@ pub mod telemetry_execution;
 pub mod telemetry_feature_feedback;
 pub mod telemetry_infrastructure;
 pub mod telemetry_model_services;
+pub mod telemetry_recorder;
 pub mod telemetry_request_classification;
 pub mod telemetry_runtime_metrics;
 pub mod telemetry_setup;
