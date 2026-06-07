@@ -73,6 +73,7 @@ pub mod state;
 pub mod summarizer;
 pub mod system_context;
 pub mod telemetry;
+pub mod telemetry_request_classification;
 pub mod telemetry_runtime_metrics;
 pub mod telemetry_setup;
 pub mod telemetry_streaming;
