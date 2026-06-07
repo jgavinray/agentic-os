@@ -1,5 +1,6 @@
 pub mod adversarial_harness;
 pub mod anthropic;
+pub mod background;
 pub mod client_capture;
 pub mod context_artifacts;
 pub mod context_compiler;

@@ -18,6 +18,7 @@ use crate::rate_limit;
 use crate::state::*;
 use crate::telemetry;
 
+pub use crate::background::trajectory::run_trajectory_idle_sweep;
 pub use crate::routes::context::context_artifacts;
 pub use crate::routes::harness::{harness_guardrail, harness_outcome, litellm_callback_payload};
 pub use crate::routes::health::{health, health_live, health_ready, list_models};
@@ -294,39 +295,6 @@ fn anthropic_text_message(text: &str) -> Value {
             "output_tokens": 0
         }
     })
-}
-
-pub async fn run_trajectory_idle_sweep(state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        if !state.trajectory_capture_enabled {
-            continue;
-        }
-        let ids =
-            match db::idle_trajectory_ids(&state.pool, state.trajectory_idle_timeout_sec, 10_000)
-                .await
-            {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!("trajectory idle sweep failed to list candidates: {e}");
-                    continue;
-                }
-            };
-        for trajectory_id in ids {
-            if let Err(e) = db::emit_trajectory_result_once(
-                &state.pool,
-                &state.embedder,
-                &state.qdrant_url,
-                trajectory_id,
-                Some(crate::trajectory::BoundaryReason::IdleTimeout),
-            )
-            .await
-            {
-                tracing::warn!(trajectory_id = %trajectory_id, "failed to emit idle trajectory result: {e}");
-            }
-        }
-    }
 }
 
 pub(crate) fn spawn_feature_extraction(
