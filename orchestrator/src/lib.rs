@@ -20,6 +20,7 @@ pub mod orchestration_policy;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
+pub mod request_policy;
 pub mod routes;
 pub mod sampling;
 pub mod sentiment;
