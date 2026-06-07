@@ -750,11 +750,11 @@ fn trajectory_capture_is_feature_flagged() {
 /// Verify the model request path does not await a full context rebuild.
 #[test]
 fn pack_context_into_req_uses_async_cache_refresh() {
-    let src = include_str!("handlers.rs");
+    let src = include_str!("handlers_context.rs");
     let pctr_start = src
         .find("async fn pack_context_into_req")
         .expect("pack_context_into_req not found");
-    let body = &src[pctr_start..pctr_start + 1500];
+    let body: String = src[pctr_start..].chars().take(1500).collect();
     assert!(
         body.contains("cached_context_for_request"),
         "pack_context_into_req should use cached/minimal context immediately"

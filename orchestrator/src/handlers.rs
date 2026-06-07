@@ -13,12 +13,14 @@ use crate::auth::{authenticate, check_rate_limit};
 use crate::auth::{provided_api_token, rate_limited_response};
 #[cfg(test)]
 use crate::context_packing::apply_orchestration_context_limits;
-use crate::context_packing::{cached_context_for_request, context_task_category};
+#[cfg(test)]
+use crate::context_packing::context_task_category;
 use crate::db;
 use crate::event_capture::{
-    begin_trajectory_for_request, capture_tool_results_background, maybe_write_context_pack_event,
+    begin_trajectory_for_request, capture_tool_results_background,
     persist_exchange_with_correlation, persist_model_response_event, persist_request_event,
 };
+use crate::handlers_context::{pack_context_into_anthropic_req, pack_context_into_req};
 #[cfg(test)]
 use crate::local_reasoning::LocalReasoningPolicy;
 #[cfg(test)]
@@ -41,6 +43,7 @@ use crate::sse::{
     extract_token_usage_from_sse, optional_token_usage_from_sse,
 };
 use crate::state::*;
+#[cfg(test)]
 use crate::system_context::{inject_system_context, inject_system_context_anthropic};
 use crate::telemetry;
 use crate::token_limits::{
@@ -64,89 +67,6 @@ pub(crate) use crate::routes::tools::{
 pub use crate::routes::validations::validations;
 
 // ── Chat completions ────────────────────────────────────────────
-
-/// Pack orchestrator context into an Anthropic-format request's system field.
-async fn pack_context_into_anthropic_req(
-    state: &AppState,
-    req: &mut Value,
-    session_id: Option<&str>,
-    repo: &str,
-    task: &str,
-    trajectory: Option<crate::trajectory::TrajectoryContext>,
-    parent_event_id: Option<uuid::Uuid>,
-    classification: Option<&crate::request_classification::RequestClassification>,
-    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
-) -> (Option<uuid::Uuid>, Option<String>) {
-    let task_category = context_task_category(task, classification);
-    let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let cached = cached_context_for_request(
-        state,
-        repo,
-        task,
-        session_id,
-        trajectory,
-        &task_config,
-        classification,
-        policy,
-    );
-    let context_pack_id = maybe_write_context_pack_event(
-        state,
-        session_id,
-        repo,
-        task,
-        trajectory,
-        parent_event_id,
-        &cached.stats,
-        task_config.char_budget / 4,
-    );
-    let context_pack_hash = Some(crate::litellm::context_pack_hash(&cached.context));
-    inject_system_context_anthropic(req, &cached.context);
-    (context_pack_id, context_pack_hash)
-}
-
-/// Pack orchestrator context into an OpenAI-shaped request.
-/// Sets a default model if absent, fetches memory events, builds context string,
-/// and injects it as a system message.
-async fn pack_context_into_req(
-    state: &AppState,
-    req: &mut Value,
-    session_id: Option<&str>,
-    repo: &str,
-    task: &str,
-    trajectory: Option<crate::trajectory::TrajectoryContext>,
-    parent_event_id: Option<uuid::Uuid>,
-    classification: Option<&crate::request_classification::RequestClassification>,
-    policy: Option<&crate::orchestration_policy::OrchestrationPolicy>,
-) -> (Option<uuid::Uuid>, Option<String>) {
-    if req.get("model").is_none() {
-        req["model"] = Value::String(state.default_model.clone());
-    }
-    let task_category = context_task_category(task, classification);
-    let task_config = crate::state::TaskContextConfig::for_category(task_category);
-    let cached = cached_context_for_request(
-        state,
-        repo,
-        task,
-        session_id,
-        trajectory,
-        &task_config,
-        classification,
-        policy,
-    );
-    let context_pack_id = maybe_write_context_pack_event(
-        state,
-        session_id,
-        repo,
-        task,
-        trajectory,
-        parent_event_id,
-        &cached.stats,
-        task_config.char_budget / 4,
-    );
-    let context_pack_hash = Some(crate::litellm::context_pack_hash(&cached.context));
-    inject_system_context(req, &cached.context);
-    (context_pack_id, context_pack_hash)
-}
 
 #[tracing::instrument(name = "handler.chat_completions", skip(state, headers, body))]
 pub async fn chat_completions(
