@@ -1,5 +1,5 @@
 use crate::db::AgentEvent;
-use crate::trajectory::{BoundaryReason, EventRole, FinalStatus};
+use crate::trajectory_types::{BoundaryReason, EventRole, FinalStatus};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
