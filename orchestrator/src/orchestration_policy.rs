@@ -26,7 +26,10 @@ pub use crate::orchestration_policy_types::{
 // ---------------------------------------------------------------------------
 
 use crate::orchestration_policy_base::base_policy;
-use crate::request_classification::{RequestClassification, RequestRisk};
+use crate::orchestration_policy_overlays::{
+    apply_prompt_refinement_overlay, apply_risk_overlays, normalize_blocked_capabilities,
+};
+use crate::request_classification::RequestClassification;
 
 /// Derive a deterministic orchestration policy from a request classification.
 ///
@@ -64,107 +67,35 @@ pub fn derive_orchestration_policy(
     // blocked/required capabilities without replacing the intent-derived base.
     let mut risk_policy: Vec<RiskPolicy> = Vec::new();
 
-    if risk.contains(&RequestRisk::ExternalCurrentInfoRequired) {
-        // A current-information request must surface web search as required so
-        // callers can distinguish "web would be nice" from "web is mandatory".
-        if !required.contains(&ToolCapability::WebSearch) {
-            required.push(ToolCapability::WebSearch);
-        }
-        // Keep `required_tools` a subset of `allowed_tools` unless a later
-        // blocked-tools overlay removes the same capability.
-        if !allowed.contains(&ToolCapability::WebSearch) {
-            allowed.push(ToolCapability::WebSearch);
-        }
-        push_unique(&mut risk_policy, RiskPolicy::ExternalWebRequired);
-    }
-
-    if risk.contains(&RequestRisk::HighStakes) {
-        push_unique(&mut risk_policy, RiskPolicy::HighStakesGuardrail);
-        // High-stakes requests keep read/context behavior available but remove
-        // mutation surfaces. The existing live request policy may still refuse
-        // or demand a guardrail before this policy reaches a model.
-        for cap in &[
-            ToolCapability::FileEdit,
-            ToolCapability::ShellMutation,
-            ToolCapability::DockerMutation,
-            ToolCapability::Deploy,
-            ToolCapability::RestartService,
-            ToolCapability::GitWrite,
-        ] {
-            push_unique(&mut blocked, *cap);
-        }
-    }
-
-    if risk.contains(&RequestRisk::DestructiveCommand) {
-        push_unique(
-            &mut risk_policy,
-            RiskPolicy::DestructiveRequiresConfirmation,
-        );
-        for cap in &[
-            ToolCapability::ShellMutation,
-            ToolCapability::DockerMutation,
-            ToolCapability::Deploy,
-            ToolCapability::RestartService,
-        ] {
-            push_unique(&mut blocked, *cap);
-        }
-    }
-
-    if raw_capture_enabled {
-        push_unique(&mut risk_policy, RiskPolicy::RawCaptureEnabled);
-        push_unique(&mut context_sources, ContextSource::RawCaptureFeatures);
-    }
-
-    if risk.contains(&RequestRisk::SecretPresent) {
-        if raw_capture_enabled {
-            push_unique(&mut risk_policy, RiskPolicy::SecretCaptureAllowed);
-        }
-    }
-
-    // `no_scp` is a policy invariant. If future base policies add other scope
-    // modes, this invariant still prevents accidental cross-host file copying
-    // unless a separate explicit policy is introduced.
-    push_unique(&mut scope, ScopePolicy::NoScp);
+    apply_risk_overlays(
+        risk,
+        raw_capture_enabled,
+        &mut allowed,
+        &mut required,
+        &mut blocked,
+        &mut scope,
+        &mut context_sources,
+        &mut risk_policy,
+    );
 
     // --- prompt/spec refinement overlay ---
-    let mut prompt_refinement = PromptRefinementPolicy::None;
     let mut refined_allowed = allowed.clone();
     let mut refined_edit = base.edit;
     let mut refined_git = base.git;
     let mut refined_runtime = base.runtime;
-
-    let lower = request_text.to_ascii_lowercase();
-    let has_prompt_word = contains_any(
-        &lower,
-        &["prompt", "spec", "task", "deliverable", "constraints"],
+    let prompt_refinement = apply_prompt_refinement_overlay(
+        request_text,
+        risk,
+        &mut refined_allowed,
+        &mut refined_edit,
+        &mut refined_git,
+        &mut refined_runtime,
     );
-    let has_feedback_word = contains_any(
-        &lower,
-        &["feedback", "review", "rewrite", "refine", "is this good"],
-    );
-
-    if has_prompt_word && has_feedback_word {
-        prompt_refinement = PromptRefinementPolicy::MultiPassReview;
-        // Prompt/spec review is a review workflow, not an implementation
-        // request. Narrow the model to repository reading and optional web
-        // lookup so the review cannot silently become an edit/tool operation.
-        refined_allowed.clear();
-        refined_allowed.push(ToolCapability::RepoRead);
-        if risk.contains(&RequestRisk::ExternalCurrentInfoRequired) {
-            refined_allowed.push(ToolCapability::WebSearch);
-        }
-        refined_edit = EditPolicy::ReadOnly;
-        refined_git = GitPolicy::NoGitChanges;
-        refined_runtime = RuntimePolicy::NoRestart;
-    }
 
     // Final normalization makes the "blocked wins" invariant explicit. This is
     // deliberately last so any earlier rule may add allowed/required tools
     // without needing to know all possible risk overlays.
-    for blocked_cap in &blocked {
-        refined_allowed.retain(|cap| cap != blocked_cap);
-        required.retain(|cap| cap != blocked_cap);
-    }
+    normalize_blocked_capabilities(&mut refined_allowed, &mut required, &blocked);
 
     OrchestrationPolicy {
         context_sources,
@@ -179,24 +110,6 @@ pub fn derive_orchestration_policy(
         prompt_refinement_policy: prompt_refinement,
         risk_policy,
     }
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-/// Push an item into a vec only if it is not already present.
-///
-/// Used by the risk-overlay logic to prevent `risk_policy` and
-/// `blocked_tools` from accumulating duplicates as more rules are added.
-fn push_unique<T: PartialEq>(vec: &mut Vec<T>, item: T) {
-    if !vec.contains(&item) {
-        vec.push(item);
-    }
-}
-
-fn contains_any(value: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| value.contains(needle))
 }
 
 // ---------------------------------------------------------------------------
