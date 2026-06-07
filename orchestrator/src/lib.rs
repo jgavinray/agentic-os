@@ -87,6 +87,7 @@ pub mod proxy_support;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
+pub mod request_classification_backfill;
 pub mod request_classification_composition;
 #[cfg(test)]
 mod request_classification_contract_tests;
