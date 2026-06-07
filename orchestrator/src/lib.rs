@@ -59,6 +59,7 @@ pub mod harness_feedback_store;
 pub mod harness_feedback_taxonomy;
 pub mod hybrid;
 pub mod litellm;
+pub mod litellm_cache;
 pub mod local_reasoning;
 pub mod logging;
 pub mod migrations;
