@@ -1,6 +1,5 @@
 use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -12,108 +11,12 @@ pub use crate::state_context::{
 pub use crate::state_context_cache::{
     context_cache_key, CacheStats, CachedContext, ContextCache, ContextPackStats,
 };
-
-/// Default max_tokens for proxied completion requests when the client omits it.
-pub const DEFAULT_MAX_TOKENS: u64 = 8192;
-
-/// Maximum max_tokens this backend can safely serve for Claude Code traffic.
-pub const MAX_MAX_TOKENS: u64 = 32768;
-
-/// Default max_tokens used by the internal summarizer — summaries are short.
-pub const SUMMARIZER_MAX_TOKENS: u64 = 384;
-
-pub fn configured_default_max_tokens() -> u64 {
-    std::env::var("DEFAULT_MAX_TOKENS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_MAX_TOKENS)
-        .max(1)
-}
-
-pub fn configured_max_max_tokens() -> u64 {
-    std::env::var("MAX_MAX_TOKENS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(MAX_MAX_TOKENS)
-        .max(1)
-}
-
-/// Default concurrency for best-effort derived background work.
-pub const DEFAULT_BACKGROUND_WORK_CONCURRENCY: usize = 4;
-
-/// Cap source events consumed per summarization promotion pass.
-pub const MAX_SUMMARIZER_EVENTS: i64 = 10;
-
-/// Prompt templates for summary hierarchy promotion:
-/// index 0 => raw events to L1, index 1 => L1 to L2, index 2 => L2 to L3.
-pub const SUMMARY_PROMPTS: [&str; 3] = [
-    "\
-You are a precise technical summarizer. Extract information from conversation messages \
-into these exact sections. Include only what is explicitly stated. \
-Output nothing else — no preamble, no explanation.
-
-DECISIONS:
-(one decision per line, or the word \"none\")
-OPEN_QUESTIONS:
-(one question per line, or the word \"none\")
-FAILED_APPROACHES:
-(one failed approach per line, or the word \"none\")
-KEY_FACTS:
-(one key fact per line, or the word \"none\")
-
-Messages:
-{messages}",
-    "\
-You are consolidating event-level engineering summaries into a session-level summary. \
-Keep recurring decisions, unresolved questions, failed approaches, and facts that would \
-help resume the work later. Output only the consolidated summary.
-
-Event summaries:
-{messages}",
-    "\
-You are producing an executive engineering memory summary from session-level summaries. \
-Keep durable architecture decisions, recurring risks, known failed approaches, and the \
-current project state. Output only concise durable memory.
-
-Session summaries:
-{messages}",
-];
-
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct TokenUsage {
-    pub processed_tokens: u64,
-    pub cached_tokens: u64,
-    pub generated_tokens: u64,
-}
-
-impl TokenUsage {
-    pub fn from_openai_value(value: &Value) -> Self {
-        let usage = &value["usage"];
-        let processed_tokens = usage["prompt_tokens"]
-            .as_u64()
-            .or_else(|| usage["input_tokens"].as_u64())
-            .unwrap_or(0);
-        let generated_tokens = usage["completion_tokens"]
-            .as_u64()
-            .or_else(|| usage["output_tokens"].as_u64())
-            .unwrap_or(0);
-        let cached_tokens = usage["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .or_else(|| usage["input_token_details"]["cache_read"].as_u64())
-            .or_else(|| usage["cache_read_input_tokens"].as_u64())
-            .unwrap_or(0);
-
-        Self {
-            processed_tokens,
-            cached_tokens,
-            generated_tokens,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.processed_tokens == 0 && self.cached_tokens == 0 && self.generated_tokens == 0
-    }
-}
+pub use crate::state_limits::{
+    configured_default_max_tokens, configured_max_max_tokens, DEFAULT_BACKGROUND_WORK_CONCURRENCY,
+    DEFAULT_MAX_TOKENS, MAX_MAX_TOKENS,
+};
+pub use crate::state_summarizer::{MAX_SUMMARIZER_EVENTS, SUMMARIZER_MAX_TOKENS, SUMMARY_PROMPTS};
+pub use crate::state_token_usage::TokenUsage;
 
 /// Shared application state (cloned per request via Arc)
 #[derive(Clone)]
@@ -210,7 +113,7 @@ pub struct AppendEventRequest {
     pub event_type: String,
     pub summary: String,
     pub evidence: Option<String>,
-    pub metadata: Option<Value>,
+    pub metadata: Option<serde_json::Value>,
     pub correlation_id: Option<uuid::Uuid>,
     pub parent_event_id: Option<uuid::Uuid>,
     pub trajectory_id: Option<uuid::Uuid>,
@@ -226,7 +129,7 @@ pub struct HarnessGuardrailRequest {
     pub event_type: Option<String>,
     pub summary: Option<String>,
     pub evidence: Option<String>,
-    pub metadata: Option<Value>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
