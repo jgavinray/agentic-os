@@ -25,6 +25,7 @@ pub mod request_policy;
 pub mod routes;
 pub mod sampling;
 pub mod sentiment;
+pub mod sse;
 pub mod state;
 pub mod summarizer;
 pub mod telemetry;
