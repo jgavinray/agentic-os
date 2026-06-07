@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 pub use crate::telemetry_runtime_metrics::{record_pool_gauges, record_process_metrics};
+pub use crate::telemetry_streaming::StreamTracker;
 
 const HTTP_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
@@ -1560,58 +1561,4 @@ pub fn record_summarizer_written(target_level: i32, success: bool) {
         "result" => result
     )
     .increment(1);
-}
-
-pub struct StreamTracker {
-    path: &'static str,
-    started: Instant,
-    first_token_seen: bool,
-    completed: bool,
-}
-
-impl StreamTracker {
-    pub fn new(path: &'static str, started: Instant) -> Self {
-        Self {
-            path,
-            started,
-            first_token_seen: false,
-            completed: false,
-        }
-    }
-
-    pub fn first_token(&mut self) {
-        if !self.first_token_seen {
-            histogram!("stream_first_token_seconds", "path" => self.path)
-                .record(self.started.elapsed().as_secs_f64());
-            self.first_token_seen = true;
-        }
-    }
-
-    pub fn finish(&mut self) {
-        self.completed = true;
-        histogram!("stream_duration_seconds", "path" => self.path)
-            .record(self.started.elapsed().as_secs_f64());
-    }
-
-    pub fn fail(&mut self, reason: &'static str) {
-        self.completed = true;
-        histogram!("stream_duration_seconds", "path" => self.path)
-            .record(self.started.elapsed().as_secs_f64());
-        counter!("stream_disconnects_total", "path" => self.path, "reason" => reason).increment(1);
-    }
-}
-
-impl Drop for StreamTracker {
-    fn drop(&mut self) {
-        if !self.completed {
-            histogram!("stream_duration_seconds", "path" => self.path)
-                .record(self.started.elapsed().as_secs_f64());
-            counter!(
-                "stream_disconnects_total",
-                "path" => self.path,
-                "reason" => "client_disconnect"
-            )
-            .increment(1);
-        }
-    }
 }
