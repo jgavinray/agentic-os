@@ -1,11 +1,10 @@
 use orchestrator::{
-    app_router, client_capture, db, embedder, handlers, logging, migrations, qdrant, rate_limit,
-    request_classification, sampling, sentiment, startup_backfill, startup_env, state, summarizer,
-    telemetry,
+    app_router, client_capture, db, handlers, logging, migrations, qdrant, rate_limit,
+    request_classification, sampling, startup_backfill, startup_env, startup_runtime, state,
+    summarizer, telemetry,
 };
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
 
 use orchestrator::state::AppState;
 
@@ -95,41 +94,9 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     qdrant::init(&qdrant_url).await?;
 
-    let embedder = Arc::new(
-        embedder::Embedder::load(&embed_model_path)
-            .expect("failed to load embedding model — run setup-models.sh first"),
-    );
-
-    let sentiment_classifier = std::env::var("SENTIMENT_MODEL_PATH").ok().and_then(|path| {
-        let threshold = std::env::var("SENTIMENT_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.70_f32);
-        match sentiment::SentimentClassifier::load(&path, threshold) {
-            Ok(c) => Some(Arc::new(c)),
-            Err(e) => {
-                tracing::warn!(
-                    "sentiment classifier unavailable, negative feedback detection disabled: {e}"
-                );
-                None
-            }
-        }
-    });
-
-    // BUG-6: Explicit HTTP client timeouts. Two clients: one for normal requests
-    // (full timeout budget), one for streaming (no overall timeout since completions
-    // can legitimately run for many minutes).
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .timeout(Duration::from_secs(litellm_request_timeout_secs))
-        .build()?;
-
-    let http_stream = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        // No overall timeout — streaming responses are long-lived.
-        .build()?;
+    let embedder = startup_runtime::load_embedder(&embed_model_path);
+    let sentiment_classifier = startup_runtime::load_sentiment_classifier_from_env();
+    let (http, http_stream) = startup_runtime::build_http_clients(litellm_request_timeout_secs)?;
 
     let metrics = telemetry::MetricsRegistry::new();
     telemetry::prime_metrics(&metrics, &default_model, sentiment_classifier.is_some());
