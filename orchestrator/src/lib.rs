@@ -1,4 +1,5 @@
 pub mod adversarial_harness;
+pub mod adversarial_harness_callbacks;
 pub mod anthropic;
 pub mod auth;
 pub mod background;
