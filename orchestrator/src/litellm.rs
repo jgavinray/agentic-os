@@ -40,6 +40,7 @@ pub struct LiteLlmCallAttempt {
     pub policy_version: Option<String>,
     pub reasoning_policy: Option<String>,
     pub reasoning_policy_source: Option<String>,
+    pub baseline_arm: Option<String>,
     pub cache_policy: CachePolicySnapshot,
     pub context_pack_hash: Option<String>,
     pub started_at: Instant,
@@ -225,9 +226,9 @@ pub async fn insert_litellm_call_ledger_start(
          (attempt_id, request_event_id, trajectory_id, context_pack_id, namespace, repo, task,
           endpoint, requested_model, routed_model, context_pack_hash, cache_backend,
           cache_policy_enabled, cache_bypass_reason, policy_version, selected_route,
-          selection_reason, reasoning_policy, reasoning_policy_source)
+          selection_reason, reasoning_policy, reasoning_policy_source, baseline_arm)
          VALUES
-         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          ON CONFLICT (attempt_id) DO NOTHING",
         &[
             &attempt.attempt_id,
@@ -249,6 +250,7 @@ pub async fn insert_litellm_call_ledger_start(
             &attempt.selection_reason,
             &attempt.reasoning_policy,
             &attempt.reasoning_policy_source,
+            &attempt.baseline_arm,
         ],
     )
     .await?;
@@ -286,9 +288,10 @@ pub async fn update_litellm_call_ledger_terminal(
                  selection_reason = $13,
                  reasoning_policy = $14,
                  reasoning_policy_source = $15,
-                 provider_cached_tokens = $16,
-                 provider_cache_created_tokens = $17,
-                 provider_cache_read_tokens = $18
+                 baseline_arm = $16,
+                 provider_cached_tokens = $17,
+                 provider_cache_created_tokens = $18,
+                 provider_cache_read_tokens = $19
              WHERE attempt_id = $1",
             &[
                 &attempt.attempt_id,
@@ -306,6 +309,7 @@ pub async fn update_litellm_call_ledger_terminal(
                 &attempt.selection_reason,
                 &attempt.reasoning_policy,
                 &attempt.reasoning_policy_source,
+                &attempt.baseline_arm,
                 &counters.provider_cached_tokens,
                 &counters.provider_cache_created_tokens,
                 &counters.provider_cache_read_tokens,
@@ -322,18 +326,19 @@ pub async fn update_litellm_call_ledger_terminal(
           endpoint, requested_model, routed_model, terminal_status, error_kind, error_message,
           first_token_ms, total_latency_ms, context_pack_hash, cache_backend,
           cache_policy_enabled, cache_bypass_reason, policy_version, selected_route,
-          selection_reason, reasoning_policy, reasoning_policy_source,
+          selection_reason, reasoning_policy, reasoning_policy_source, baseline_arm,
           provider_cached_tokens, provider_cache_created_tokens,
           provider_cache_read_tokens)
          VALUES
          ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
          ON CONFLICT (attempt_id) DO UPDATE
          SET terminal_status = EXCLUDED.terminal_status,
              error_kind = EXCLUDED.error_kind,
              error_message = EXCLUDED.error_message,
              first_token_ms = EXCLUDED.first_token_ms,
              total_latency_ms = EXCLUDED.total_latency_ms,
+             baseline_arm = EXCLUDED.baseline_arm,
              provider_cached_tokens = EXCLUDED.provider_cached_tokens,
              provider_cache_created_tokens = EXCLUDED.provider_cache_created_tokens,
              provider_cache_read_tokens = EXCLUDED.provider_cache_read_tokens",
@@ -362,6 +367,7 @@ pub async fn update_litellm_call_ledger_terminal(
             &attempt.selection_reason,
             &attempt.reasoning_policy,
             &attempt.reasoning_policy_source,
+            &attempt.baseline_arm,
             &counters.provider_cached_tokens,
             &counters.provider_cache_created_tokens,
             &counters.provider_cache_read_tokens,
@@ -384,6 +390,7 @@ pub fn new_attempt(
     route: &RouteSelection,
     cache_policy: CachePolicySnapshot,
     context_pack_hash: Option<String>,
+    baseline_arm: Option<String>,
 ) -> LiteLlmCallAttempt {
     LiteLlmCallAttempt {
         attempt_id: Uuid::new_v4(),
@@ -401,6 +408,7 @@ pub fn new_attempt(
         policy_version: Some(route.policy_version.clone()),
         reasoning_policy: None,
         reasoning_policy_source: None,
+        baseline_arm,
         cache_policy,
         context_pack_hash,
         started_at: Instant::now(),
@@ -516,6 +524,7 @@ pub fn add_agentic_os_metadata(req: &mut Value, attempt: &LiteLlmCallAttempt) {
         "policy_version": attempt.policy_version,
         "reasoning_policy": attempt.reasoning_policy,
         "reasoning_policy_source": attempt.reasoning_policy_source,
+        "baseline_arm": attempt.baseline_arm,
         "context_pack_hash": attempt.context_pack_hash,
         "cache_backend": attempt.cache_policy.cache_backend,
         "cache_policy_enabled": attempt.cache_policy.cache_policy_enabled,
@@ -702,6 +711,7 @@ mod tests {
             &route,
             exact_cache_decision("chat_completions", &json!({"temperature": 0}), false),
             Some(context_pack_hash("stable context")),
+            None,
         )
     }
 

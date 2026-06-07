@@ -19,6 +19,8 @@ All endpoints except `/health`, `/health/live`, and `/health/ready` require `Aut
 | `/sessions/start` | POST | Creates an explicit agent session for a repo/task/actor. |
 | `/events/append` | POST | Inserts a memory event in Postgres and best-effort indexes it in Qdrant. |
 | `/harness/guardrail` | POST | Evaluates deterministic harness/runtime guardrail metadata before or around tool execution. |
+| `/harness/outcomes` | POST | Captures append-only accepted-output outcome labels for adversarial harness evals. |
+| `/harness/litellm-callbacks` | POST | Captures raw LiteLLM callback payload JSON and normalizes known ledger fields opportunistically. |
 | `/context/pack` | POST | Builds or returns a cached layered context pack for a repo/task. |
 | `/cache/stats` | GET | Returns in-process context cache stats plus persisted vLLM prefix-cache observations when `VLLM_METRICS_URL` is configured. |
 | `/metrics` | GET | Returns Prometheus text exposition. |

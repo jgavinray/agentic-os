@@ -295,6 +295,11 @@ async fn main() -> Result<(), anyhow::Error> {
         .route("/sessions/start", post(handlers::start_session))
         .route("/events/append", post(handlers::append_event))
         .route("/harness/guardrail", post(handlers::harness_guardrail))
+        .route("/harness/outcomes", post(handlers::harness_outcome))
+        .route(
+            "/harness/litellm-callbacks",
+            post(handlers::litellm_callback_payload),
+        )
         .route("/context/pack", post(handlers::context_pack))
         .route("/context/artifacts", get(handlers::context_artifacts))
         .route("/cache/stats", get(handlers::cache_stats))

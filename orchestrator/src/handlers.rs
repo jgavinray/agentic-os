@@ -1056,6 +1056,77 @@ pub async fn validations(
     .into_response()
 }
 
+#[tracing::instrument(name = "handler.harness_outcome", skip(state, headers, req), fields(trajectory_id = %req.trajectory_id))]
+pub async fn harness_outcome(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<crate::adversarial_harness::HarnessOutcomeRequest>,
+) -> Response {
+    let Some((caller_token, _namespace)) = authenticate(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    };
+    if let Some(response) = check_rate_limit(&state, &caller_token) {
+        return response;
+    }
+
+    match crate::adversarial_harness::record_harness_outcome(&state.pool, &req).await {
+        Ok(outcome_event_id) => axum::Json(crate::adversarial_harness::HarnessOutcomeResponse {
+            captured: true,
+            outcome_event_id,
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "invalid_harness_outcome",
+                "detail": e.to_string()
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[tracing::instrument(name = "handler.litellm_callback_payload", skip(state, headers, req), fields(attempt_id = ?req.attempt_id))]
+pub async fn litellm_callback_payload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<crate::adversarial_harness::LiteLlmCallbackPayloadRequest>,
+) -> Response {
+    let Some((caller_token, _namespace)) = authenticate(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    };
+    if let Some(response) = check_rate_limit(&state, &caller_token) {
+        return response;
+    }
+
+    match crate::adversarial_harness::record_litellm_callback_payload(&state.pool, &req).await {
+        Ok((callback_payload_id, normalized_ledger)) => {
+            axum::Json(crate::adversarial_harness::LiteLlmCallbackPayloadResponse {
+                captured: true,
+                callback_payload_id,
+                normalized_ledger,
+            })
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "invalid_litellm_callback_payload",
+                "detail": e.to_string()
+            })),
+        )
+            .into_response(),
+    }
+}
+
 fn spawn_feature_extraction(
     state: &AppState,
     repo: &str,
@@ -1951,6 +2022,16 @@ fn parse_local_reasoning_policy(value: &str) -> Option<LocalReasoningPolicy> {
         "high" | "deep" => Some(LocalReasoningPolicy::High),
         _ => None,
     }
+}
+
+fn baseline_arm_selection(
+    headers: &HeaderMap,
+) -> Result<crate::adversarial_harness::BaselineArm, String> {
+    crate::adversarial_harness::baseline_arm_from_header(
+        headers
+            .get(crate::adversarial_harness::BASELINE_ARM_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 fn local_reasoning_selection(headers: &HeaderMap, payload: &Value) -> LocalReasoningSelection {
@@ -3125,6 +3206,13 @@ pub async fn chat_completions(
     {
         return response;
     }
+    let baseline_arm = match baseline_arm_selection(&headers) {
+        Ok(arm) => arm,
+        Err(e) => {
+            let body = serde_json::json!({"error": "invalid_baseline_arm", "detail": e});
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+    };
     let reasoning_selection = local_reasoning_selection(&headers, &payload);
     let mut req = payload.clone();
     // Always route to the configured backend model regardless of what the client sent.
@@ -3183,7 +3271,14 @@ pub async fn chat_completions(
     } else {
         None
     };
-    let request_metadata = merge_request_metadata([sampling_metadata, tool_mediation_metadata]);
+    let baseline_metadata = Some(serde_json::json!({
+        "baseline_arm": baseline_arm.as_str(),
+    }));
+    let request_metadata = merge_request_metadata([
+        sampling_metadata,
+        tool_mediation_metadata,
+        baseline_metadata,
+    ]);
     let trajectory = if let Some(session_id) = session_id.as_deref() {
         Some(begin_trajectory_for_request(&state, session_id).await)
     } else {
@@ -3231,6 +3326,7 @@ pub async fn chat_completions(
         &route,
         cache_policy,
         context_pack_hash.clone(),
+        Some(baseline_arm.as_str().to_string()),
     );
     add_local_reasoning_metadata(&mut attempt, reasoning_selection);
     capture.attempt_id = Some(attempt.attempt_id);
@@ -3718,6 +3814,16 @@ pub async fn messages(
     {
         return response;
     }
+    let baseline_arm = match baseline_arm_selection(&headers) {
+        Ok(arm) => arm,
+        Err(e) => {
+            let body = anthropic_error_value(
+                "invalid_request_error",
+                format!("invalid baseline arm: {e}"),
+            );
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+    };
     let reasoning_selection = local_reasoning_selection(&headers, &payload);
     let model = payload
         .get("model")
@@ -3771,7 +3877,10 @@ pub async fn messages(
     } else {
         None
     };
-    let request_metadata = merge_request_metadata([tool_mediation_metadata]);
+    let baseline_metadata = Some(serde_json::json!({
+        "baseline_arm": baseline_arm.as_str(),
+    }));
+    let request_metadata = merge_request_metadata([tool_mediation_metadata, baseline_metadata]);
     let trajectory = if let Some(session_id) = session_id.as_deref() {
         Some(begin_trajectory_for_request(&state, session_id).await)
     } else {
@@ -3819,6 +3928,7 @@ pub async fn messages(
         &route,
         cache_policy,
         context_pack_hash.clone(),
+        Some(baseline_arm.as_str().to_string()),
     );
     add_local_reasoning_metadata(&mut attempt, reasoning_selection);
     capture.attempt_id = Some(attempt.attempt_id);
@@ -3945,6 +4055,7 @@ pub async fn messages(
                 &route,
                 crate::litellm::exact_cache_decision("messages", &req, false),
                 context_pack_hash.clone(),
+                Some(baseline_arm.as_str().to_string()),
             );
             crate::litellm::add_agentic_os_metadata(&mut req, &retry_attempt);
             finalizer =
@@ -4261,6 +4372,7 @@ async fn handle_streaming_anthropic(
                 &route,
                 crate::litellm::exact_cache_decision("messages", &req, false),
                 prior_attempt.context_pack_hash.clone(),
+                prior_attempt.baseline_arm.clone(),
             );
             crate::litellm::add_agentic_os_metadata(&mut req, &retry_attempt);
             finalizer =

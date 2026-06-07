@@ -12,6 +12,13 @@ Every claim about value must be measured against comparable baselines.
 
 ## MVP Decisions
 
+Implemented first slice:
+
+- `POST /harness/outcomes` captures append-only outcome labels.
+- `POST /harness/litellm-callbacks` stores raw LiteLLM callback payloads and normalizes known ledger fields.
+- `x-agent-baseline-arm` propagates bounded baseline-arm labels into request metadata and `litellm_call_ledger`.
+
+
 - Add a minimal outcome writer for accepted-output feedback.
 - Run the raw vLLM baseline through LiteLLM with orchestration disabled so ledger rows remain comparable.
 - Store raw LiteLLM callback payloads as JSONB and normalize known fields opportunistically.

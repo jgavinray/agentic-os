@@ -1,3 +1,4 @@
+pub mod adversarial_harness;
 pub mod anthropic;
 pub mod client_capture;
 pub mod context_artifacts;
