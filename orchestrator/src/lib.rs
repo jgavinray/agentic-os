@@ -10,6 +10,7 @@ pub mod context_packing;
 pub mod context_rendering;
 pub mod context_search;
 pub mod db;
+pub mod db_connection;
 pub mod db_context_artifacts;
 pub mod db_event_rows;
 pub mod db_execution_events;
