@@ -68,6 +68,7 @@ pub mod telemetry_streaming;
 pub mod token_limits;
 pub mod tool_mediation;
 pub mod tool_mediation_classification;
+pub mod tool_mediation_shaping;
 pub mod tool_mediation_types;
 pub mod total_recall;
 pub mod trajectory;
