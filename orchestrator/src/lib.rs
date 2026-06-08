@@ -145,6 +145,7 @@ pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
 pub mod request_classification_backfill;
+pub mod request_classification_backfill_queries;
 pub mod request_classification_bindings;
 pub mod request_classification_composition;
 pub mod request_classification_config;
