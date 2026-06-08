@@ -96,31 +96,63 @@ pub fn sha256_hex(s: &str) -> String {
 }
 
 /// Check whether a string contains obvious unredacted secrets.
-fn contains_unredacted_secrets(s: &str) -> bool {
+fn unredacted_secret_reason(s: &str) -> Option<&'static str> {
     let lower = s.to_lowercase();
     // Bearer tokens
     if lower.contains("bearer ") {
-        return true;
+        return Some("bearer_token");
     }
     // Authorization headers
-    if lower.contains("authorization:") || lower.contains("authorization: ") {
-        return true;
+    if has_unredacted_value(&lower, "authorization") {
+        return Some("authorization_header");
     }
     // Cookies
-    if lower.contains("cookie:") || lower.contains("cookie: ") || lower.contains("set-cookie") {
-        return true;
+    if has_unredacted_value(&lower, "cookie") || has_unredacted_value(&lower, "set-cookie") {
+        return Some("cookie_header");
     }
     // password=
-    if lower.contains("password=") {
-        return true;
+    if has_unredacted_value(&lower, "password") {
+        return Some("password_assignment");
     }
     // api_key=
-    if lower.contains("api_key=") {
-        return true;
+    if has_unredacted_value(&lower, "api_key") || has_unredacted_value(&lower, "api-key") {
+        return Some("api_key_assignment");
     }
     // sk- style keys (OpenAI, Anthropic, etc.)
-    if lower.contains("sk-") {
-        return true;
+    if has_sk_secret_prefix(&lower) {
+        return Some("sk_prefix");
+    }
+    None
+}
+
+fn has_unredacted_value(lower: &str, key: &str) -> bool {
+    for separator in [":", "="] {
+        let pattern = format!("{key}{separator}");
+        let mut search_start = 0usize;
+        while let Some(relative_idx) = lower[search_start..].find(&pattern) {
+            let value_start = search_start + relative_idx + pattern.len();
+            let value = lower[value_start..].trim_start();
+            if !value.starts_with("<redacted>") {
+                return true;
+            }
+            search_start = value_start;
+        }
+    }
+    false
+}
+
+fn has_sk_secret_prefix(lower: &str) -> bool {
+    let mut search_start = 0usize;
+    while let Some(relative_idx) = lower[search_start..].find("sk-") {
+        let value_start = search_start + relative_idx + 3;
+        let suffix_len = lower[value_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .count();
+        if suffix_len >= 6 {
+            return true;
+        }
+        search_start = value_start;
     }
     false
 }
@@ -162,8 +194,8 @@ impl PromptInterventionRecord {
             anyhow::bail!("evidence_hash mismatch: expected sha256(evidence_excerpt)");
         }
         // Reject obvious unredacted secrets in evidence_excerpt.
-        if contains_unredacted_secrets(&self.evidence_excerpt) {
-            anyhow::bail!("evidence_excerpt contains unredacted secrets");
+        if let Some(reason) = unredacted_secret_reason(&self.evidence_excerpt) {
+            anyhow::bail!("evidence_excerpt contains unredacted secrets: {reason}");
         }
         // signal_family must match intervention_type primary_signal_family.
         // For Other: allow any non-NoSignal family only when evidence_excerpt is non-empty;
@@ -653,11 +685,38 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_allows_redacted_secret_assignments() {
+        let mut r = sample_record();
+        r.evidence_excerpt =
+            "password=<redacted> api_key=<redacted> authorization:<redacted>".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_allows_redacted_cookie_headers() {
+        let mut r = sample_record();
+        r.evidence_excerpt = "cookie:<redacted> set-cookie:<redacted>".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
     fn test_validate_rejects_sk_key() {
         let mut r = sample_record();
         r.evidence_excerpt = "key is sk-proj-abc123def456".to_string();
         r.evidence_hash = sha256_hex(&r.evidence_excerpt);
         assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn test_unredacted_secret_reason_is_bounded() {
+        assert_eq!(
+            unredacted_secret_reason("key is sk-proj-abc123def456"),
+            Some("sk_prefix")
+        );
+        assert_eq!(unredacted_secret_reason("prefixes such as sk-"), None);
+        assert_eq!(unredacted_secret_reason("api_key=<redacted>"), None);
     }
 
     #[test]
@@ -770,21 +829,36 @@ mod tests {
         assert_eq!(r.supersedes_record_id, Some(original_id));
     }
 
-    // ── contains_unredacted_secrets edge cases ─────────────────
+    // ── unredacted_secret_reason edge cases ───────────────────
 
     #[test]
-    fn test_contains_unredacted_secrets_case_insensitive() {
-        assert!(contains_unredacted_secrets("BEARER token123"));
-        assert!(contains_unredacted_secrets("Authorization: xyz"));
-        assert!(contains_unredacted_secrets("PASSWORD=secret"));
-        assert!(contains_unredacted_secrets("API_KEY=key123"));
-        assert!(contains_unredacted_secrets("sk-test-abc"));
+    fn test_unredacted_secret_reason_case_insensitive() {
+        assert_eq!(
+            unredacted_secret_reason("BEARER token123"),
+            Some("bearer_token")
+        );
+        assert_eq!(
+            unredacted_secret_reason("Authorization: xyz"),
+            Some("authorization_header")
+        );
+        assert_eq!(
+            unredacted_secret_reason("PASSWORD=secret"),
+            Some("password_assignment")
+        );
+        assert_eq!(
+            unredacted_secret_reason("API_KEY=key123"),
+            Some("api_key_assignment")
+        );
+        assert_eq!(unredacted_secret_reason("sk-test-abc"), Some("sk_prefix"));
     }
 
     #[test]
-    fn test_contains_unredacted_secrets_clean() {
-        assert!(!contains_unredacted_secrets("prompt asked to narrow scope"));
-        assert!(!contains_unredacted_secrets("fix the build error"));
-        assert!(!contains_unredacted_secrets("add tests for the API"));
+    fn test_unredacted_secret_reason_clean() {
+        assert_eq!(
+            unredacted_secret_reason("prompt asked to narrow scope"),
+            None
+        );
+        assert_eq!(unredacted_secret_reason("fix the build error"), None);
+        assert_eq!(unredacted_secret_reason("add tests for the API"), None);
     }
 }

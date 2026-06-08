@@ -77,11 +77,17 @@ pub fn redact_evidence(text: &str) -> String {
     redacted = authorization_re()
         .replace_all(&redacted, REDACTED_PLACEHOLDER)
         .to_string();
+    redacted = quoted_secret_header_re()
+        .replace_all(&redacted, format!("$1{}", REDACTED_PLACEHOLDER).as_str())
+        .to_string();
     redacted = bearer_re()
         .replace_all(&redacted, REDACTED_PLACEHOLDER)
         .to_string();
     redacted = cookie_re()
         .replace_all(&redacted, REDACTED_PLACEHOLDER)
+        .to_string();
+    redacted = compound_secret_assignment_re()
+        .replace_all(&redacted, format!("$1={}", REDACTED_PLACEHOLDER).as_str())
         .to_string();
     redacted = assignment_secret_re()
         .replace_all(&redacted, format!("$1={}", REDACTED_PLACEHOLDER).as_str())
@@ -174,7 +180,7 @@ fn authorization_re() -> &'static Regex {
 
 fn bearer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\bbearer\s+\S+").expect("valid bearer regex"))
+    RE.get_or_init(|| Regex::new(r#"(?i)\bbearer\s+[^\s"',}\]\r\n]+"#).expect("valid bearer regex"))
 }
 
 fn cookie_re() -> &'static Regex {
@@ -192,9 +198,27 @@ fn assignment_secret_re() -> &'static Regex {
     })
 }
 
+fn compound_secret_assignment_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b([a-z0-9_]*(?:api[_-]?key|auth[_-]?token|access[_-]?token|secret|password|token))\s*[:=]\s*[^\s,;]+",
+        )
+        .expect("valid compound secret assignment regex")
+    })
+}
+
+fn quoted_secret_header_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)(["']?(?:authorization|cookie|set-cookie|api[_-]?key|x-api-key|[a-z0-9_]*(?:auth[_-]?token|access[_-]?token|secret|password|token))["']?\s*:\s*["']?)[^"',}\]\r\n]+"#)
+            .expect("valid quoted secret header regex")
+    })
+}
+
 fn sk_key_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\bsk-[a-zA-Z0-9_-]{6,}\b").expect("valid sk key regex"))
+    RE.get_or_init(|| Regex::new(r"sk-[a-zA-Z0-9_-]{6,}").expect("valid sk key regex"))
 }
 
 fn replace_large_tool_result_blocks(text: &str) -> String {
@@ -343,6 +367,35 @@ mod tests {
         assert!(!redacted.contains("hunter2"));
         assert!(!redacted.contains("sk-prod-123456"));
         assert!(redacted.contains(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn redacts_compound_secret_assignments() {
+        let redacted = redact_evidence(
+            "ANTHROPIC_AUTH_TOKEN=sk-agent-clean-002 OPENAI_API_KEY:sk-openai-123456 SERVICE_SECRET=value DB_PASSWORD:hunter2",
+        );
+
+        assert!(!redacted.contains("sk-agent-clean-002"));
+        assert!(!redacted.contains("sk-openai-123456"));
+        assert!(!redacted.contains("value"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("sk-"));
+        assert!(redacted.contains(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn redacts_quoted_json_secret_headers() {
+        let redacted = redact_evidence(
+            r#"{"Authorization":"Bearer secret-token","x-api-key":"sk-test-123456","Cookie":"session=abc","auth_token":"sk-agent-clean-002","password":"hunter2","safe":"keep"}"#,
+        );
+
+        assert!(!redacted.contains("Bearer secret-token"));
+        assert!(!redacted.contains("sk-test-123456"));
+        assert!(!redacted.contains("sk-agent-clean-002"));
+        assert!(!redacted.contains("session=abc"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(redacted.matches(REDACTED_PLACEHOLDER).count() >= 5);
+        assert!(redacted.contains(r#""safe":"keep""#));
     }
 
     #[test]
