@@ -1,7 +1,7 @@
 use orchestrator::{
-    app_router, client_capture, db, handlers, logging, migrations, qdrant, rate_limit,
-    request_classification, sampling, startup_backfill, startup_config, startup_runtime, state,
-    summarizer, telemetry,
+    app_router, client_capture, db, handlers, logging, migrations, prompt_intervention_records,
+    qdrant, rate_limit, request_classification, sampling, startup_backfill, startup_config,
+    startup_runtime, state, summarizer, telemetry,
 };
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let capture_pool = if let Some(url) = config.capture_db_url.as_deref() {
         let pool = db::create_pool(url)?;
         client_capture::init(&pool).await?;
+        prompt_intervention_records::init(&pool).await?;
         Some(pool)
     } else {
         None
