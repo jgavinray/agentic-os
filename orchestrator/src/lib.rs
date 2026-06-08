@@ -92,6 +92,8 @@ pub mod feature_extraction_store;
 pub mod feature_extraction_tags;
 pub mod feature_extraction_types;
 pub mod feature_metadata_paths;
+pub mod feature_metadata_summarizer;
+pub mod feature_metadata_trajectory;
 pub mod handlers;
 pub mod handlers_anthropic_completion;
 pub mod handlers_anthropic_dispatch;

@@ -4,6 +4,12 @@ use crate::db::AgentEvent;
 pub(crate) use crate::feature_metadata_paths::{
     array_path_has_values, bool_path, bool_path_value, i64_path, string_path,
 };
+pub(crate) use crate::feature_metadata_summarizer::{
+    summarizer_has_dedicated_upstream, summarizer_shares_litellm_upstream,
+};
+pub(crate) use crate::feature_metadata_trajectory::{
+    trajectory_abandoned_before_model, trajectory_single_model_abandoned_no_tools,
+};
 
 pub const CONTEXT_PACK_EMPTY_TOKEN_THRESHOLD: i64 = 50;
 pub const HIGH_INPUT_TOKEN_THRESHOLD: i64 = 100_000;
@@ -123,68 +129,4 @@ pub(crate) fn event_latency_ms_from_metadata(metadata: &Value) -> Option<i64> {
                 .or_else(|| i64_path(metadata, &["payload", "latency_seconds"]))
                 .map(|seconds| seconds.saturating_mul(1000))
         })
-}
-
-pub(crate) fn trajectory_abandoned_before_model(metadata: &Value) -> bool {
-    trajectory_status(metadata) == Some("abandoned")
-        && event_model_calls_from_metadata(metadata) == Some(0)
-}
-
-pub(crate) fn trajectory_single_model_abandoned_no_tools(metadata: &Value) -> bool {
-    trajectory_status(metadata) == Some("abandoned")
-        && event_model_calls_from_metadata(metadata) == Some(1)
-        && i64_path(metadata, &["total_tool_calls"])
-            .or_else(|| i64_path(metadata, &["payload", "total_tool_calls"]))
-            .unwrap_or(0)
-            == 0
-        && i64_path(metadata, &["total_validations"])
-            .or_else(|| i64_path(metadata, &["payload", "total_validations"]))
-            .unwrap_or(0)
-            == 0
-}
-
-fn trajectory_status(metadata: &Value) -> Option<&str> {
-    string_path(metadata, &["final_status"])
-        .or_else(|| string_path(metadata, &["payload", "final_status"]))
-}
-
-fn event_model_calls_from_metadata(metadata: &Value) -> Option<i64> {
-    i64_path(metadata, &["total_model_calls"])
-        .or_else(|| i64_path(metadata, &["payload", "total_model_calls"]))
-}
-
-pub(crate) fn summarizer_shares_litellm_upstream(metadata: &Value) -> bool {
-    let Some(summarizer_url) = string_path(metadata, &["summarizer_base_url"])
-        .or_else(|| string_path(metadata, &["payload", "summarizer_base_url"]))
-    else {
-        return false;
-    };
-    let Some(litellm_url) = string_path(metadata, &["litellm_url"])
-        .or_else(|| string_path(metadata, &["payload", "litellm_url"]))
-        .or_else(|| string_path(metadata, &["upstream_litellm_url"]))
-        .or_else(|| string_path(metadata, &["payload", "upstream_litellm_url"]))
-    else {
-        return false;
-    };
-    normalize_url_for_compare(summarizer_url) == normalize_url_for_compare(litellm_url)
-}
-
-pub(crate) fn summarizer_has_dedicated_upstream(metadata: &Value) -> bool {
-    let Some(summarizer_url) = string_path(metadata, &["summarizer_base_url"])
-        .or_else(|| string_path(metadata, &["payload", "summarizer_base_url"]))
-    else {
-        return false;
-    };
-    let Some(litellm_url) = string_path(metadata, &["litellm_url"])
-        .or_else(|| string_path(metadata, &["payload", "litellm_url"]))
-        .or_else(|| string_path(metadata, &["upstream_litellm_url"]))
-        .or_else(|| string_path(metadata, &["payload", "upstream_litellm_url"]))
-    else {
-        return false;
-    };
-    normalize_url_for_compare(summarizer_url) != normalize_url_for_compare(litellm_url)
-}
-
-fn normalize_url_for_compare(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_ascii_lowercase()
 }
