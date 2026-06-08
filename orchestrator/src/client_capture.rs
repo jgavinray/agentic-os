@@ -84,8 +84,10 @@ pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
         Ok(()) => match crate::prompt_intervention_assembly::records_from_capture(&capture) {
             Ok(records) => {
                 for record in records {
-                    crate::prompt_intervention_records::insert_best_effort(Some(pool), record)
-                        .await;
+                    crate::prompt_intervention_records::spawn_insert_best_effort(
+                        Some(pool),
+                        record,
+                    );
                 }
             }
             Err(e) => {

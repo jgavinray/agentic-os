@@ -469,6 +469,20 @@ pub async fn insert_best_effort(pool: Option<&Pool>, record: PromptInterventionR
     }
 }
 
+/// Schedule a runtime prompt-intervention insert without blocking the caller.
+pub fn spawn_insert_best_effort(pool: Option<&Pool>, record: PromptInterventionRecord) {
+    let Some(pool) = pool else {
+        crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+            "no_pool",
+        );
+        return;
+    };
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        insert_best_effort(Some(&pool), record).await;
+    });
+}
+
 // ── Backfill Summary table init & insert ────────────────────────
 
 /// Initialize the prompt_intervention_backfill_summaries table.
@@ -916,6 +930,11 @@ mod tests {
         r.supersedes_record_id = Some(original_id);
         assert!(r.validate().is_ok());
         assert_eq!(r.supersedes_record_id, Some(original_id));
+    }
+
+    #[test]
+    fn test_spawn_insert_best_effort_without_pool_is_non_failing() {
+        spawn_insert_best_effort(None, sample_record());
     }
 
     // ── unredacted_secret_reason edge cases ───────────────────
