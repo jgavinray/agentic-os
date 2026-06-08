@@ -99,7 +99,7 @@ pub fn sha256_hex(s: &str) -> String {
 fn unredacted_secret_reason(s: &str) -> Option<&'static str> {
     let lower = s.to_lowercase();
     // Bearer tokens
-    if lower.contains("bearer ") {
+    if has_unredacted_bearer_token(&lower) {
         return Some("bearer_token");
     }
     // Authorization headers
@@ -132,13 +132,72 @@ fn has_unredacted_value(lower: &str, key: &str) -> bool {
         while let Some(relative_idx) = lower[search_start..].find(&pattern) {
             let value_start = search_start + relative_idx + pattern.len();
             let value = lower[value_start..].trim_start();
-            if !value.starts_with("<redacted>") {
+            if secret_value_requires_rejection(value) {
                 return true;
             }
             search_start = value_start;
         }
     }
     false
+}
+
+fn has_unredacted_bearer_token(lower: &str) -> bool {
+    let mut search_start = 0usize;
+    while let Some(relative_idx) = lower[search_start..].find("bearer ") {
+        let value_start = search_start + relative_idx + "bearer ".len();
+        let value = lower[value_start..].trim_start();
+        if secret_value_requires_rejection(value) {
+            return true;
+        }
+        search_start = value_start;
+    }
+    false
+}
+
+fn secret_value_requires_rejection(value: &str) -> bool {
+    let mut value = value.trim_start_matches(['"', '\'']);
+    if let Some(stripped) = value.strip_prefix("bearer ") {
+        value = stripped.trim_start();
+    }
+    if value.is_empty() || value.starts_with("<redacted>") || is_placeholder_value(value) {
+        return false;
+    }
+    let token = value
+        .chars()
+        .take_while(|ch| {
+            ch.is_ascii_alphanumeric()
+                || *ch == '_'
+                || *ch == '-'
+                || *ch == '.'
+                || *ch == '/'
+                || *ch == '+'
+                || *ch == '='
+        })
+        .collect::<String>();
+    if token.is_empty() || is_common_placeholder_word(&token) {
+        return false;
+    }
+    token.len() >= 6
+}
+
+fn is_placeholder_value(value: &str) -> bool {
+    value.starts_with('<') || value.starts_with("${") || value.starts_with('[')
+}
+
+fn is_common_placeholder_word(token: &str) -> bool {
+    matches!(
+        token,
+        "token"
+            | "password"
+            | "secret"
+            | "example"
+            | "changeme"
+            | "your-password"
+            | "your-token"
+            | "your-secret"
+            | "xxx"
+            | "xxxx"
+    )
 }
 
 fn has_sk_secret_prefix(lower: &str) -> bool {
@@ -653,9 +712,30 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_allows_bearer_placeholder_examples() {
+        let mut r = sample_record();
+        r.evidence_excerpt = "Set Authorization: bearer <token> in your headers".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_ok());
+
+        r.evidence_excerpt = "Use bearer token as a literal placeholder".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_value_like_bearer_token() {
+        let mut r = sample_record();
+        r.evidence_excerpt =
+            "Authorization: bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
     fn test_validate_rejects_authorization_header() {
         let mut r = sample_record();
-        r.evidence_excerpt = "Authorization: Bearer xyz".to_string();
+        r.evidence_excerpt = "Authorization: Bearer token123".to_string();
         r.evidence_hash = sha256_hex(&r.evidence_excerpt);
         assert!(r.validate().is_err());
     }
@@ -689,6 +769,15 @@ mod tests {
         let mut r = sample_record();
         r.evidence_excerpt =
             "password=<redacted> api_key=<redacted> authorization:<redacted>".to_string();
+        r.evidence_hash = sha256_hex(&r.evidence_excerpt);
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_allows_password_placeholders() {
+        let mut r = sample_record();
+        r.evidence_excerpt =
+            "password: <your-password> password=${DB_PASSWORD} password: changeme".to_string();
         r.evidence_hash = sha256_hex(&r.evidence_excerpt);
         assert!(r.validate().is_ok());
     }
@@ -837,12 +926,11 @@ mod tests {
             unredacted_secret_reason("BEARER token123"),
             Some("bearer_token")
         );
+        assert_eq!(unredacted_secret_reason("BEARER token"), None);
+        assert_eq!(unredacted_secret_reason("Authorization: xyz"), None);
+        assert_eq!(unredacted_secret_reason("PASSWORD=secret"), None);
         assert_eq!(
-            unredacted_secret_reason("Authorization: xyz"),
-            Some("authorization_header")
-        );
-        assert_eq!(
-            unredacted_secret_reason("PASSWORD=secret"),
+            unredacted_secret_reason("PASSWORD=supersecret123"),
             Some("password_assignment")
         );
         assert_eq!(
