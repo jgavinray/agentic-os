@@ -38,6 +38,7 @@ pub mod db_context_search;
 pub mod db_error_index;
 pub mod db_event_rows;
 pub mod db_execution_events;
+pub mod db_failure_remediation;
 pub mod db_failures;
 pub mod db_sessions;
 pub mod db_trajectory;
