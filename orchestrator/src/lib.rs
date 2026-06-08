@@ -66,6 +66,7 @@ pub mod execution_feedback_reports;
 pub mod execution_feedback_signature_payloads;
 pub mod execution_feedback_summaries;
 pub mod execution_feedback_test_payloads;
+pub mod execution_feedback_tool_result;
 pub mod execution_feedback_validation_payloads;
 pub mod execution_feedback_validation_result_payloads;
 pub mod execution_feedback_validators;

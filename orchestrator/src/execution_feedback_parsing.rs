@@ -3,15 +3,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::OnceLock;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CapturedToolResult {
-    pub tool_name: String,
-    pub content: String,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub stdout_summary: String,
-    pub stderr_summary: String,
-}
+pub use crate::execution_feedback_tool_result::CapturedToolResult;
 
 fn regex_cell(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("execution feedback regex must compile"))
