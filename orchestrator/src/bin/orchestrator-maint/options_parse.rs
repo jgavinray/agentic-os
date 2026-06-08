@@ -1,235 +1,96 @@
+use super::parse_common::{
+    parse_dry_run_batch_options, parse_report_options, parse_scoped_backfill_options,
+    ScopedBackfillFlags,
+};
 use super::types::{
     BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions, RequestClassificationOptions,
     RequestClassificationReportOptions,
 };
-use uuid::Uuid;
-
-const DEFAULT_BATCH_SIZE: i64 = 500;
-
-fn option_value(
-    args: &[String],
-    idx: usize,
-    message: &'static str,
-) -> Result<String, anyhow::Error> {
-    let Some(value) = args.get(idx + 1) else {
-        anyhow::bail!(message);
-    };
-    Ok(value.clone())
-}
-
-fn parse_since(
-    args: &[String],
-    idx: usize,
-) -> Result<chrono::DateTime<chrono::Utc>, anyhow::Error> {
-    let value = option_value(args, idx, "--since requires an RFC3339 timestamp")?;
-    Ok(chrono::DateTime::parse_from_rfc3339(&value)?.with_timezone(&chrono::Utc))
-}
-
-fn parse_positive_batch_size(args: &[String], idx: usize) -> Result<i64, anyhow::Error> {
-    let value = option_value(args, idx, "--batch-size requires a positive integer")?;
-    let batch_size = value.parse::<i64>()?;
-    if batch_size <= 0 {
-        anyhow::bail!("--batch-size must be positive");
-    }
-    Ok(batch_size)
-}
 
 impl HarnessFeedbackOptions {
     pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
-        let mut repo = None;
-        let mut session_id = None;
-        let mut since = None;
-        let mut dry_run = false;
-        let mut batch_size = DEFAULT_BATCH_SIZE;
-        let mut idx = 0usize;
-        while idx < args.len() {
-            match args[idx].as_str() {
-                "--repo" | "–repo" => {
-                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
-                    idx += 2;
-                }
-                "--session" | "–session" => {
-                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
-                    idx += 2;
-                }
-                "--since" | "–since" => {
-                    since = Some(parse_since(&args, idx)?);
-                    idx += 2;
-                }
-                "--dry-run" | "–dry-run" => {
-                    dry_run = true;
-                    idx += 1;
-                }
-                "--batch-size" | "–batch-size" => {
-                    batch_size = parse_positive_batch_size(&args, idx)?;
-                    idx += 2;
-                }
-                other => anyhow::bail!("unknown option: {other}"),
-            }
-        }
+        let parsed = parse_scoped_backfill_options(
+            args,
+            ScopedBackfillFlags {
+                allow_trajectory: false,
+                allow_repair: false,
+                allow_skip_bootstrap_tagging: false,
+            },
+        )?;
 
         Ok(Self {
-            repo,
-            session_id,
-            since,
-            dry_run,
-            batch_size,
+            repo: parsed.repo,
+            session_id: parsed.session_id,
+            since: parsed.since,
+            dry_run: parsed.dry_run,
+            batch_size: parsed.batch_size,
         })
     }
 }
 
 impl RequestClassificationOptions {
     pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
-        let mut repo = None;
-        let mut session_id = None;
-        let mut since = None;
-        let mut dry_run = false;
-        let mut repair = false;
-        let mut batch_size = DEFAULT_BATCH_SIZE;
-        let mut idx = 0usize;
-        while idx < args.len() {
-            match args[idx].as_str() {
-                "--repo" | "–repo" => {
-                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
-                    idx += 2;
-                }
-                "--session" | "–session" => {
-                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
-                    idx += 2;
-                }
-                "--since" | "–since" => {
-                    since = Some(parse_since(&args, idx)?);
-                    idx += 2;
-                }
-                "--dry-run" | "–dry-run" => {
-                    dry_run = true;
-                    idx += 1;
-                }
-                "--repair" | "–repair" => {
-                    repair = true;
-                    idx += 1;
-                }
-                "--batch-size" | "–batch-size" => {
-                    batch_size = parse_positive_batch_size(&args, idx)?;
-                    idx += 2;
-                }
-                other => anyhow::bail!("unknown option: {other}"),
-            }
-        }
+        let parsed = parse_scoped_backfill_options(
+            args,
+            ScopedBackfillFlags {
+                allow_trajectory: false,
+                allow_repair: true,
+                allow_skip_bootstrap_tagging: false,
+            },
+        )?;
 
         Ok(Self {
-            repo,
-            session_id,
-            since,
-            dry_run,
-            repair,
-            batch_size,
+            repo: parsed.repo,
+            session_id: parsed.session_id,
+            since: parsed.since,
+            dry_run: parsed.dry_run,
+            repair: parsed.repair,
+            batch_size: parsed.batch_size,
         })
     }
 }
 
 impl RequestClassificationReportOptions {
     pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
-        let mut repo = None;
-        let mut since = None;
-        let mut idx = 0usize;
-        while idx < args.len() {
-            match args[idx].as_str() {
-                "--repo" | "–repo" => {
-                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
-                    idx += 2;
-                }
-                "--since" | "–since" => {
-                    since = Some(parse_since(&args, idx)?);
-                    idx += 2;
-                }
-                other => anyhow::bail!("unknown option: {other}"),
-            }
-        }
+        let parsed = parse_report_options(args)?;
 
-        Ok(Self { repo, since })
+        Ok(Self {
+            repo: parsed.repo,
+            since: parsed.since,
+        })
     }
 }
 
 impl ExtractFeaturesOptions {
     pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
-        let mut repo = None;
-        let mut session_id = None;
-        let mut trajectory_id = None;
-        let mut since = None;
-        let mut dry_run = false;
-        let mut batch_size = DEFAULT_BATCH_SIZE;
-        let mut skip_bootstrap_tagging = false;
-        let mut idx = 0usize;
-        while idx < args.len() {
-            match args[idx].as_str() {
-                "--repo" | "–repo" => {
-                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
-                    idx += 2;
-                }
-                "--session" | "–session" => {
-                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
-                    idx += 2;
-                }
-                "--trajectory" | "–trajectory" => {
-                    let value = option_value(&args, idx, "--trajectory requires a UUID")?;
-                    trajectory_id = Some(value.parse::<Uuid>()?);
-                    idx += 2;
-                }
-                "--since" | "–since" => {
-                    since = Some(parse_since(&args, idx)?);
-                    idx += 2;
-                }
-                "--dry-run" | "–dry-run" => {
-                    dry_run = true;
-                    idx += 1;
-                }
-                "--batch-size" | "–batch-size" => {
-                    batch_size = parse_positive_batch_size(&args, idx)?;
-                    idx += 2;
-                }
-                "--skip-bootstrap-tagging" | "–skip-bootstrap-tagging" => {
-                    skip_bootstrap_tagging = true;
-                    idx += 1;
-                }
-                other => anyhow::bail!("unknown option: {other}"),
-            }
-        }
+        let parsed = parse_scoped_backfill_options(
+            args,
+            ScopedBackfillFlags {
+                allow_trajectory: true,
+                allow_repair: false,
+                allow_skip_bootstrap_tagging: true,
+            },
+        )?;
 
         Ok(Self {
-            repo,
-            session_id,
-            trajectory_id,
-            since,
-            dry_run,
-            batch_size,
-            skip_bootstrap_tagging,
+            repo: parsed.repo,
+            session_id: parsed.session_id,
+            trajectory_id: parsed.trajectory_id,
+            since: parsed.since,
+            dry_run: parsed.dry_run,
+            batch_size: parsed.batch_size,
+            skip_bootstrap_tagging: parsed.skip_bootstrap_tagging,
         })
     }
 }
 
 impl BackfillOptions {
     pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
-        let mut dry_run = false;
-        let mut batch_size = DEFAULT_BATCH_SIZE;
-        let mut idx = 0usize;
-        while idx < args.len() {
-            match args[idx].as_str() {
-                "--dry-run" | "–dry-run" => {
-                    dry_run = true;
-                    idx += 1;
-                }
-                "--batch-size" | "–batch-size" => {
-                    batch_size = parse_positive_batch_size(&args, idx)?;
-                    idx += 2;
-                }
-                other => anyhow::bail!("unknown option: {other}"),
-            }
-        }
+        let parsed = parse_dry_run_batch_options(args)?;
 
         Ok(Self {
-            dry_run,
-            batch_size,
+            dry_run: parsed.dry_run,
+            batch_size: parsed.batch_size,
         })
     }
 }
