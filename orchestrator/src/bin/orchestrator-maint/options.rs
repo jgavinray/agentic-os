@@ -39,6 +39,34 @@ pub(super) struct RequestClassificationReportOptions {
     pub(super) since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+fn option_value(
+    args: &[String],
+    idx: usize,
+    message: &'static str,
+) -> Result<String, anyhow::Error> {
+    let Some(value) = args.get(idx + 1) else {
+        anyhow::bail!(message);
+    };
+    Ok(value.clone())
+}
+
+fn parse_since(
+    args: &[String],
+    idx: usize,
+) -> Result<chrono::DateTime<chrono::Utc>, anyhow::Error> {
+    let value = option_value(args, idx, "--since requires an RFC3339 timestamp")?;
+    Ok(chrono::DateTime::parse_from_rfc3339(&value)?.with_timezone(&chrono::Utc))
+}
+
+fn parse_positive_batch_size(args: &[String], idx: usize) -> Result<i64, anyhow::Error> {
+    let value = option_value(args, idx, "--batch-size requires a positive integer")?;
+    let batch_size = value.parse::<i64>()?;
+    if batch_size <= 0 {
+        anyhow::bail!("--batch-size must be positive");
+    }
+    Ok(batch_size)
+}
+
 impl HarnessFeedbackOptions {
     pub(super) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
         let mut repo = None;
@@ -50,26 +78,15 @@ impl HarnessFeedbackOptions {
         while idx < args.len() {
             match args[idx].as_str() {
                 "--repo" | "–repo" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--repo requires a value");
-                    };
-                    repo = Some(value.clone());
+                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
                     idx += 2;
                 }
                 "--session" | "–session" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--session requires a value");
-                    };
-                    session_id = Some(value.clone());
+                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
                     idx += 2;
                 }
                 "--since" | "–since" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--since requires an RFC3339 timestamp");
-                    };
-                    since = Some(
-                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
-                    );
+                    since = Some(parse_since(&args, idx)?);
                     idx += 2;
                 }
                 "--dry-run" | "–dry-run" => {
@@ -77,13 +94,7 @@ impl HarnessFeedbackOptions {
                     idx += 1;
                 }
                 "--batch-size" | "–batch-size" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--batch-size requires a positive integer");
-                    };
-                    batch_size = value.parse::<i64>()?;
-                    if batch_size <= 0 {
-                        anyhow::bail!("--batch-size must be positive");
-                    }
+                    batch_size = parse_positive_batch_size(&args, idx)?;
                     idx += 2;
                 }
                 other => anyhow::bail!("unknown option: {other}"),
@@ -112,26 +123,15 @@ impl RequestClassificationOptions {
         while idx < args.len() {
             match args[idx].as_str() {
                 "--repo" | "–repo" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--repo requires a value");
-                    };
-                    repo = Some(value.clone());
+                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
                     idx += 2;
                 }
                 "--session" | "–session" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--session requires a value");
-                    };
-                    session_id = Some(value.clone());
+                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
                     idx += 2;
                 }
                 "--since" | "–since" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--since requires an RFC3339 timestamp");
-                    };
-                    since = Some(
-                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
-                    );
+                    since = Some(parse_since(&args, idx)?);
                     idx += 2;
                 }
                 "--dry-run" | "–dry-run" => {
@@ -143,13 +143,7 @@ impl RequestClassificationOptions {
                     idx += 1;
                 }
                 "--batch-size" | "–batch-size" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--batch-size requires a positive integer");
-                    };
-                    batch_size = value.parse::<i64>()?;
-                    if batch_size <= 0 {
-                        anyhow::bail!("--batch-size must be positive");
-                    }
+                    batch_size = parse_positive_batch_size(&args, idx)?;
                     idx += 2;
                 }
                 other => anyhow::bail!("unknown option: {other}"),
@@ -175,19 +169,11 @@ impl RequestClassificationReportOptions {
         while idx < args.len() {
             match args[idx].as_str() {
                 "--repo" | "–repo" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--repo requires a value");
-                    };
-                    repo = Some(value.clone());
+                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
                     idx += 2;
                 }
                 "--since" | "–since" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--since requires an RFC3339 timestamp");
-                    };
-                    since = Some(
-                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
-                    );
+                    since = Some(parse_since(&args, idx)?);
                     idx += 2;
                 }
                 other => anyhow::bail!("unknown option: {other}"),
@@ -211,33 +197,20 @@ impl ExtractFeaturesOptions {
         while idx < args.len() {
             match args[idx].as_str() {
                 "--repo" | "–repo" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--repo requires a value");
-                    };
-                    repo = Some(value.clone());
+                    repo = Some(option_value(&args, idx, "--repo requires a value")?);
                     idx += 2;
                 }
                 "--session" | "–session" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--session requires a value");
-                    };
-                    session_id = Some(value.clone());
+                    session_id = Some(option_value(&args, idx, "--session requires a value")?);
                     idx += 2;
                 }
                 "--trajectory" | "–trajectory" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--trajectory requires a UUID");
-                    };
+                    let value = option_value(&args, idx, "--trajectory requires a UUID")?;
                     trajectory_id = Some(value.parse::<Uuid>()?);
                     idx += 2;
                 }
                 "--since" | "–since" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--since requires an RFC3339 timestamp");
-                    };
-                    since = Some(
-                        chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc),
-                    );
+                    since = Some(parse_since(&args, idx)?);
                     idx += 2;
                 }
                 "--dry-run" | "–dry-run" => {
@@ -245,13 +218,7 @@ impl ExtractFeaturesOptions {
                     idx += 1;
                 }
                 "--batch-size" | "–batch-size" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--batch-size requires a positive integer");
-                    };
-                    batch_size = value.parse::<i64>()?;
-                    if batch_size <= 0 {
-                        anyhow::bail!("--batch-size must be positive");
-                    }
+                    batch_size = parse_positive_batch_size(&args, idx)?;
                     idx += 2;
                 }
                 "--skip-bootstrap-tagging" | "–skip-bootstrap-tagging" => {
@@ -286,13 +253,7 @@ impl BackfillOptions {
                     idx += 1;
                 }
                 "--batch-size" | "–batch-size" => {
-                    let Some(value) = args.get(idx + 1) else {
-                        anyhow::bail!("--batch-size requires a positive integer");
-                    };
-                    batch_size = value.parse::<i64>()?;
-                    if batch_size <= 0 {
-                        anyhow::bail!("--batch-size must be positive");
-                    }
+                    batch_size = parse_positive_batch_size(&args, idx)?;
                     idx += 2;
                 }
                 other => anyhow::bail!("unknown option: {other}"),
