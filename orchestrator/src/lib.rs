@@ -193,6 +193,7 @@ pub mod startup_env;
 pub mod startup_harness_feedback;
 pub mod startup_runtime;
 pub mod state;
+pub mod state_api_types;
 pub mod state_context;
 pub mod state_context_cache;
 pub mod state_context_policy;
