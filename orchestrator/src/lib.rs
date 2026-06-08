@@ -3,6 +3,7 @@ pub mod adversarial_harness_callback_normalization;
 pub mod adversarial_harness_callbacks;
 pub mod adversarial_harness_outcome;
 pub mod anthropic;
+pub mod anthropic_user_content;
 pub mod app_router;
 pub mod auth;
 pub mod background;
