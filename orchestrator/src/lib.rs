@@ -136,6 +136,7 @@ pub mod qdrant;
 pub mod rate_limit;
 pub mod request_classification;
 pub mod request_classification_backfill;
+pub mod request_classification_bindings;
 pub mod request_classification_composition;
 pub mod request_classification_config;
 #[cfg(test)]

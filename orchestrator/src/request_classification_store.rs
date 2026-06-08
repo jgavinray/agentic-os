@@ -1,5 +1,6 @@
 use deadpool_postgres::Pool;
 
+use crate::request_classification_bindings::ClassificationWriteBindings;
 use crate::request_classification_types::{PersistOutcome, RequestClassification};
 
 pub use crate::request_classification_backfill::run_backfill;
@@ -22,16 +23,7 @@ pub async fn persist_classification(
 ) -> Result<PersistOutcome, anyhow::Error> {
     let result = async {
         let conn = pool.get().await?;
-        let secondary_domains = classification
-            .secondary_domains
-            .iter()
-            .map(|domain| domain.as_str().to_string())
-            .collect::<Vec<_>>();
-        let risk = classification
-            .risk
-            .iter()
-            .map(|risk| risk.as_str().to_string())
-            .collect::<Vec<_>>();
+        let bindings = ClassificationWriteBindings::from_classification(classification);
         let affected = conn
             .execute(
                 "INSERT INTO agent_request_classifications (
@@ -76,9 +68,9 @@ pub async fn persist_classification(
                     &classification.classifier_source,
                     &classification.intent.as_str(),
                     &classification.domain.as_str(),
-                    &secondary_domains,
+                    &bindings.secondary_domains,
                     &classification.artifact_type.as_str(),
-                    &risk,
+                    &bindings.risk,
                     &classification.complexity.as_str(),
                     &classification.recommended_route.as_str(),
                     &classification.response_contract.as_str(),
@@ -112,16 +104,7 @@ pub async fn update_classification_if_changed(
 ) -> Result<PersistOutcome, anyhow::Error> {
     let result = async {
         let conn = pool.get().await?;
-        let secondary_domains = classification
-            .secondary_domains
-            .iter()
-            .map(|domain| domain.as_str().to_string())
-            .collect::<Vec<_>>();
-        let risk = classification
-            .risk
-            .iter()
-            .map(|risk| risk.as_str().to_string())
-            .collect::<Vec<_>>();
+        let bindings = ClassificationWriteBindings::from_classification(classification);
         let affected = conn
             .execute(
                 "UPDATE agent_request_classifications
@@ -173,9 +156,9 @@ pub async fn update_classification_if_changed(
                     &classification.classifier_source,
                     &classification.intent.as_str(),
                     &classification.domain.as_str(),
-                    &secondary_domains,
+                    &bindings.secondary_domains,
                     &classification.artifact_type.as_str(),
-                    &risk,
+                    &bindings.risk,
                     &classification.complexity.as_str(),
                     &classification.recommended_route.as_str(),
                     &classification.response_contract.as_str(),
