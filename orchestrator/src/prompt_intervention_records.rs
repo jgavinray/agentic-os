@@ -379,7 +379,10 @@ pub async fn init(pool: &Pool) -> Result<(), anyhow::Error> {
         CREATE INDEX IF NOT EXISTS prompt_interventions_trajectory_id_idx
             ON prompt_interventions(trajectory_id);
         CREATE INDEX IF NOT EXISTS prompt_interventions_normalized_prompt_hash_idx
-            ON prompt_interventions(normalized_prompt_hash);",
+            ON prompt_interventions(normalized_prompt_hash);
+        CREATE INDEX IF NOT EXISTS prompt_interventions_supersedes_record_id_idx
+            ON prompt_interventions(supersedes_record_id)
+            WHERE supersedes_record_id IS NOT NULL;",
     ))
     .await?;
     init_backfill_summaries(pool).await?;

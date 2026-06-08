@@ -369,6 +369,51 @@ fn push_section(lines: &mut Vec<String>, name: &str, rows: &[CountRow]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt_intervention_records::{sha256_hex, PromptInterventionRecord};
+    use crate::prompt_intervention_taxonomy::{
+        BurdenType, FailureRelation, InterventionType, LabelerType, SignalStrength, SourceKind,
+    };
+
+    static REPORT_DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn sample_record(
+        intervention_type: InterventionType,
+        signal_type: &str,
+        evidence: &str,
+    ) -> PromptInterventionRecord {
+        PromptInterventionRecord {
+            id: Uuid::new_v4(),
+            exchange_id: Uuid::new_v4(),
+            trajectory_id: Some(Uuid::new_v4()),
+            request_event_id: None,
+            attempt_id: None,
+            requested_model: Some("claude-opus-4-8".to_string()),
+            routed_model: Some("qwen3.6-27b".to_string()),
+            baseline_arm: Some("orchestrator_policy_enabled".to_string()),
+            selected_route: None,
+            routing_policy_version: None,
+            exact_prompt_hash: sha256_hex(evidence),
+            normalized_prompt_hash: sha256_hex(&format!("normalized {evidence}")),
+            prompt_fingerprint_version: 1,
+            source_kind: SourceKind::UserMessage,
+            intervention_type,
+            signal_family: intervention_type.primary_signal_family(),
+            signal_type: signal_type.to_string(),
+            signal_strength: SignalStrength::Explicit,
+            burden_type: BurdenType::HumanScopeControl,
+            failure_relation: FailureRelation::Prevention,
+            target_behavior: None,
+            blocked_behavior: None,
+            replacement_behavior: None,
+            evidence_excerpt: evidence.to_string(),
+            evidence_hash: sha256_hex(evidence),
+            labeler_type: LabelerType::Rule,
+            confidence: 0.95,
+            taxonomy_version: "prompt-interventions-v1".to_string(),
+            supersedes_record_id: None,
+            created_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn report_expression_rejects_unknown_columns() {
@@ -433,5 +478,103 @@ mod tests {
         assert!(output.contains("interventions_per_day"));
         assert!(!output.contains("evidence_excerpt"));
         assert!(!output.contains("raw_prompt"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_CAPTURE_DATABASE_URL pointing at a disposable Postgres database"]
+    async fn headline_report_excludes_superseded_chain_but_records_remain_append_only() {
+        let _guard = REPORT_DB_TEST_LOCK.lock().await;
+        let database_url = std::env::var("TEST_CAPTURE_DATABASE_URL")
+            .expect("TEST_CAPTURE_DATABASE_URL must be set");
+        let pool = crate::db::create_pool(&database_url).expect("pool");
+        crate::client_capture::init(&pool)
+            .await
+            .expect("raw capture init");
+        crate::prompt_intervention_records::init(&pool)
+            .await
+            .expect("prompt intervention init");
+
+        let first = sample_record(
+            InterventionType::ScopeNarrowing,
+            "file_scope_reduction",
+            "Edit only orchestrator/src/lib.rs.",
+        );
+        let trajectory_id = first.trajectory_id;
+        let exchange_id = first.exchange_id;
+        let mut second = sample_record(
+            InterventionType::ValidationRequirement,
+            "verification_required",
+            "Acceptance tests required before completion.",
+        );
+        second.exchange_id = exchange_id;
+        second.trajectory_id = trajectory_id;
+        second.supersedes_record_id = Some(first.id);
+        let mut third = sample_record(
+            InterventionType::RiskWarning,
+            "production_safety_constraint",
+            "Production change requires rollback validation.",
+        );
+        third.exchange_id = exchange_id;
+        third.trajectory_id = trajectory_id;
+        third.supersedes_record_id = Some(second.id);
+
+        crate::prompt_intervention_records::insert(&pool, &first)
+            .await
+            .expect("insert first record");
+        crate::prompt_intervention_records::insert(&pool, &second)
+            .await
+            .expect("insert second record");
+        crate::prompt_intervention_records::insert(&pool, &third)
+            .await
+            .expect("insert third record");
+
+        let report = prompt_intervention_report(
+            &pool,
+            None,
+            &ReportOptions {
+                repo: None,
+                since: None,
+                until: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("prompt intervention report");
+
+        assert_eq!(
+            report.by_type,
+            vec![CountRow {
+                label: "risk_warning".to_string(),
+                count: 1,
+            }]
+        );
+        assert_eq!(
+            report.by_signal_family,
+            vec![CountRow {
+                label: "risk_control".to_string(),
+                count: 1,
+            }]
+        );
+        assert_eq!(report.interventions_per_day[0].count, 1);
+
+        let conn = pool.get().await.expect("conn");
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT
+                 FROM prompt_interventions
+                 WHERE id = ANY($1::UUID[])",
+                &[&vec![first.id, second.id, third.id]],
+            )
+            .await
+            .expect("count append-only records");
+        let stored_records: i64 = row.get(0);
+        assert_eq!(stored_records, 3);
+
+        conn.execute(
+            "DELETE FROM prompt_interventions WHERE id = ANY($1::UUID[])",
+            &[&vec![first.id, second.id, third.id]],
+        )
+        .await
+        .expect("cleanup prompt interventions");
     }
 }
