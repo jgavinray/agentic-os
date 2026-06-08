@@ -75,6 +75,19 @@ pub fn route_for_namespace(
     canary_enabled: bool,
     allowlist: &std::collections::HashSet<String>,
 ) -> RouteSelection {
+    route_for_request(default_model, None, namespace, canary_enabled, allowlist)
+}
+
+pub fn route_for_request(
+    default_model: &str,
+    requested_model: Option<&str>,
+    namespace: &str,
+    canary_enabled: bool,
+    allowlist: &std::collections::HashSet<String>,
+) -> RouteSelection {
+    if let Some(route) = route_for_requested_model(requested_model) {
+        return route;
+    }
     if canary_enabled && default_model == "agentic/strong" && allowlist.contains(namespace) {
         return RouteSelection {
             routed_model: "agentic/strong-prefix-canary".to_string(),
@@ -89,6 +102,26 @@ pub fn route_for_namespace(
         selection_reason: "default_model".to_string(),
         policy_version: "default-routing-v1".to_string(),
     }
+}
+
+fn route_for_requested_model(requested_model: Option<&str>) -> Option<RouteSelection> {
+    let requested_model = requested_model?.to_ascii_lowercase();
+    let (routed_model, selected_route) = if requested_model.contains("opus") {
+        ("qwen3.6-27b", "claude_opus_tier")
+    } else if requested_model.contains("sonnet") {
+        ("gemma-4-31b", "claude_sonnet_tier")
+    } else if requested_model.contains("haiku") {
+        ("qwen36-35b-heretic", "claude_haiku_tier")
+    } else {
+        return None;
+    };
+
+    Some(RouteSelection {
+        routed_model: routed_model.to_string(),
+        selected_route: selected_route.to_string(),
+        selection_reason: "requested_model_tier".to_string(),
+        policy_version: "claude-tier-routing-v1".to_string(),
+    })
 }
 
 pub fn add_agentic_os_metadata(req: &mut Value, attempt: &LiteLlmCallAttempt) {

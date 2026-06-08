@@ -103,7 +103,7 @@ pub async fn chat_completions(
         }
     };
     let reasoning_selection = local_reasoning_selection(&headers, &payload);
-    let route = litellm_route(&state, &namespace);
+    let route = litellm_route(&state, &namespace, Some(&requested_model));
     let mut req =
         prepare_openai_litellm_request(&payload, &route.routed_model, reasoning_selection);
     let sampling_audit = crate::sampling::capture_and_maybe_override(

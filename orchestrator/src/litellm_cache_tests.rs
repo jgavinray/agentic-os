@@ -64,6 +64,52 @@ fn canary_routing_requires_enabled_allowlisted_strong() {
 }
 
 #[test]
+fn claude_requested_model_tiers_route_to_local_models() {
+    let allow = std::collections::HashSet::new();
+
+    let opus = route_for_request("qwen3.6-27b", Some("claude-opus-4-8"), "ns1", false, &allow);
+    assert_eq!(opus.routed_model, "qwen3.6-27b");
+    assert_eq!(opus.selected_route, "claude_opus_tier");
+    assert_eq!(opus.selection_reason, "requested_model_tier");
+
+    let sonnet = route_for_request(
+        "qwen3.6-27b",
+        Some("claude-sonnet-4-6"),
+        "ns1",
+        false,
+        &allow,
+    );
+    assert_eq!(sonnet.routed_model, "gemma-4-31b");
+    assert_eq!(sonnet.selected_route, "claude_sonnet_tier");
+
+    let haiku = route_for_request(
+        "qwen3.6-27b",
+        Some("claude-haiku-4-5-20251001"),
+        "ns1",
+        false,
+        &allow,
+    );
+    assert_eq!(haiku.routed_model, "qwen36-35b-heretic");
+    assert_eq!(haiku.selected_route, "claude_haiku_tier");
+}
+
+#[test]
+fn unknown_requested_model_falls_back_to_default_route() {
+    let allow = std::collections::HashSet::new();
+    let route = route_for_request(
+        "qwen3.6-27b",
+        Some("claude-code-client-model"),
+        "ns1",
+        false,
+        &allow,
+    );
+
+    assert_eq!(route.routed_model, "qwen3.6-27b");
+    assert_eq!(route.selected_route, "default");
+    assert_eq!(route.selection_reason, "default_model");
+}
+
+#[test]
 fn streaming_first_token_detection_ignores_done_only() {
     assert!(sse_chunk_has_non_empty_data(
         br#"data: {"choices":[{"delta":{"content":"x"}}]}"#

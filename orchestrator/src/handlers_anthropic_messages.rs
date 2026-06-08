@@ -111,7 +111,7 @@ pub async fn messages(
         .unwrap_or(&state.default_model)
         .to_string();
 
-    let route = litellm_route(&state, &namespace);
+    let route = litellm_route(&state, &namespace, Some(&model));
     // Stay in Anthropic format — no translation.
     let mut req =
         prepare_anthropic_litellm_request(payload, &route.routed_model, reasoning_selection);

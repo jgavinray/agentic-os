@@ -33,9 +33,14 @@ pub(crate) fn baseline_arm_selection(
     )
 }
 
-pub(crate) fn litellm_route(state: &AppState, namespace: &str) -> crate::litellm::RouteSelection {
-    crate::litellm::route_for_namespace(
+pub(crate) fn litellm_route(
+    state: &AppState,
+    namespace: &str,
+    requested_model: Option<&str>,
+) -> crate::litellm::RouteSelection {
+    crate::litellm::route_for_request(
         &state.default_model,
+        requested_model,
         namespace,
         state.prefix_cache_canary_enabled,
         &state.prefix_cache_canary_namespace_allowlist,
