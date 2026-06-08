@@ -2,7 +2,8 @@ use crate::feature_constraint_failures::{
     constraint_type_for_failure_key, recovery_after_detection,
 };
 use crate::feature_constraint_suppression::{active_detection, suppress_duplicates};
-use crate::feature_extraction_types::{FeatureRecord, OperationalConstraint, SuppressedConstraint};
+use crate::feature_constraint_templates as templates;
+use crate::feature_extraction_types::{FeatureRecord, SuppressedConstraint};
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,13 +47,9 @@ pub(crate) fn build_constraints(
         "use_known_auth",
     ) && record.known_auth_header.is_some()
     {
-        candidates.push(OperationalConstraint {
-            constraint_type: "use_known_auth".to_string(),
-            text: format!(
-                "Use `{}` when calling protected orchestrator endpoints.",
-                record.known_auth_header.as_deref().unwrap()
-            ),
-        });
+        candidates.push(templates::use_known_auth(
+            record.known_auth_header.as_deref().unwrap(),
+        ));
     }
     if active_detection(
         &FailureKey::WrongEndpoint,
@@ -62,13 +59,9 @@ pub(crate) fn build_constraints(
         "use_known_endpoint",
     ) && record.known_endpoint.is_some()
     {
-        candidates.push(OperationalConstraint {
-            constraint_type: "use_known_endpoint".to_string(),
-            text: format!(
-                "Do not use `localhost` for host-side orchestrator testing. The correct endpoint for this environment is `{}`.",
-                record.known_endpoint.as_deref().unwrap()
-            ),
-        });
+        candidates.push(templates::use_known_endpoint(
+            record.known_endpoint.as_deref().unwrap(),
+        ));
     }
     if active_detection(
         &FailureKey::MigrationFailure,
@@ -78,13 +71,9 @@ pub(crate) fn build_constraints(
         "use_known_migration_fix",
     ) && record.known_migration_fix.is_some()
     {
-        candidates.push(OperationalConstraint {
-            constraint_type: "use_known_migration_fix".to_string(),
-            text: format!(
-                "When retrying the baseline migration, use `{}` to make extension creation idempotent.",
-                record.known_migration_fix.as_deref().unwrap()
-            ),
-        });
+        candidates.push(templates::use_known_migration_fix(
+            record.known_migration_fix.as_deref().unwrap(),
+        ));
     }
 
     if !active_tool_loop_tools.is_empty() {
@@ -92,12 +81,7 @@ pub(crate) fn build_constraints(
             .into_iter()
             .collect::<Vec<_>>()
             .join(" and ");
-        candidates.push(OperationalConstraint {
-            constraint_type: "avoid_tool_loop".to_string(),
-            text: format!(
-                "Do not repeat identical {tools} tool calls within this trajectory. Summarize the previous result and choose a different action before reusing the same tool with identical parameters."
-            ),
-        });
+        candidates.push(templates::avoid_tool_loop(&tools));
     } else if had_fresh_tool_loop && recovered_tool_loop {
         suppressed.push(SuppressedConstraint {
             constraint_type: "avoid_tool_loop".to_string(),
@@ -112,10 +96,7 @@ pub(crate) fn build_constraints(
         &mut suppressed,
         "fix_context_retrieval",
     ) {
-        candidates.push(OperationalConstraint {
-            constraint_type: "fix_context_retrieval".to_string(),
-            text: "If the context pack is empty or near-empty, verify cache warmup and retrieval health before assuming no prior memory exists.".to_string(),
-        });
+        candidates.push(templates::fix_context_retrieval());
     }
 
     let context_truncated_active = active_detection(
@@ -133,10 +114,7 @@ pub(crate) fn build_constraints(
         "reduce_context_bloat",
     );
     if context_truncated_active || high_input_active {
-        candidates.push(OperationalConstraint {
-            constraint_type: "reduce_context_bloat".to_string(),
-            text: "Avoid expanding context further; use concise cached memory and inspect why input tokens or context truncation are high before retrying.".to_string(),
-        });
+        candidates.push(templates::reduce_context_bloat());
     }
 
     if active_detection(
@@ -146,10 +124,7 @@ pub(crate) fn build_constraints(
         &mut suppressed,
         "separate_summarizer_upstream",
     ) {
-        candidates.push(OperationalConstraint {
-            constraint_type: "separate_summarizer_upstream".to_string(),
-            text: "Keep background summarization on the dedicated summarizer endpoint instead of sharing foreground LiteLLM capacity.".to_string(),
-        });
+        candidates.push(templates::separate_summarizer_upstream());
     }
 
     if active_detection(
@@ -159,10 +134,7 @@ pub(crate) fn build_constraints(
         &mut suppressed,
         "handle_user_interruption",
     ) {
-        candidates.push(OperationalConstraint {
-            constraint_type: "handle_user_interruption".to_string(),
-            text: "When the user interrupts due to incorrect operational behavior, explicitly acknowledge the correction and apply it before continuing.".to_string(),
-        });
+        candidates.push(templates::handle_user_interruption());
     }
 
     if active_detection(
@@ -172,10 +144,7 @@ pub(crate) fn build_constraints(
         &mut suppressed,
         "handle_summarization_failure",
     ) {
-        candidates.push(OperationalConstraint {
-            constraint_type: "handle_summarization_failure".to_string(),
-            text: "If summarization returns an empty response, inspect the provider or LiteLLM response body before retrying.".to_string(),
-        });
+        candidates.push(templates::handle_summarization_failure());
     }
 
     for key in stale_detection_keys {

@@ -63,6 +63,7 @@ pub mod execution_feedback_validators;
 pub mod feature_constraint_budget;
 pub mod feature_constraint_failures;
 pub mod feature_constraint_suppression;
+pub mod feature_constraint_templates;
 pub mod feature_constraints;
 pub mod feature_detection_bootstrap;
 pub mod feature_detection_event_rules;
