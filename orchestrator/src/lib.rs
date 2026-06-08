@@ -82,6 +82,7 @@ pub mod feature_extraction_persistence;
 pub mod feature_extraction_queries;
 pub mod feature_extraction_record_init;
 pub mod feature_extraction_records;
+pub mod feature_extraction_recovery;
 pub mod feature_extraction_store;
 pub mod feature_extraction_tags;
 pub mod feature_extraction_types;
