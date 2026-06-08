@@ -206,6 +206,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_forwarded_body_does_not_prevent_labeling() {
+        let capture = capture_with_body(json!({
+            "model": "claude-opus-4-8",
+            "messages": [{ "role": "user", "content": "Do not implement this yet" }]
+        }));
+
+        let records = records_from_capture(&capture).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(
+            record.intervention_type,
+            InterventionType::ImplementationBlock
+        );
+        assert_eq!(record.exchange_id, capture.exchange_id);
+        assert_eq!(record.requested_model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(record.routed_model, None);
+        assert_eq!(record.trajectory_id, None);
+        assert_eq!(record.request_event_id, None);
+        assert_eq!(record.attempt_id, None);
+        assert_eq!(record.baseline_arm, None);
+        assert_eq!(record.selected_route, None);
+        assert_eq!(record.routing_policy_version, None);
+        record.validate().unwrap();
+    }
+
+    #[test]
     fn capture_attempt_id_precedes_forwarded_metadata_attempt_id() {
         let capture_attempt_id = Uuid::new_v4();
         let metadata_attempt_id = Uuid::new_v4();
