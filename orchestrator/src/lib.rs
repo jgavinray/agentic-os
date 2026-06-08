@@ -116,6 +116,7 @@ pub mod handlers_openai_upstream;
 pub mod handlers_request;
 pub mod handlers_request_preparation;
 pub mod handlers_stream_persistence;
+pub mod handlers_stream_persistence_types;
 pub mod handlers_streaming;
 pub mod handlers_trajectory;
 pub mod handlers_usage;
