@@ -42,9 +42,17 @@ mod policy_deny_tests;
 mod test_support;
 
 #[cfg(test)]
-#[path = "tool_mediation_policy_mapping_tests.rs"]
-mod policy_mapping_tests;
+#[path = "tool_mediation_canonical_tests.rs"]
+mod canonical_tests;
 
 #[cfg(test)]
-#[path = "tool_mediation_tests.rs"]
-mod tests;
+#[path = "tool_mediation_compat_tests.rs"]
+mod compat_tests;
+
+#[cfg(test)]
+#[path = "tool_mediation_policy_filter_tests.rs"]
+mod policy_filter_tests;
+
+#[cfg(test)]
+#[path = "tool_mediation_policy_mapping_tests.rs"]
+mod policy_mapping_tests;
