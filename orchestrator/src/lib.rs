@@ -49,6 +49,7 @@ pub mod event_capture_tool_results;
 pub mod execution_feedback;
 pub mod execution_feedback_chain;
 pub mod execution_feedback_events;
+pub mod execution_feedback_fingerprint_rules;
 pub mod execution_feedback_fingerprints;
 pub mod execution_feedback_labels;
 pub mod execution_feedback_parsing;
