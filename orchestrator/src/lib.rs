@@ -193,6 +193,7 @@ pub mod sampling_audit;
 pub mod sentiment;
 pub mod sse;
 pub mod startup_backfill;
+pub mod startup_config;
 pub mod startup_env;
 pub mod startup_harness_feedback;
 pub mod startup_runtime;
