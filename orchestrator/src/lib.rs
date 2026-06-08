@@ -127,6 +127,7 @@ pub mod litellm;
 pub mod litellm_cache;
 pub mod litellm_ledger;
 pub mod litellm_ledger_persistence;
+pub mod litellm_provider_cache;
 pub mod local_reasoning;
 pub mod logging;
 pub mod migrations;
