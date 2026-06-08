@@ -1,6 +1,7 @@
 use deadpool_postgres::Pool;
 
 use crate::request_classification_bindings::ClassificationWriteBindings;
+use crate::request_classification_store_telemetry::record_write_result;
 use crate::request_classification_types::{PersistOutcome, RequestClassification};
 
 pub use crate::request_classification_backfill::run_backfill;
@@ -86,15 +87,7 @@ pub async fn persist_classification(
     }
     .await;
 
-    match &result {
-        Ok(outcome) => {
-            crate::telemetry::record_request_classification_write(outcome.as_str());
-            if matches!(outcome, PersistOutcome::Inserted) {
-                crate::request_classification::record_classification_metrics(classification);
-            }
-        }
-        Err(_) => crate::telemetry::record_request_classification_write("error"),
-    }
+    record_write_result(&result, PersistOutcome::Inserted, classification);
     result
 }
 
@@ -174,14 +167,6 @@ pub async fn update_classification_if_changed(
     }
     .await;
 
-    match &result {
-        Ok(outcome) => {
-            crate::telemetry::record_request_classification_write(outcome.as_str());
-            if matches!(outcome, PersistOutcome::Updated) {
-                crate::request_classification::record_classification_metrics(classification);
-            }
-        }
-        Err(_) => crate::telemetry::record_request_classification_write("error"),
-    }
+    record_write_result(&result, PersistOutcome::Updated, classification);
     result
 }

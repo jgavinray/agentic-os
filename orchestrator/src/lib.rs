@@ -183,6 +183,7 @@ pub mod request_classification_rule_utils;
 pub mod request_classification_rules;
 pub mod request_classification_runtime;
 pub mod request_classification_store;
+pub mod request_classification_store_telemetry;
 pub mod request_classification_taxonomy;
 pub mod request_classification_types;
 pub mod request_policy;
