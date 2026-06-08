@@ -12,6 +12,7 @@ pub mod context_compiler;
 pub mod context_compiler_event_artifacts;
 pub mod context_compiler_instructions;
 pub mod context_compiler_support;
+pub mod context_compiler_total_recall;
 pub mod context_ledger;
 pub mod context_packing;
 pub mod context_packing_build;

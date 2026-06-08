@@ -6,8 +6,8 @@ use crate::context_compiler_event_artifacts::{
 use crate::context_compiler_instructions::compile_active_instruction_artifact;
 use crate::context_compiler_support::{
     compile_repo_map, compile_service_topology, compiler_source_allowed, record_ledger,
-    total_recall_candidates,
 };
+use crate::context_compiler_total_recall::compile_total_recall_artifact;
 use crate::db;
 
 #[derive(Clone, Debug)]
@@ -42,6 +42,14 @@ pub struct ContextCompiler<'a> {
 impl<'a> ContextCompiler<'a> {
     pub fn new(pool: &'a deadpool_postgres::Pool, http: &'a reqwest::Client) -> Self {
         Self { pool, http }
+    }
+
+    pub(crate) fn pool(&self) -> &'a deadpool_postgres::Pool {
+        self.pool
+    }
+
+    pub(crate) fn http(&self) -> &'a reqwest::Client {
+        self.http
     }
 
     pub async fn compile(&self, request: CompilerRequest) -> CompilerOutput {
@@ -116,49 +124,8 @@ impl<'a> ContextCompiler<'a> {
             &request,
             crate::orchestration_policy::ContextSource::TotalRecall,
         ) {
-            if let Some(total_recall_url) = request.runtime.total_recall_url.as_deref() {
-                match total_recall_candidates(
-                    self.http,
-                    total_recall_url,
-                    &request.repo,
-                    &request.task,
-                )
-                .await
-                {
-                    Ok(notes) => {
-                        if let Some(artifact) = context_artifacts::durable_project_memory_artifact(
-                            request.repo.clone(),
-                            &notes,
-                        ) {
-                            for note in &notes {
-                                record_ledger(
-                                    self.pool,
-                                    &request.repo,
-                                    &artifact,
-                                    "total_recall",
-                                    Some(&note.id),
-                                    "included",
-                                    "promoted external episodic note into durable project memory artifact",
-                                    serde_json::json!({
-                                        "date": note.date,
-                                        "title": note.title,
-                                        "updated_at": note.updated_at,
-                                    }),
-                                )
-                                .await;
-                            }
-                            artifacts.push(artifact);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "context_compiler",
-                            repo = %request.repo,
-                            total_recall_url = %total_recall_url,
-                            "failed to fetch Total Recall episodic memory: {e}"
-                        );
-                    }
-                }
+            if let Some(artifact) = compile_total_recall_artifact(self, &request).await {
+                artifacts.push(artifact);
             }
         }
 
