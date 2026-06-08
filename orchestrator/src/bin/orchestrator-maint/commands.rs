@@ -1,15 +1,19 @@
 use orchestrator::{
-    feature_extraction, harness_feedback, prompt_intervention_backfill, request_classification,
+    feature_extraction, harness_feedback, prompt_intervention_backfill,
+    prompt_intervention_report as prompt_intervention_reports, request_classification,
 };
 
-use super::commands_report::print_request_classification_report;
+use super::commands_report::{
+    print_prompt_intervention_report, print_request_classification_report,
+};
 use super::commands_runtime::{execution_feedback_enabled, open_capture_pool, open_migrated_pool};
 use super::options::{
     BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions,
-    PromptInterventionBackfillOptions, RequestClassificationOptions,
-    RequestClassificationReportOptions,
+    PromptInterventionBackfillOptions, PromptInterventionReportOptions,
+    RequestClassificationOptions, RequestClassificationReportOptions,
 };
 use super::signature_backfill;
+use std::env;
 
 pub(super) async fn run_command(command: &str, args: Vec<String>) -> Result<(), anyhow::Error> {
     match command {
@@ -18,6 +22,7 @@ pub(super) async fn run_command(command: &str, args: Vec<String>) -> Result<(), 
         "classify-harness-feedback" => classify_harness_feedback(args).await,
         "classify-requests" => classify_requests(args).await,
         "backfill-prompt-interventions" => backfill_prompt_interventions(args).await,
+        "prompt-intervention-report" => prompt_intervention_report(args).await,
         "request-classification-report" => request_classification_report(args).await,
         _ => {
             print_usage();
@@ -28,7 +33,7 @@ pub(super) async fn run_command(command: &str, args: Vec<String>) -> Result<(), 
 
 pub(super) fn print_usage() {
     eprintln!(
-        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--repair] [--batch-size N]\n       orchestrator-maint backfill-prompt-interventions [--since TIMESTAMP] [--until TIMESTAMP] [--requested-model MODEL] [--response-model MODEL] [--repo REPO] [--namespace NS] [--dry-run] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
+        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--repair] [--batch-size N]\n       orchestrator-maint backfill-prompt-interventions [--since TIMESTAMP] [--until TIMESTAMP] [--requested-model MODEL] [--response-model MODEL] [--repo REPO] [--namespace NS] [--dry-run] [--batch-size N]\n       orchestrator-maint prompt-intervention-report [--repo REPO] [--since TIMESTAMP] [--until TIMESTAMP] [--limit N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
     );
 }
 
@@ -156,6 +161,35 @@ async fn backfill_prompt_interventions(args: Vec<String>) -> Result<(), anyhow::
     for line in prompt_intervention_backfill::report_lines(&report) {
         println!("{line}");
     }
+    Ok(())
+}
+
+async fn prompt_intervention_report(args: Vec<String>) -> Result<(), anyhow::Error> {
+    let opts = PromptInterventionReportOptions::parse(args)?;
+    let capture_pool = open_capture_pool().await?;
+    let outcome_pool = if env::var_os("DATABASE_URL").is_some() {
+        match open_migrated_pool().await {
+            Ok(pool) => Some(pool),
+            Err(e) => {
+                eprintln!("outcome correlation unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let report = prompt_intervention_reports::prompt_intervention_report(
+        &capture_pool,
+        outcome_pool.as_ref(),
+        &prompt_intervention_reports::ReportOptions {
+            repo: opts.repo,
+            since: opts.since,
+            until: opts.until,
+            limit: opts.limit,
+        },
+    )
+    .await?;
+    print_prompt_intervention_report(&report);
     Ok(())
 }
 

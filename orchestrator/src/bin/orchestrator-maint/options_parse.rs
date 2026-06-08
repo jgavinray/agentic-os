@@ -1,11 +1,12 @@
 use super::parse_common::{
-    parse_dry_run_batch_options, parse_prompt_intervention_backfill_options, parse_report_options,
-    parse_scoped_backfill_options, ScopedBackfillFlags,
+    parse_dry_run_batch_options, parse_prompt_intervention_backfill_options,
+    parse_prompt_intervention_report_options, parse_report_options, parse_scoped_backfill_options,
+    ScopedBackfillFlags,
 };
 use super::types::{
     BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions,
-    PromptInterventionBackfillOptions, RequestClassificationOptions,
-    RequestClassificationReportOptions,
+    PromptInterventionBackfillOptions, PromptInterventionReportOptions,
+    RequestClassificationOptions, RequestClassificationReportOptions,
 };
 
 impl HarnessFeedbackOptions {
@@ -113,6 +114,19 @@ impl PromptInterventionBackfillOptions {
     }
 }
 
+impl PromptInterventionReportOptions {
+    pub(crate) fn parse(args: Vec<String>) -> Result<Self, anyhow::Error> {
+        let parsed = parse_prompt_intervention_report_options(args)?;
+
+        Ok(Self {
+            repo: parsed.repo,
+            since: parsed.since,
+            until: parsed.until,
+            limit: parsed.limit,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +171,34 @@ mod tests {
         .expect_err("zero batch size should be rejected");
 
         assert!(err.to_string().contains("--batch-size must be positive"));
+    }
+
+    #[test]
+    fn prompt_intervention_report_options_parse_filters() {
+        let opts = PromptInterventionReportOptions::parse(vec![
+            "--repo".to_string(),
+            "agentic-os".to_string(),
+            "--since".to_string(),
+            "2026-06-01T00:00:00Z".to_string(),
+            "--until".to_string(),
+            "2026-06-02T00:00:00Z".to_string(),
+            "--limit".to_string(),
+            "10".to_string(),
+        ])
+        .expect("valid prompt intervention report options");
+
+        assert_eq!(opts.repo.as_deref(), Some("agentic-os"));
+        assert!(opts.since.is_some());
+        assert!(opts.until.is_some());
+        assert_eq!(opts.limit, 10);
+    }
+
+    #[test]
+    fn prompt_intervention_report_rejects_nonpositive_limit() {
+        let err =
+            PromptInterventionReportOptions::parse(vec!["--limit".to_string(), "0".to_string()])
+                .expect_err("zero limit should be rejected");
+
+        assert!(err.to_string().contains("--limit must be positive"));
     }
 }

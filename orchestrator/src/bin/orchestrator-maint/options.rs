@@ -9,6 +9,6 @@ mod types;
 
 pub(super) use types::{
     BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions,
-    PromptInterventionBackfillOptions, RequestClassificationOptions,
-    RequestClassificationReportOptions,
+    PromptInterventionBackfillOptions, PromptInterventionReportOptions,
+    RequestClassificationOptions, RequestClassificationReportOptions,
 };

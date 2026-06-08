@@ -42,6 +42,13 @@ pub(super) struct PromptInterventionBackfillParsed {
     pub(super) batch_size: i64,
 }
 
+pub(super) struct PromptInterventionReportParsed {
+    pub(super) repo: Option<String>,
+    pub(super) since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) limit: i64,
+}
+
 pub(super) fn parse_scoped_backfill_options(
     args: Vec<String>,
     flags: ScopedBackfillFlags,
@@ -201,6 +208,49 @@ pub(super) fn parse_prompt_intervention_backfill_options(
     Ok(parsed)
 }
 
+pub(super) fn parse_prompt_intervention_report_options(
+    args: Vec<String>,
+) -> Result<PromptInterventionReportParsed, anyhow::Error> {
+    let mut parsed = PromptInterventionReportParsed {
+        repo: None,
+        since: None,
+        until: None,
+        limit: 20,
+    };
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--repo" | "–repo" => {
+                parsed.repo = Some(option_value(&args, idx, "--repo requires a value")?);
+                idx += 2;
+            }
+            "--since" | "–since" => {
+                parsed.since = Some(parse_since(&args, idx)?);
+                idx += 2;
+            }
+            "--until" | "–until" => {
+                parsed.until = Some(parse_timestamp(
+                    &args,
+                    idx,
+                    "--until requires an RFC3339 timestamp",
+                )?);
+                idx += 2;
+            }
+            "--limit" | "–limit" => {
+                parsed.limit = parse_positive_i64(
+                    &args,
+                    idx,
+                    "--limit requires a positive integer",
+                    "--limit must be positive",
+                )?;
+                idx += 2;
+            }
+            other => anyhow::bail!("unknown option: {other}"),
+        }
+    }
+    Ok(parsed)
+}
+
 fn option_value(
     args: &[String],
     idx: usize,
@@ -229,10 +279,24 @@ fn parse_timestamp(
 }
 
 fn parse_positive_batch_size(args: &[String], idx: usize) -> Result<i64, anyhow::Error> {
-    let value = option_value(args, idx, "--batch-size requires a positive integer")?;
-    let batch_size = value.parse::<i64>()?;
-    if batch_size <= 0 {
-        anyhow::bail!("--batch-size must be positive");
+    parse_positive_i64(
+        args,
+        idx,
+        "--batch-size requires a positive integer",
+        "--batch-size must be positive",
+    )
+}
+
+fn parse_positive_i64(
+    args: &[String],
+    idx: usize,
+    missing_message: &'static str,
+    nonpositive_message: &'static str,
+) -> Result<i64, anyhow::Error> {
+    let value = option_value(args, idx, missing_message)?;
+    let parsed = value.parse::<i64>()?;
+    if parsed <= 0 {
+        anyhow::bail!(nonpositive_message);
     }
-    Ok(batch_size)
+    Ok(parsed)
 }

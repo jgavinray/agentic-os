@@ -17,6 +17,14 @@ pub(crate) struct PromptInterventionBackfillOptions {
     pub(crate) batch_size: i64,
 }
 
+#[derive(Debug)]
+pub(crate) struct PromptInterventionReportOptions {
+    pub(crate) repo: Option<String>,
+    pub(crate) since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) limit: i64,
+}
+
 pub(crate) struct ExtractFeaturesOptions {
     pub(crate) repo: Option<String>,
     pub(crate) session_id: Option<String>,

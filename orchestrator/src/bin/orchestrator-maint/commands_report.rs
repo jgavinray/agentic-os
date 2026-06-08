@@ -1,3 +1,4 @@
+use orchestrator::prompt_intervention_report;
 use orchestrator::request_classification;
 
 pub(super) fn print_request_classification_report(
@@ -19,5 +20,13 @@ pub(super) fn print_request_classification_report(
     println!("repeated_guardrail_sessions:");
     for row in &report.repeated_guardrail_sessions {
         println!("  {} {}", row.session_id, row.count);
+    }
+}
+
+pub(super) fn print_prompt_intervention_report(
+    report: &prompt_intervention_report::PromptInterventionReport,
+) {
+    for line in prompt_intervention_report::report_lines(report) {
+        println!("{line}");
     }
 }

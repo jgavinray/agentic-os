@@ -162,6 +162,7 @@ mod prompt_intervention_detector_tests;
 pub mod prompt_intervention_extraction;
 pub mod prompt_intervention_fingerprint;
 pub mod prompt_intervention_records;
+pub mod prompt_intervention_report;
 pub mod prompt_intervention_taxonomy;
 pub mod proxy_support;
 pub mod qdrant;
