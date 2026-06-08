@@ -13,44 +13,6 @@ fn ctx() -> ExecutionEventContext {
 }
 
 #[test]
-fn event_types_are_defined_in_one_place() {
-    assert_eq!(EXECUTION_EVENT_TYPES.len(), 7);
-    assert!(EXECUTION_EVENT_TYPES.contains(&EVENT_TYPE_TOOL_RESULT));
-    assert!(!EXECUTION_EVENT_TYPES.contains(&"failure_signature"));
-}
-
-#[test]
-fn fingerprint_rules_cover_initial_classes() {
-    let cases = [
-        ("error[E0382]: use of moved value", "rust:borrow-checker"),
-        ("error[E0308]: mismatched types", "rust:type-mismatch"),
-        (
-            "ModuleNotFoundError: No module named 'x'",
-            "python:import-error",
-        ),
-        ("src/a.ts:1:2 - error TS2322", "typescript:TS2322"),
-        ("JSONDecodeError: Expecting value", "json:parse-error"),
-        ("process exited with code 2", "process:non-zero-exit"),
-    ];
-    for (input, expected) in cases {
-        assert_eq!(fingerprint(input).signature, expected);
-    }
-}
-
-#[test]
-fn fingerprint_is_deterministic() {
-    let input = "error[E0382]: borrow of moved value";
-    assert_eq!(fingerprint(input), fingerprint(input));
-}
-
-#[test]
-fn unknown_fingerprint_preserves_excerpt() {
-    let fp = fingerprint("very strange failure");
-    assert_eq!(fp.signature, "unknown");
-    assert!(fp.raw_excerpt.contains("very strange failure"));
-}
-
-#[test]
 fn tool_result_parser_finds_synthetic_block() {
     let value = json!({
         "content": [{
@@ -95,101 +57,6 @@ fn sse_tool_result_parser_finds_synthetic_block() {
         test_event.metadata["payload"]["fingerprint_version"],
         FINGERPRINT_VERSION
     );
-}
-
-#[test]
-fn event_builder_writes_required_envelope_fields() {
-    for event_type in EXECUTION_EVENT_TYPES {
-        let kind = ExecutionEventKind::from_str(event_type).unwrap();
-        let event = build_execution_event(&ctx(), kind, true, json!({"example": true}));
-        assert_eq!(event.event_type, event_type);
-        assert_eq!(event.metadata["event_type"], event_type);
-        assert_eq!(event.metadata["success"], true);
-        assert!(event.metadata["correlation_id"].is_string());
-        assert_eq!(event.metadata["repo"], "repo");
-        assert_eq!(event.metadata["task"], "task");
-        assert!(event.metadata["payload"].is_object());
-        if is_failure_outcome_event_type(event_type) {
-            assert!(event.metadata["payload"]["signature"].is_null());
-            assert!(event.metadata["payload"]["signature_category"].is_null());
-            assert!(event.metadata["payload"]["fingerprint_version"].is_null());
-        }
-    }
-}
-
-#[test]
-fn failed_outcome_events_carry_inline_signatures() {
-    let payload = compile_result_payload("rust", "cargo", 101, "error[E0308]: mismatched types");
-    let event = build_execution_event(&ctx(), ExecutionEventKind::CompileResult, false, payload);
-
-    assert_eq!(event.metadata["payload"]["signature"], "rust:type-mismatch");
-    assert_eq!(
-        event.metadata["payload"]["signature_category"],
-        "type_error"
-    );
-    assert_eq!(
-        event.metadata["payload"]["fingerprint_version"],
-        FINGERPRINT_VERSION
-    );
-}
-
-#[test]
-fn event_type_examples_write_and_retrieve_intact() {
-    let ctx = ctx();
-    let examples = [
-        (
-            ExecutionEventKind::ToolResult,
-            true,
-            tool_result_payload(&CapturedToolResult {
-                tool_name: "cargo".to_string(),
-                content: String::new(),
-                exit_code: 0,
-                duration_ms: 1,
-                stdout_summary: "ok".to_string(),
-                stderr_summary: String::new(),
-            }),
-        ),
-        (
-            ExecutionEventKind::CompileResult,
-            true,
-            compile_result_payload("rust", "cargo", 0, ""),
-        ),
-        (
-            ExecutionEventKind::TestResult,
-            true,
-            test_result_payload("pytest", "2 passed"),
-        ),
-        (
-            ExecutionEventKind::LintResult,
-            true,
-            lint_result_payload("ruff", "0 errors, 0 warnings"),
-        ),
-        (
-            ExecutionEventKind::ValidationResult,
-            true,
-            validation_result_payload("schema", true, ""),
-        ),
-        (
-            ExecutionEventKind::PatchResult,
-            true,
-            patch_result_payload(vec!["src/lib.rs".to_string()], "applied", vec![]),
-        ),
-        (
-            ExecutionEventKind::Remediation,
-            true,
-            remediation_payload(Uuid::new_v4(), Uuid::new_v4(), "rust:type-mismatch"),
-        ),
-    ];
-
-    let mut store = std::collections::BTreeMap::new();
-    for (kind, success, payload) in examples {
-        let event = build_execution_event(&ctx, kind, success, payload.clone());
-        store.insert(event.id.clone(), event.clone());
-        let retrieved = store.get(&event.id).unwrap();
-        assert_eq!(retrieved.event_type, kind.as_str());
-        assert_eq!(retrieved.metadata["payload"], payload);
-        assert_eq!(retrieved.metadata["success"], success);
-    }
 }
 
 #[test]
@@ -288,16 +155,6 @@ fn invalid_validator_type_is_rejected() {
 }
 
 #[test]
-fn patch_payload_includes_lineage_metadata_fields() {
-    let payload = patch_result_payload(vec!["src/lib.rs".to_string()], "applied", vec![]);
-    assert_eq!(payload["files_touched"][0], "src/lib.rs");
-    assert_eq!(payload["lines_added"], 0);
-    assert_eq!(payload["lines_removed"], 0);
-    assert_eq!(payload["patch_applied"], true);
-    assert_eq!(payload["patch_reverted"], false);
-}
-
-#[test]
 fn execution_capture_p99_under_one_ms() {
     let result = CapturedToolResult {
         tool_name: "cargo".to_string(),
@@ -362,25 +219,4 @@ fn mixed_event_load_test_builds_1000_under_five_seconds() {
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert!(count >= 1000);
-}
-
-#[test]
-fn patch_validation_references_resolve_inside_chain() {
-    let validation = build_execution_event(
-        &ctx(),
-        ExecutionEventKind::ValidationResult,
-        true,
-        validation_result_payload("schema", true, ""),
-    );
-    let patch = build_execution_event(
-        &ctx(),
-        ExecutionEventKind::PatchResult,
-        true,
-        patch_result_payload(
-            vec!["src/lib.rs".to_string()],
-            "applied",
-            vec![Uuid::parse_str(&validation.id).unwrap()],
-        ),
-    );
-    assert!(patch_validation_ids_resolve(&[validation], &patch));
 }

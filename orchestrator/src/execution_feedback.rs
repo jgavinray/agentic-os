@@ -168,5 +168,13 @@ pub fn events_for_tool_result(
 }
 
 #[cfg(test)]
-#[path = "execution_feedback_tests.rs"]
-mod tests;
+#[path = "execution_feedback_capture_tests.rs"]
+mod capture_tests;
+
+#[cfg(test)]
+#[path = "execution_feedback_event_tests.rs"]
+mod event_tests;
+
+#[cfg(test)]
+#[path = "execution_feedback_fingerprint_tests.rs"]
+mod fingerprint_tests;
