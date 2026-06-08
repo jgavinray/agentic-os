@@ -2,13 +2,12 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 use crate::tool_mediation::{policy_allows_tool_capability, policy_blocks_tool_capability};
+use crate::tool_mediation_canonical::hidden_tool_names;
 use crate::tool_mediation_classification::{capability_for_tool_name, detect_tool_intent};
 use crate::tool_mediation_payload::{
     normalize_tool_choice, outcome, tool_name, tool_summaries, WithHidden,
 };
-use crate::tool_mediation_types::{
-    ToolCapability, ToolIntent, ToolMenuOutcome, ToolPayloadFormat, ToolSummary,
-};
+use crate::tool_mediation_types::{ToolMenuOutcome, ToolPayloadFormat, ToolSummary};
 
 pub fn shape_openai_request(req: &mut Value, user_content: &str) -> ToolMenuOutcome {
     shape_openai_request_with_policy(req, user_content, None)
@@ -179,40 +178,4 @@ fn shape_request(
         tool_choice_changed,
     )
     .with_hidden(hidden)
-}
-
-fn hidden_tool_names(intent: ToolIntent, offered: &[ToolSummary]) -> BTreeSet<String> {
-    let Some(canonical) = canonical_capability_for_intent(intent) else {
-        return BTreeSet::new();
-    };
-    if !offered
-        .iter()
-        .any(|tool| tool.capability == canonical.as_str())
-    {
-        return BTreeSet::new();
-    }
-
-    match canonical {
-        ToolCapability::FileRead
-        | ToolCapability::TextSearch
-        | ToolCapability::FileList
-        | ToolCapability::ShellMutation => offered
-            .iter()
-            .filter(|tool| tool.capability == ToolCapability::Shell.as_str())
-            .map(|tool| tool.name.clone())
-            .collect(),
-        _ => BTreeSet::new(),
-    }
-}
-
-fn canonical_capability_for_intent(intent: ToolIntent) -> Option<ToolCapability> {
-    match intent {
-        ToolIntent::FileRead => Some(ToolCapability::FileRead),
-        ToolIntent::TextSearch => Some(ToolCapability::TextSearch),
-        ToolIntent::FileList => Some(ToolCapability::FileList),
-        ToolIntent::FileEdit => Some(ToolCapability::FileEdit),
-        ToolIntent::Validation => Some(ToolCapability::Validation),
-        ToolIntent::Publishing => Some(ToolCapability::Publishing),
-        ToolIntent::General | ToolIntent::Unknown => None,
-    }
 }

@@ -212,6 +212,7 @@ pub mod telemetry_usage;
 pub mod token_limits;
 pub mod tool_mediation;
 pub mod tool_mediation_authorization;
+pub mod tool_mediation_canonical;
 pub mod tool_mediation_classification;
 pub mod tool_mediation_payload;
 pub mod tool_mediation_shaping;
