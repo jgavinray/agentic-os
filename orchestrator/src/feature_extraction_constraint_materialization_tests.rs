@@ -1,0 +1,157 @@
+use super::*;
+
+#[test]
+fn known_facts_feed_constraint_templates() {
+    let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+    let events = vec![
+        event(
+            "e1",
+            "failed_attempt",
+            json!({
+                "known_facts": {"auth_header": "Bearer test"},
+                "detection_tags": [{"type": "missing_auth", "source": "validation_parser", "tag_schema_version": 1}]
+            }),
+            now,
+        ),
+        event(
+            "e2",
+            "failed_attempt",
+            json!({
+                "known_facts": {"endpoint": "http://host.docker.internal:8088"},
+                "detection_tags": [{"type": "wrong_endpoint", "source": "validation_parser", "tag_schema_version": 1}]
+            }),
+            now + Duration::seconds(1),
+        ),
+    ];
+
+    let report = extract_records(&events, &config(now + Duration::seconds(1)));
+    let record = &report.records[0];
+    assert_eq!(record.missing_auth_count, 1);
+    assert_eq!(record.wrong_endpoint_count, 1);
+    assert_eq!(record.known_auth_header.as_deref(), Some("Bearer test"));
+    assert_eq!(
+        record.known_endpoint.as_deref(),
+        Some("http://host.docker.internal:8088")
+    );
+    assert!(record
+        .recommended_constraints
+        .iter()
+        .any(|constraint| constraint.constraint_type == "use_known_auth"));
+    assert!(record
+        .recommended_constraints
+        .iter()
+        .any(|constraint| constraint.constraint_type == "use_known_endpoint"));
+}
+
+#[test]
+fn priority_cap_keeps_highest_priority_constraints() {
+    let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+    let mut cfg = config(now);
+    cfg.max_operational_constraints = 4;
+    let events = vec![
+        event(
+            "e1",
+            "failed_attempt",
+            json!({"known_facts": {"auth_header": "Bearer t"}, "detection_tags": [{"type": "missing_auth", "source": "validation_parser", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e2",
+            "failed_attempt",
+            json!({"known_facts": {"endpoint": "http://host:8088"}, "detection_tags": [{"type": "wrong_endpoint", "source": "validation_parser", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e3",
+            "failed_attempt",
+            json!({"known_facts": {"migration_fix": "CREATE EXTENSION IF NOT EXISTS vector"}, "detection_tags": [{"type": "migration_failure", "source": "validation_parser", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e4",
+            "failed_attempt",
+            json!({"detection_tags": [{"type": "tool_loop", "tool": "Read", "source": "tool_loop_detector", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e5",
+            "failed_attempt",
+            json!({"detection_tags": [{"type": "user_interruption", "source": "failed_attempt_classifier", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e6",
+            "failed_attempt",
+            json!({"detection_tags": [{"type": "summarization_failure", "source": "summarizer", "tag_schema_version": 1}]}),
+            now,
+        ),
+    ];
+
+    let record = &extract_records(&events, &cfg).records[0];
+    let types: Vec<_> = record
+        .recommended_constraints
+        .iter()
+        .map(|constraint| constraint.constraint_type.as_str())
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            "use_known_auth",
+            "use_known_endpoint",
+            "use_known_migration_fix",
+            "avoid_tool_loop"
+        ]
+    );
+    assert!(record.suppressed_constraints.iter().any(|item| {
+        item.constraint_type == "handle_user_interruption" && item.reason == "priority_cap"
+    }));
+    assert!(record.suppressed_constraints.iter().any(|item| {
+        item.constraint_type == "handle_summarization_failure" && item.reason == "priority_cap"
+    }));
+}
+
+#[test]
+fn read_and_bash_loops_combine_before_priority_cap() {
+    let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
+    let events = vec![
+        event(
+            "e1",
+            "failed_attempt",
+            json!({"detection_tags": [{"type": "tool_loop", "tool": "Read", "source": "tool_loop_detector", "tag_schema_version": 1}]}),
+            now,
+        ),
+        event(
+            "e2",
+            "failed_attempt",
+            json!({"detection_tags": [{"type": "tool_loop", "tool": "Bash", "source": "tool_loop_detector", "tag_schema_version": 1}]}),
+            now,
+        ),
+    ];
+    let record = &extract_records(&events, &config(now)).records[0];
+    assert_eq!(record.recommended_constraints.len(), 1);
+    let text = &record.recommended_constraints[0].text;
+    assert!(text.contains("Read"));
+    assert!(text.contains("Bash"));
+}
+
+#[test]
+fn token_budget_drops_lowest_priority_first() {
+    let constraints = vec![
+        OperationalConstraint {
+            constraint_type: "use_known_auth".to_string(),
+            text: "Use `Bearer t` when calling protected orchestrator endpoints.".to_string(),
+        },
+        OperationalConstraint {
+            constraint_type: "handle_summarization_failure".to_string(),
+            text: "If summarization returns an empty response, inspect the provider or LiteLLM response body before retrying.".to_string(),
+        },
+    ];
+    let (kept, suppressed) = enforce_constraint_token_budget(&constraints, 30);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].constraint_type, "use_known_auth");
+    assert_eq!(
+        suppressed[0].constraint_type,
+        "handle_summarization_failure"
+    );
+    assert_eq!(suppressed[0].reason, "token_budget");
+}
