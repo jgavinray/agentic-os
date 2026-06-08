@@ -1,6 +1,7 @@
-use orchestrator::{db, feature_extraction, harness_feedback, migrations, request_classification};
-use std::env;
+use orchestrator::{feature_extraction, harness_feedback, request_classification};
 
+use super::commands_report::print_request_classification_report;
+use super::commands_runtime::{execution_feedback_enabled, open_migrated_pool};
 use super::options::{
     BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions, RequestClassificationOptions,
     RequestClassificationReportOptions,
@@ -144,44 +145,4 @@ async fn request_classification_report(args: Vec<String>) -> Result<(), anyhow::
     .await?;
     print_request_classification_report(&report);
     Ok(())
-}
-
-async fn open_migrated_pool() -> Result<deadpool_postgres::Pool, anyhow::Error> {
-    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = db::create_pool(&db_url)?;
-    migrations::run(&pool).await?;
-    Ok(pool)
-}
-
-fn execution_feedback_enabled() -> bool {
-    env::var("EXECUTION_FEEDBACK_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn print_request_classification_report(
-    report: &request_classification::RequestClassificationReport,
-) {
-    println!("request-classification-report:");
-    println!("by_route:");
-    for row in &report.by_route {
-        println!("  {} {}", row.label, row.count);
-    }
-    println!("top_risk_flags:");
-    for row in &report.top_risk_flags {
-        println!("  {} {}", row.label, row.count);
-    }
-    println!("unknown_label_counts:");
-    for row in &report.unknown_label_counts {
-        println!("  {} {}", row.label, row.count);
-    }
-    println!("repeated_guardrail_sessions:");
-    for row in &report.repeated_guardrail_sessions {
-        println!("  {} {}", row.session_id, row.count);
-    }
 }

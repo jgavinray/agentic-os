@@ -3,6 +3,10 @@ use std::env;
 
 #[path = "orchestrator-maint/commands.rs"]
 mod commands;
+#[path = "orchestrator-maint/commands_report.rs"]
+mod commands_report;
+#[path = "orchestrator-maint/commands_runtime.rs"]
+mod commands_runtime;
 #[path = "orchestrator-maint/options.rs"]
 mod options;
 #[path = "orchestrator-maint/signature_backfill.rs"]
