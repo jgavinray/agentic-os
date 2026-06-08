@@ -1,86 +1,7 @@
+use super::test_support::{config, event};
 use super::*;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
-use serde_json::Value;
-
-fn event(id: &str, event_type: &str, metadata: Value, created_at: DateTime<Utc>) -> AgentEvent {
-    AgentEvent {
-        id: id.to_string(),
-        session_id: "s1".to_string(),
-        repo: "repo".to_string(),
-        actor: "agent".to_string(),
-        event_type: event_type.to_string(),
-        summary: event_type.to_string(),
-        evidence: None,
-        metadata,
-        correlation_id: None,
-        parent_event_id: None,
-        trajectory_id: None,
-        attempt_index: None,
-        event_role: None,
-        created_at,
-        summary_level: 0,
-    }
-}
-
-fn config(now: DateTime<Utc>) -> ExtractionConfig {
-    ExtractionConfig {
-        evaluation_time: now,
-        feature_window_sec: 3600,
-        constraint_freshness_window_sec: 1800,
-        max_operational_constraints: 5,
-    }
-}
-
-#[test]
-fn unknown_schema_tags_are_not_consumed() {
-    let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
-    let events = vec![event(
-        "e1",
-        "failed_attempt",
-        json!({
-            "detection_tags": [{
-                "type": "wrong_endpoint",
-                "source": "hook_parser",
-                "tag_schema_version": 99
-            }]
-        }),
-        now,
-    )];
-
-    let report = extract_records(&events, &config(now));
-    let record = &report.records[0];
-    assert_eq!(report.unknown_tag_schema_versions, 1);
-    assert_eq!(record.wrong_endpoint_count, 0);
-    assert_eq!(record.other_failure_count, 1);
-}
-
-#[test]
-fn same_condition_from_two_producers_is_retained_but_not_double_counted() {
-    let now = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
-    let events = vec![event(
-        "e1",
-        "failed_attempt",
-        json!({
-            "detection_tags": [
-                {"type": "tool_loop", "tool": "Read", "source": "hook_parser", "tag_schema_version": 1},
-                {"type": "tool_loop", "tool": "Read", "source": "summarizer", "tag_schema_version": 1}
-            ]
-        }),
-        now,
-    )];
-
-    let report = extract_records(&events, &config(now));
-    let record = &report.records[0];
-    assert_eq!(record.tool_loop_count, 1);
-    assert_eq!(record.repeated_read_loop_count, 1);
-    assert_eq!(record.other_failure_count, 0);
-    assert_eq!(record.recommended_constraints.len(), 1);
-    assert_eq!(
-        record.recommended_constraints[0].constraint_type,
-        "avoid_tool_loop"
-    );
-}
 
 #[test]
 fn known_facts_feed_constraint_templates() {
@@ -319,8 +240,14 @@ fn read_and_bash_loops_combine_before_priority_cap() {
 #[test]
 fn token_budget_drops_lowest_priority_first() {
     let constraints = vec![
-        OperationalConstraint { constraint_type: "use_known_auth".to_string(), text: "Use `Bearer t` when calling protected orchestrator endpoints.".to_string() },
-        OperationalConstraint { constraint_type: "handle_summarization_failure".to_string(), text: "If summarization returns an empty response, inspect the provider or LiteLLM response body before retrying.".to_string() },
+        OperationalConstraint {
+            constraint_type: "use_known_auth".to_string(),
+            text: "Use `Bearer t` when calling protected orchestrator endpoints.".to_string(),
+        },
+        OperationalConstraint {
+            constraint_type: "handle_summarization_failure".to_string(),
+            text: "If summarization returns an empty response, inspect the provider or LiteLLM response body before retrying.".to_string(),
+        },
     ];
     let (kept, suppressed) = enforce_constraint_token_budget(&constraints, 30);
     assert_eq!(kept.len(), 1);

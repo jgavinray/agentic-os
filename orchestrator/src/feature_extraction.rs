@@ -52,5 +52,13 @@ pub fn extract_records(events: &[AgentEvent], config: &ExtractionConfig) -> Extr
 mod bootstrap_tests;
 
 #[cfg(test)]
-#[path = "feature_extraction_tests.rs"]
+#[path = "feature_extraction_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "feature_extraction_constraint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "feature_extraction_detection_tests.rs"]
+mod detection_tests;

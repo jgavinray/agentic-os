@@ -1,0 +1,32 @@
+use super::*;
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+
+pub fn event(id: &str, event_type: &str, metadata: Value, created_at: DateTime<Utc>) -> AgentEvent {
+    AgentEvent {
+        id: id.to_string(),
+        session_id: "s1".to_string(),
+        repo: "repo".to_string(),
+        actor: "agent".to_string(),
+        event_type: event_type.to_string(),
+        summary: event_type.to_string(),
+        evidence: None,
+        metadata,
+        correlation_id: None,
+        parent_event_id: None,
+        trajectory_id: None,
+        attempt_index: None,
+        event_role: None,
+        created_at,
+        summary_level: 0,
+    }
+}
+
+pub fn config(now: DateTime<Utc>) -> ExtractionConfig {
+    ExtractionConfig {
+        evaluation_time: now,
+        feature_window_sec: 3600,
+        constraint_freshness_window_sec: 1800,
+        max_operational_constraints: 5,
+    }
+}
