@@ -295,10 +295,46 @@ fn response_model_matches(body: Option<&[u8]>, expected: &Option<String>) -> boo
 
 fn response_model(body: Option<&[u8]>) -> Option<String> {
     let body = body?;
-    let json: Value = serde_json::from_slice(body).ok()?;
-    json.get("model")
-        .and_then(Value::as_str)
+    if let Ok(json) = serde_json::from_slice::<Value>(body) {
+        if let Some(model) = response_model_from_json(&json) {
+            return Some(model);
+        }
+    }
+
+    let text = std::str::from_utf8(body).ok()?;
+    let mut model = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(data) = trimmed.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(found) = response_model_from_json(&json) {
+            model = Some(found);
+        }
+    }
+    model
+}
+
+fn response_model_from_json(json: &Value) -> Option<String> {
+    string_at_path(json, &["model"])
+        .or_else(|| string_at_path(json, &["model_name"]))
+        .or_else(|| string_at_path(json, &["message", "model"]))
         .map(str::to_string)
+}
+
+fn string_at_path<'a>(json: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = json;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().filter(|value| !value.is_empty())
 }
 
 fn optional_string_matches(actual: &Option<String>, expected: &Option<String>) -> bool {
@@ -422,6 +458,79 @@ mod tests {
         assert!(!response_model_matches(
             Some(body),
             &Some("gemma-31b".to_string())
+        ));
+    }
+
+    #[test]
+    fn response_model_filter_matches_openai_sse_response() {
+        let body = br#"event: completion
+data: {"id":"chatcmpl-test","model":"qwen36-35b-heretic","choices":[]}
+data: [DONE]
+"#;
+
+        assert!(response_model_matches(
+            Some(body),
+            &Some("qwen36-35b-heretic".to_string())
+        ));
+        assert!(!response_model_matches(
+            Some(body),
+            &Some("gemma-31b".to_string())
+        ));
+    }
+
+    #[test]
+    fn response_model_filter_matches_anthropic_message_start_sse_response() {
+        let body =
+            br#"data: {"type":"message_start","message":{"id":"msg_test","model":"gemma-31b"}}
+data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}
+data: [DONE]"#;
+
+        assert!(response_model_matches(
+            Some(body),
+            &Some("gemma-31b".to_string())
+        ));
+    }
+
+    #[test]
+    fn response_model_filter_tolerates_partial_sse_without_trailing_newline() {
+        let body = br#"data: {"model_name":"qwen3.6-27b"}"#;
+
+        assert!(response_model_matches(
+            Some(body),
+            &Some("qwen3.6-27b".to_string())
+        ));
+    }
+
+    #[test]
+    fn response_model_filter_uses_last_sse_model_value() {
+        let body = br#"data: {"model":"old-model"}
+data: {"model":"new-model"}
+data: [DONE]
+"#;
+
+        assert!(!response_model_matches(
+            Some(body),
+            &Some("old-model".to_string())
+        ));
+        assert!(response_model_matches(
+            Some(body),
+            &Some("new-model".to_string())
+        ));
+    }
+
+    #[test]
+    fn response_model_filter_rejects_missing_or_non_string_model() {
+        assert!(!response_model_matches(
+            Some(br#"{"model":null}"#),
+            &Some("qwen3.6-27b".to_string())
+        ));
+        assert!(!response_model_matches(
+            Some(br#"data: {"choices":[]}"#),
+            &Some("qwen3.6-27b".to_string())
+        ));
+        assert!(!response_model_matches(
+            Some(b""),
+            &Some("qwen3.6-27b".to_string())
         ));
     }
 
