@@ -142,32 +142,50 @@ async fn run_backfill_inner(
         }
     }
 
-    if !options.dry_run {
-        insert_backfill_summary(
-            pool,
-            &PromptInterventionBackfillSummary {
-                run_id: Uuid::new_v4(),
-                detector_version: DETECTOR_VERSION.to_string(),
-                prompt_fingerprint_version: PROMPT_FINGERPRINT_VERSION,
-                filter_summary: filter_summary(options),
-                records_inserted: report.labels_written,
-                exchanges_scanned: report.rows_scanned,
-                labels_detected: report.labels_detected,
-                taxonomy_version: TAXONOMY_VERSION.to_string(),
-                labeler_type: LabelerType::Rule,
-                status: "completed".to_string(),
-                started_at,
-                completed_at: Utc::now().max(started_at),
-                notes: Some(format!(
-                    "dry_run=false duplicates_skipped={} assembly_errors={}",
-                    report.duplicates_skipped, report.assembly_errors
-                )),
-            },
-        )
-        .await?;
-    }
+    insert_backfill_summary(
+        pool,
+        &summary_from_report(options, &report, started_at, Utc::now().max(started_at)),
+    )
+    .await?;
 
     Ok(report)
+}
+
+fn summary_from_report(
+    options: &BackfillOptions,
+    report: &BackfillReport,
+    started_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
+) -> PromptInterventionBackfillSummary {
+    let records_inserted = if options.dry_run {
+        0
+    } else {
+        report.labels_written
+    };
+    let label_note = if options.dry_run {
+        format!("labels_would_write={}", report.labels_written)
+    } else {
+        format!("labels_written={}", report.labels_written)
+    };
+
+    PromptInterventionBackfillSummary {
+        run_id: Uuid::new_v4(),
+        detector_version: DETECTOR_VERSION.to_string(),
+        prompt_fingerprint_version: PROMPT_FINGERPRINT_VERSION,
+        filter_summary: filter_summary(options),
+        records_inserted,
+        exchanges_scanned: report.rows_scanned,
+        labels_detected: report.labels_detected,
+        taxonomy_version: TAXONOMY_VERSION.to_string(),
+        labeler_type: LabelerType::Rule,
+        status: "completed".to_string(),
+        started_at,
+        completed_at,
+        notes: Some(format!(
+            "dry_run={} {label_note} duplicates_skipped={} assembly_errors={}",
+            options.dry_run, report.duplicates_skipped, report.assembly_errors
+        )),
+    }
 }
 
 fn filter_summary(options: &BackfillOptions) -> Value {
@@ -446,6 +464,75 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "intervention_type: scope_narrowing=1"));
+    }
+
+    #[test]
+    fn dry_run_summary_records_no_inserted_records_and_would_write_note() {
+        let started_at = Utc::now();
+        let report = BackfillReport {
+            rows_scanned: 5,
+            labels_detected: 3,
+            labels_written: 2,
+            duplicates_skipped: 1,
+            assembly_errors: 1,
+            dry_run: true,
+            batch_size: 10,
+            ..BackfillReport::default()
+        };
+        let options = BackfillOptions {
+            dry_run: true,
+            batch_size: 10,
+            response_model: Some("qwen36-35b-heretic".to_string()),
+            ..BackfillOptions::default()
+        };
+
+        let summary = summary_from_report(&options, &report, started_at, started_at);
+
+        assert_eq!(summary.records_inserted, 0);
+        assert_eq!(summary.exchanges_scanned, 5);
+        assert_eq!(summary.labels_detected, 3);
+        assert_eq!(summary.detector_version, DETECTOR_VERSION);
+        assert_eq!(summary.taxonomy_version, TAXONOMY_VERSION);
+        assert_eq!(
+            summary.prompt_fingerprint_version,
+            PROMPT_FINGERPRINT_VERSION
+        );
+        assert_eq!(
+            summary.filter_summary["response_model"],
+            "qwen36-35b-heretic"
+        );
+        let notes = summary.notes.as_deref().unwrap_or_default();
+        assert!(notes.contains("dry_run=true"));
+        assert!(notes.contains("labels_would_write=2"));
+        assert!(notes.contains("duplicates_skipped=1"));
+        assert!(notes.contains("assembly_errors=1"));
+    }
+
+    #[test]
+    fn write_summary_records_inserted_records() {
+        let started_at = Utc::now();
+        let report = BackfillReport {
+            rows_scanned: 5,
+            labels_detected: 3,
+            labels_written: 2,
+            dry_run: false,
+            batch_size: 10,
+            ..BackfillReport::default()
+        };
+        let options = BackfillOptions {
+            dry_run: false,
+            batch_size: 10,
+            ..BackfillOptions::default()
+        };
+
+        let summary = summary_from_report(&options, &report, started_at, started_at);
+
+        assert_eq!(summary.records_inserted, 2);
+        assert_eq!(summary.exchanges_scanned, 5);
+        assert_eq!(summary.labels_detected, 3);
+        let notes = summary.notes.as_deref().unwrap_or_default();
+        assert!(notes.contains("dry_run=false"));
+        assert!(notes.contains("labels_written=2"));
     }
 
     fn sample_record() -> PromptInterventionRecord {
