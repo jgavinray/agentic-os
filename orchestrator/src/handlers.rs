@@ -68,5 +68,9 @@ mod handlers_request_preparation_tests;
 mod handlers_sse_tests;
 
 #[cfg(test)]
-#[path = "handlers_tests.rs"]
-mod handlers_tests;
+#[path = "handlers_context_tests.rs"]
+mod handlers_context_tests;
+
+#[cfg(test)]
+#[path = "handlers_system_context_tests.rs"]
+mod handlers_system_context_tests;
