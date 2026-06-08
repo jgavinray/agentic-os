@@ -447,6 +447,10 @@ mod tests {
     use crate::prompt_intervention_taxonomy::{
         BurdenType, FailureRelation, InterventionType, SignalFamily, SignalStrength, SourceKind,
     };
+    use axum::http::HeaderMap;
+    use serde_json::json;
+
+    static BACKFILL_DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn response_model_filter_matches_json_response() {
@@ -642,6 +646,107 @@ data: [DONE]
         let notes = summary.notes.as_deref().unwrap_or_default();
         assert!(notes.contains("dry_run=false"));
         assert!(notes.contains("labels_written=2"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_CAPTURE_DATABASE_URL pointing at a disposable Postgres database"]
+    async fn write_mode_deduplicates_repeated_backfill_runs() {
+        let _guard = BACKFILL_DB_TEST_LOCK.lock().await;
+        let database_url = std::env::var("TEST_CAPTURE_DATABASE_URL")
+            .expect("TEST_CAPTURE_DATABASE_URL must be set");
+        let pool = crate::db::create_pool(&database_url).expect("pool");
+        crate::client_capture::init(&pool)
+            .await
+            .expect("raw capture init");
+        crate::prompt_intervention_records::init(&pool)
+            .await
+            .expect("prompt intervention init");
+        crate::prompt_intervention_records::init_backfill_summaries(&pool)
+            .await
+            .expect("backfill summary init");
+
+        let repo = format!("prompt-intervention-dedupe-test-{}", Uuid::new_v4());
+        let exchange_id = Uuid::new_v4();
+        let body = json!({
+            "model": "claude-opus-4-8",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Edit only orchestrator/src/lib.rs. Do not create files. Acceptance tests required."
+                }
+            ]
+        });
+        let mut capture = crate::client_capture::RawHttpCapture::new(
+            "messages",
+            &HeaderMap::new(),
+            crate::client_capture::to_json_bytes(&body),
+        );
+        capture.exchange_id = exchange_id;
+        capture.repo = Some(repo.clone());
+        capture.parsed_request_body = Some(body);
+        capture.raw_response_body = Some(crate::client_capture::to_json_bytes(&json!({
+            "model": "qwen36-35b-heretic",
+            "content": []
+        })));
+
+        crate::client_capture::record(&pool, &capture)
+            .await
+            .expect("insert raw capture fixture");
+
+        let options = BackfillOptions {
+            repo: Some(repo.clone()),
+            response_model: Some("qwen36-35b-heretic".to_string()),
+            dry_run: false,
+            batch_size: 10,
+            ..BackfillOptions::default()
+        };
+
+        let first = run_backfill(&pool, &options).await.expect("first backfill");
+        assert_eq!(first.rows_scanned, 1);
+        assert!(first.labels_detected >= 1);
+        assert_eq!(first.labels_written, first.labels_detected);
+        assert_eq!(first.duplicates_skipped, 0);
+
+        let second = run_backfill(&pool, &options)
+            .await
+            .expect("second backfill");
+        assert_eq!(second.rows_scanned, 1);
+        assert_eq!(second.labels_detected, first.labels_detected);
+        assert_eq!(second.labels_written, 0);
+        assert_eq!(second.duplicates_skipped, first.labels_detected);
+
+        let conn = pool.get().await.expect("conn");
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT
+                 FROM prompt_interventions
+                 WHERE exchange_id = $1",
+                &[&exchange_id],
+            )
+            .await
+            .expect("count prompt interventions");
+        let stored_records: i64 = row.get(0);
+        assert_eq!(stored_records as u64, first.labels_detected);
+
+        conn.execute(
+            "DELETE FROM prompt_interventions WHERE exchange_id = $1",
+            &[&exchange_id],
+        )
+        .await
+        .expect("cleanup prompt interventions");
+        conn.execute(
+            "DELETE FROM raw_http_exchanges WHERE exchange_id = $1",
+            &[&exchange_id],
+        )
+        .await
+        .expect("cleanup raw capture");
+        conn.execute(
+            "DELETE FROM prompt_intervention_backfill_summaries
+             WHERE filter_summary->>'repo' = $1",
+            &[&repo],
+        )
+        .await
+        .expect("cleanup summaries");
     }
 
     fn sample_record() -> PromptInterventionRecord {
