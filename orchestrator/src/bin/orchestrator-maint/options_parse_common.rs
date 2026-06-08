@@ -30,6 +30,18 @@ pub(super) struct DryRunBatchOptions {
     pub(super) batch_size: i64,
 }
 
+#[derive(Default)]
+pub(super) struct PromptInterventionBackfillParsed {
+    pub(super) since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) requested_model: Option<String>,
+    pub(super) response_model: Option<String>,
+    pub(super) repo: Option<String>,
+    pub(super) namespace: Option<String>,
+    pub(super) dry_run: bool,
+    pub(super) batch_size: i64,
+}
+
 pub(super) fn parse_scoped_backfill_options(
     args: Vec<String>,
     flags: ScopedBackfillFlags,
@@ -129,6 +141,66 @@ pub(super) fn parse_dry_run_batch_options(
     })
 }
 
+pub(super) fn parse_prompt_intervention_backfill_options(
+    args: Vec<String>,
+) -> Result<PromptInterventionBackfillParsed, anyhow::Error> {
+    let mut parsed = PromptInterventionBackfillParsed {
+        batch_size: DEFAULT_BATCH_SIZE,
+        ..Default::default()
+    };
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--since" | "–since" => {
+                parsed.since = Some(parse_since(&args, idx)?);
+                idx += 2;
+            }
+            "--until" | "–until" => {
+                parsed.until = Some(parse_timestamp(
+                    &args,
+                    idx,
+                    "--until requires an RFC3339 timestamp",
+                )?);
+                idx += 2;
+            }
+            "--requested-model" | "–requested-model" => {
+                parsed.requested_model = Some(option_value(
+                    &args,
+                    idx,
+                    "--requested-model requires a value",
+                )?);
+                idx += 2;
+            }
+            "--response-model" | "–response-model" => {
+                parsed.response_model = Some(option_value(
+                    &args,
+                    idx,
+                    "--response-model requires a value",
+                )?);
+                idx += 2;
+            }
+            "--repo" | "–repo" => {
+                parsed.repo = Some(option_value(&args, idx, "--repo requires a value")?);
+                idx += 2;
+            }
+            "--namespace" | "–namespace" => {
+                parsed.namespace = Some(option_value(&args, idx, "--namespace requires a value")?);
+                idx += 2;
+            }
+            "--dry-run" | "–dry-run" => {
+                parsed.dry_run = true;
+                idx += 1;
+            }
+            "--batch-size" | "–batch-size" => {
+                parsed.batch_size = parse_positive_batch_size(&args, idx)?;
+                idx += 2;
+            }
+            other => anyhow::bail!("unknown option: {other}"),
+        }
+    }
+    Ok(parsed)
+}
+
 fn option_value(
     args: &[String],
     idx: usize,
@@ -144,7 +216,15 @@ fn parse_since(
     args: &[String],
     idx: usize,
 ) -> Result<chrono::DateTime<chrono::Utc>, anyhow::Error> {
-    let value = option_value(args, idx, "--since requires an RFC3339 timestamp")?;
+    parse_timestamp(args, idx, "--since requires an RFC3339 timestamp")
+}
+
+fn parse_timestamp(
+    args: &[String],
+    idx: usize,
+    message: &'static str,
+) -> Result<chrono::DateTime<chrono::Utc>, anyhow::Error> {
+    let value = option_value(args, idx, message)?;
     Ok(chrono::DateTime::parse_from_rfc3339(&value)?.with_timezone(&chrono::Utc))
 }
 

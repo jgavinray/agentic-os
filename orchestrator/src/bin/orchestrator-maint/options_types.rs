@@ -5,6 +5,18 @@ pub(crate) struct BackfillOptions {
     pub(crate) batch_size: i64,
 }
 
+#[derive(Debug)]
+pub(crate) struct PromptInterventionBackfillOptions {
+    pub(crate) since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) requested_model: Option<String>,
+    pub(crate) response_model: Option<String>,
+    pub(crate) repo: Option<String>,
+    pub(crate) namespace: Option<String>,
+    pub(crate) dry_run: bool,
+    pub(crate) batch_size: i64,
+}
+
 pub(crate) struct ExtractFeaturesOptions {
     pub(crate) repo: Option<String>,
     pub(crate) session_id: Option<String>,

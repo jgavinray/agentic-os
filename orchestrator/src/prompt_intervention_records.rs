@@ -199,16 +199,30 @@ impl PromptInterventionRecord {
 pub struct PromptInterventionBackfillSummary {
     /// Backfill run ID.
     pub run_id: Uuid,
+    /// Detector version used for this run.
+    pub detector_version: String,
+    /// Prompt fingerprint version used for this run.
+    pub prompt_fingerprint_version: u32,
+    /// Bounded JSON summary of applied filters.
+    pub filter_summary: serde_json::Value,
     /// Number of records inserted during this backfill.
     pub records_inserted: u64,
     /// Number of exchanges scanned.
     pub exchanges_scanned: u64,
+    /// Number of labels detected before dry-run/write-mode filtering.
+    pub labels_detected: u64,
     /// Taxonomy version used.
     pub taxonomy_version: String,
     /// Labeler type for all records in this backfill.
     pub labeler_type: LabelerType,
+    /// Run status.
+    pub status: String,
+    /// Timestamp when the backfill started.
+    pub started_at: chrono::DateTime<chrono::Utc>,
     /// Timestamp when the backfill completed.
     pub completed_at: chrono::DateTime<chrono::Utc>,
+    /// Optional bounded operational notes.
+    pub notes: Option<String>,
 }
 
 // ── Capture-side table init ────────────────────────────────────
@@ -419,12 +433,33 @@ pub async fn init_backfill_summaries(pool: &Pool) -> Result<(), anyhow::Error> {
     conn.batch_execute(&format!(
         "CREATE TABLE IF NOT EXISTS prompt_intervention_backfill_summaries (
             run_id UUID PRIMARY KEY,
+            detector_version TEXT NOT NULL DEFAULT 'unknown',
+            prompt_fingerprint_version INT NOT NULL DEFAULT 1 CHECK (prompt_fingerprint_version >= 1),
+            filter_summary JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             records_inserted BIGINT NOT NULL CHECK (records_inserted >= 0),
             exchanges_scanned BIGINT NOT NULL CHECK (exchanges_scanned >= 0),
+            labels_detected BIGINT NOT NULL DEFAULT 0 CHECK (labels_detected >= 0),
             taxonomy_version TEXT NOT NULL,
             labeler_type TEXT NOT NULL {lt_check},
-            completed_at TIMESTAMPTZ NOT NULL
-        );",
+            status TEXT NOT NULL DEFAULT 'completed',
+            started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            completed_at TIMESTAMPTZ NOT NULL,
+            notes TEXT
+        );
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS detector_version TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS prompt_fingerprint_version INT NOT NULL DEFAULT 1 CHECK (prompt_fingerprint_version >= 1);
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS filter_summary JSONB NOT NULL DEFAULT '{{}}'::jsonb;
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS labels_detected BIGINT NOT NULL DEFAULT 0 CHECK (labels_detected >= 0);
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+        ALTER TABLE prompt_intervention_backfill_summaries
+            ADD COLUMN IF NOT EXISTS notes TEXT;",
     ))
     .await?;
     Ok(())
@@ -435,18 +470,28 @@ pub async fn insert_backfill_summary(
     pool: &Pool,
     summary: &PromptInterventionBackfillSummary,
 ) -> Result<(), anyhow::Error> {
+    let prompt_fingerprint_version = i32::try_from(summary.prompt_fingerprint_version)?;
     let conn = pool.get().await?;
     conn.execute(
         "INSERT INTO prompt_intervention_backfill_summaries
-         (run_id, records_inserted, exchanges_scanned, taxonomy_version, labeler_type, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (run_id, detector_version, prompt_fingerprint_version, filter_summary,
+          records_inserted, exchanges_scanned, labels_detected, taxonomy_version,
+          labeler_type, status, started_at, completed_at, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         &[
             &summary.run_id,
+            &summary.detector_version,
+            &prompt_fingerprint_version,
+            &summary.filter_summary,
             &(summary.records_inserted as i64),
             &(summary.exchanges_scanned as i64),
+            &(summary.labels_detected as i64),
             &summary.taxonomy_version,
             &summary.labeler_type.as_str(),
+            &summary.status,
+            &summary.started_at,
             &summary.completed_at,
+            &summary.notes,
         ],
     )
     .await?;
@@ -734,17 +779,30 @@ mod tests {
 
     #[test]
     fn test_backfill_summary_creation() {
+        let started_at = chrono::Utc::now();
         let summary = PromptInterventionBackfillSummary {
             run_id: Uuid::new_v4(),
+            detector_version: "detector-v1".to_string(),
+            prompt_fingerprint_version: 1,
+            filter_summary: serde_json::json!({"dry_run": true}),
             records_inserted: 42,
             exchanges_scanned: 100,
+            labels_detected: 50,
             taxonomy_version: "1.0.0".to_string(),
             labeler_type: LabelerType::Posthoc,
+            status: "completed".to_string(),
+            started_at,
             completed_at: chrono::Utc::now(),
+            notes: Some("dry_run=true".to_string()),
         };
+        assert_eq!(summary.detector_version, "detector-v1");
+        assert_eq!(summary.prompt_fingerprint_version, 1);
+        assert_eq!(summary.filter_summary["dry_run"], true);
         assert_eq!(summary.records_inserted, 42);
         assert_eq!(summary.exchanges_scanned, 100);
+        assert_eq!(summary.labels_detected, 50);
         assert_eq!(summary.labeler_type, LabelerType::Posthoc);
+        assert_eq!(summary.status, "completed");
     }
 
     // ── Superseded record pointer ──────────────────────────────

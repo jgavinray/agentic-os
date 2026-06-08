@@ -1,9 +1,12 @@
-use orchestrator::{feature_extraction, harness_feedback, request_classification};
+use orchestrator::{
+    feature_extraction, harness_feedback, prompt_intervention_backfill, request_classification,
+};
 
 use super::commands_report::print_request_classification_report;
-use super::commands_runtime::{execution_feedback_enabled, open_migrated_pool};
+use super::commands_runtime::{execution_feedback_enabled, open_capture_pool, open_migrated_pool};
 use super::options::{
-    BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions, RequestClassificationOptions,
+    BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions,
+    PromptInterventionBackfillOptions, RequestClassificationOptions,
     RequestClassificationReportOptions,
 };
 use super::signature_backfill;
@@ -14,6 +17,7 @@ pub(super) async fn run_command(command: &str, args: Vec<String>) -> Result<(), 
         "extract-features" => extract_features(args).await,
         "classify-harness-feedback" => classify_harness_feedback(args).await,
         "classify-requests" => classify_requests(args).await,
+        "backfill-prompt-interventions" => backfill_prompt_interventions(args).await,
         "request-classification-report" => request_classification_report(args).await,
         _ => {
             print_usage();
@@ -24,7 +28,7 @@ pub(super) async fn run_command(command: &str, args: Vec<String>) -> Result<(), 
 
 pub(super) fn print_usage() {
     eprintln!(
-        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--repair] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
+        "usage: orchestrator-maint backfill-signatures [--dry-run] [--batch-size N]\n       orchestrator-maint extract-features [--repo REPO] [--session SESSION] [--trajectory TRAJECTORY] [--since TIMESTAMP] [--dry-run] [--batch-size N] [--skip-bootstrap-tagging]\n       orchestrator-maint classify-harness-feedback [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--batch-size N]\n       orchestrator-maint classify-requests [--repo REPO] [--session SESSION] [--since TIMESTAMP] [--dry-run] [--repair] [--batch-size N]\n       orchestrator-maint backfill-prompt-interventions [--since TIMESTAMP] [--until TIMESTAMP] [--requested-model MODEL] [--response-model MODEL] [--repo REPO] [--namespace NS] [--dry-run] [--batch-size N]\n       orchestrator-maint request-classification-report [--repo REPO] [--since TIMESTAMP]"
     );
 }
 
@@ -129,6 +133,29 @@ async fn classify_requests(args: Vec<String>) -> Result<(), anyhow::Error> {
         report.dry_run,
         report.batch_size
     );
+    Ok(())
+}
+
+async fn backfill_prompt_interventions(args: Vec<String>) -> Result<(), anyhow::Error> {
+    let opts = PromptInterventionBackfillOptions::parse(args)?;
+    let pool = open_capture_pool().await?;
+    let report = prompt_intervention_backfill::run_backfill(
+        &pool,
+        &prompt_intervention_backfill::BackfillOptions {
+            since: opts.since,
+            until: opts.until,
+            requested_model: opts.requested_model,
+            response_model: opts.response_model,
+            repo: opts.repo,
+            namespace: opts.namespace,
+            dry_run: opts.dry_run,
+            batch_size: opts.batch_size,
+        },
+    )
+    .await?;
+    for line in prompt_intervention_backfill::report_lines(&report) {
+        println!("{line}");
+    }
     Ok(())
 }
 

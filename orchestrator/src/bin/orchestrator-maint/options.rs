@@ -8,6 +8,7 @@ mod parse_common;
 mod types;
 
 pub(super) use types::{
-    BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions, RequestClassificationOptions,
+    BackfillOptions, ExtractFeaturesOptions, HarnessFeedbackOptions,
+    PromptInterventionBackfillOptions, RequestClassificationOptions,
     RequestClassificationReportOptions,
 };
