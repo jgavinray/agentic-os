@@ -80,12 +80,29 @@ pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
     let Some(pool) = pool else {
         return;
     };
-    if let Err(e) = record(pool, &capture).await {
-        tracing::warn!(
-            exchange_id = %capture.exchange_id,
-            endpoint = %capture.endpoint,
-            "failed to record raw client capture: {e}"
-        );
+    match record(pool, &capture).await {
+        Ok(()) => match crate::prompt_intervention_assembly::records_from_capture(&capture) {
+            Ok(records) => {
+                for record in records {
+                    crate::prompt_intervention_records::insert_best_effort(Some(pool), record)
+                        .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    exchange_id = %capture.exchange_id,
+                    endpoint = %capture.endpoint,
+                    "failed to assemble prompt intervention records: {e}"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                exchange_id = %capture.exchange_id,
+                endpoint = %capture.endpoint,
+                "failed to record raw client capture: {e}"
+            );
+        }
     }
 }
 
