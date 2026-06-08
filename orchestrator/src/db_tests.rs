@@ -197,8 +197,12 @@ fn build_context_truncates_hybrid_section_at_budget() {
 }
 
 #[cfg(test)]
-#[path = "db_context_tests.rs"]
-mod context_tests;
+#[path = "db_context_failure_tests.rs"]
+mod context_failure_tests;
+
+#[cfg(test)]
+#[path = "db_context_policy_tests.rs"]
+mod context_policy_tests;
 
 #[test]
 fn promoted_memory_requires_source_ids() {
