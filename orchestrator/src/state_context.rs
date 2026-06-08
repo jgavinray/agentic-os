@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::state_context_policy::{
-    ContextPolicy, TaskCategory, TaskContextConfig, CONTEXT_CACHE_TTL_MS,
-    DEFAULT_CONTEXT_DECAY_RATE, DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET,
-    DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET,
+    ContextPolicy, CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_DECAY_RATE,
+    DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET, DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET,
 };
+pub use crate::state_task_category::{TaskCategory, TaskContextConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryLevel {

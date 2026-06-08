@@ -193,6 +193,7 @@ pub mod state_context_cache;
 pub mod state_context_policy;
 pub mod state_limits;
 pub mod state_summarizer;
+pub mod state_task_category;
 pub mod state_token_usage;
 pub mod summarizer;
 pub mod summarizer_candidates;
