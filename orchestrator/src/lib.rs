@@ -154,6 +154,7 @@ pub mod orchestration_policy_posture_types;
 pub mod orchestration_policy_store;
 pub mod orchestration_policy_tool_types;
 pub mod orchestration_policy_types;
+pub mod prompt_intervention_extraction;
 pub mod prompt_intervention_fingerprint;
 pub mod prompt_intervention_records;
 pub mod prompt_intervention_taxonomy;
