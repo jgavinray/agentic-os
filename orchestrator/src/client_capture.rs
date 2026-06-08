@@ -132,8 +132,11 @@ pub async fn record_response_best_effort(
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, StatusCode};
+    use serde_json::json;
+    use tokio::time::{sleep, Duration};
+    use uuid::Uuid;
 
-    use super::{record_response_best_effort, to_json_bytes, RawHttpCapture};
+    use super::{init, record_response_best_effort, to_json_bytes, RawHttpCapture};
 
     #[tokio::test]
     async fn record_response_best_effort_without_pool_is_non_failing() {
@@ -148,5 +151,65 @@ mod tests {
             to_json_bytes(&body),
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_CAPTURE_DATABASE_URL pointing at a disposable Postgres database"]
+    async fn runtime_prompt_intervention_failure_does_not_block_raw_capture() {
+        let database_url = std::env::var("TEST_CAPTURE_DATABASE_URL")
+            .expect("TEST_CAPTURE_DATABASE_URL must be set");
+        let pool = crate::db::create_pool(&database_url).expect("pool");
+        init(&pool).await.expect("raw capture init");
+
+        let body = json!({
+            "model": "claude-opus-4-8",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Do not implement. Acceptance tests required."
+                }
+            ]
+        });
+        let mut capture = RawHttpCapture::new("messages", &HeaderMap::new(), to_json_bytes(&body));
+        let exchange_id = Uuid::new_v4();
+        capture.exchange_id = exchange_id;
+        capture.parsed_request_body = Some(body);
+
+        record_response_best_effort(
+            Some(&pool),
+            capture,
+            StatusCode::OK,
+            "application/json",
+            to_json_bytes(&json!({"model": "qwen3.6-27b", "content": []})),
+        )
+        .await;
+
+        let conn = pool.get().await.expect("conn");
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT
+                 FROM raw_http_exchanges
+                 WHERE exchange_id = $1",
+                &[&exchange_id],
+            )
+            .await
+            .expect("count raw capture");
+        let raw_records: i64 = row.get(0);
+        assert_eq!(raw_records, 1);
+
+        let row = conn
+            .query_one("SELECT to_regclass('prompt_interventions')::TEXT", &[])
+            .await
+            .expect("check prompt intervention table");
+        let prompt_interventions_table: Option<String> = row.get(0);
+        assert_eq!(prompt_interventions_table, None);
+
+        sleep(Duration::from_millis(50)).await;
+        conn.execute(
+            "DELETE FROM raw_http_exchanges WHERE exchange_id = $1",
+            &[&exchange_id],
+        )
+        .await
+        .expect("cleanup raw capture");
     }
 }
