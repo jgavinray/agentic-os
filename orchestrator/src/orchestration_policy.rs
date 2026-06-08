@@ -117,8 +117,20 @@ pub fn derive_orchestration_policy(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[path = "orchestration_policy_tests.rs"]
+#[path = "orchestration_policy_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "orchestration_policy_base_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "orchestration_policy_prompt_tests.rs"]
+mod prompt_tests;
+
+#[cfg(test)]
+#[path = "orchestration_policy_risk_tests.rs"]
+mod risk_tests;
 
 #[cfg(test)]
 #[path = "orchestration_policy_contract_tests.rs"]
