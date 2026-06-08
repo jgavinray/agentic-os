@@ -18,6 +18,17 @@ pub(crate) struct AnthropicStreamingUpstream {
     pub finalizer: LiteLlmCallFinalizer,
 }
 
+#[derive(Clone, Copy)]
+struct AnthropicRetryAttemptContext<'a> {
+    request_event_id: Option<Uuid>,
+    trajectory: Option<TrajectoryContext>,
+    context_pack_id: Option<Uuid>,
+    namespace: &'a str,
+    repo: &'a str,
+    task: &'a str,
+    model: &'a str,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_anthropic_streaming_with_retry(
     state: &AppState,
@@ -32,6 +43,15 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
     model: &str,
 ) -> Result<AnthropicStreamingUpstream, Response> {
     let url = format!("{}/messages", state.litellm_url);
+    let retry_context = AnthropicRetryAttemptContext {
+        request_event_id,
+        trajectory,
+        context_pack_id,
+        namespace,
+        repo,
+        task,
+        model,
+    };
     let started = finalizer.attempt_mut().started_at;
     let mut upstream = match send_streaming_messages_request(state, &url, &req, started).await {
         Ok(r) => r,
@@ -78,19 +98,7 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
             "retrying streaming messages request with reduced max_tokens after context window error"
         );
         set_max_tokens(&mut req, retry_max_tokens);
-        finalizer = begin_retry_attempt(
-            state,
-            &mut req,
-            &finalizer,
-            request_event_id,
-            trajectory,
-            context_pack_id,
-            namespace,
-            repo,
-            task,
-            model,
-        )
-        .await;
+        finalizer = begin_retry_attempt(state, &mut req, &finalizer, retry_context).await;
         let retry_started = std::time::Instant::now();
         upstream = match send_streaming_messages_request(state, &url, &req, retry_started).await {
             Ok(r) => r,
@@ -152,18 +160,11 @@ pub(crate) async fn dispatch_anthropic_streaming_with_retry(
         .into_response())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn begin_retry_attempt(
     state: &AppState,
     req: &mut Value,
     finalizer: &LiteLlmCallFinalizer,
-    request_event_id: Option<Uuid>,
-    trajectory: Option<TrajectoryContext>,
-    context_pack_id: Option<Uuid>,
-    namespace: &str,
-    repo: &str,
-    task: &str,
-    model: &str,
+    retry_context: AnthropicRetryAttemptContext<'_>,
 ) -> LiteLlmCallFinalizer {
     let prior_attempt = finalizer.attempt().clone();
     let route = RouteSelection {
@@ -182,14 +183,16 @@ async fn begin_retry_attempt(
             .unwrap_or_else(|| "default-routing-v1".to_string()),
     };
     let retry_attempt = crate::litellm::new_attempt(
-        request_event_id,
-        trajectory.map(|trajectory| trajectory.trajectory_id),
-        context_pack_id,
-        namespace.to_string(),
-        repo.to_string(),
-        task.to_string(),
+        retry_context.request_event_id,
+        retry_context
+            .trajectory
+            .map(|trajectory| trajectory.trajectory_id),
+        retry_context.context_pack_id,
+        retry_context.namespace.to_string(),
+        retry_context.repo.to_string(),
+        retry_context.task.to_string(),
         "messages",
-        model.to_string(),
+        retry_context.model.to_string(),
         &route,
         crate::litellm::exact_cache_decision("messages", req, false),
         prior_attempt.context_pack_hash.clone(),
