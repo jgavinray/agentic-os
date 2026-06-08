@@ -1,5 +1,6 @@
 pub mod adversarial_harness;
 pub mod adversarial_harness_callbacks;
+pub mod adversarial_harness_outcome;
 pub mod anthropic;
 pub mod app_router;
 pub mod auth;
