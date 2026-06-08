@@ -116,5 +116,17 @@ pub fn is_classifiable_request_event(event: &crate::db::AgentEvent) -> bool {
 }
 
 #[cfg(test)]
-#[path = "request_classification_tests.rs"]
+#[path = "request_classification_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "request_classification_feature_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "request_classification_intent_tests.rs"]
+mod intent_tests;
+
+#[cfg(test)]
+#[path = "request_classification_risk_tests.rs"]
+mod risk_tests;
