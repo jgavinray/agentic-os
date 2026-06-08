@@ -8,6 +8,7 @@ pub mod app_router;
 pub mod auth;
 pub mod background;
 pub mod client_capture;
+pub mod client_capture_types;
 pub mod context_artifacts;
 pub mod context_compiler;
 pub mod context_compiler_event_artifacts;
