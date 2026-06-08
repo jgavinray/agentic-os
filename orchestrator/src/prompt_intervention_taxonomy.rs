@@ -5,6 +5,61 @@
 /// docs/PromptInterventions/03-signal-taxonomy.md.
 use serde::{Deserialize, Serialize};
 
+pub const SOURCE_KIND_VALUES: &[&str] = &[
+    "raw_prompt",
+    "user_message",
+    "assistant_message",
+    "tool_result",
+    "posthoc_review",
+];
+
+pub const INTERVENTION_TYPE_VALUES: &[&str] = &[
+    "stop_and_redirect",
+    "scope_narrowing",
+    "prompt_repair",
+    "quality_gate",
+    "risk_warning",
+    "clarification_request",
+    "implementation_block",
+    "validation_requirement",
+    "model_failure_correction",
+    "other",
+];
+
+pub const SIGNAL_FAMILY_VALUES: &[&str] = &[
+    "steering",
+    "failure_correction",
+    "risk_control",
+    "validation_pressure",
+    "context_pressure",
+    "no_signal",
+];
+
+pub const SIGNAL_STRENGTH_VALUES: &[&str] = &["explicit", "implicit", "ambiguous"];
+
+pub const BURDEN_TYPE_VALUES: &[&str] = &[
+    "human_prompt_repair",
+    "human_scope_control",
+    "human_stop_control",
+    "human_validation_control",
+    "human_risk_control",
+    "context_recovery",
+    "model_error_recovery",
+    "unknown_burden",
+];
+
+pub const FAILURE_RELATION_VALUES: &[&str] = &[
+    "prevention",
+    "correction",
+    "recovery",
+    "quality_control",
+    "risk_control",
+    "unknown_relation",
+];
+
+pub const LABELER_TYPE_VALUES: &[&str] =
+    &["rule", "posthoc", "human", "local_model", "frontier_model"];
+
 // ── Source Kinds ───────────────────────────────────────────────
 
 /// Where the evidence for an intervention came from.

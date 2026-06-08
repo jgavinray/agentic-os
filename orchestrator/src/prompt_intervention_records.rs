@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::prompt_intervention_taxonomy::{
     BurdenType, FailureRelation, InterventionType, LabelerType, SignalFamily, SignalStrength,
-    SourceKind,
+    SourceKind, BURDEN_TYPE_VALUES, FAILURE_RELATION_VALUES, INTERVENTION_TYPE_VALUES,
+    LABELER_TYPE_VALUES, SIGNAL_FAMILY_VALUES, SIGNAL_STRENGTH_VALUES, SOURCE_KIND_VALUES,
 };
 
 /// Maximum length for evidence excerpts.
@@ -227,67 +228,6 @@ pub struct PromptInterventionBackfillSummary {
 
 // ── Capture-side table init ────────────────────────────────────
 
-/// All valid source_kind string values for CHECK constraint.
-const SOURCE_KIND_VALUES: &[&str] = &[
-    "raw_prompt",
-    "user_message",
-    "assistant_message",
-    "tool_result",
-    "posthoc_review",
-];
-
-/// All valid intervention_type string values for CHECK constraint.
-const INTERVENTION_TYPE_VALUES: &[&str] = &[
-    "stop_and_redirect",
-    "scope_narrowing",
-    "prompt_repair",
-    "quality_gate",
-    "risk_warning",
-    "clarification_request",
-    "implementation_block",
-    "validation_requirement",
-    "model_failure_correction",
-    "other",
-];
-
-/// All valid signal_family string values for CHECK constraint.
-const SIGNAL_FAMILY_VALUES: &[&str] = &[
-    "steering",
-    "failure_correction",
-    "risk_control",
-    "validation_pressure",
-    "context_pressure",
-    "no_signal",
-];
-
-/// All valid signal_strength string values for CHECK constraint.
-const SIGNAL_STRENGTH_VALUES: &[&str] = &["explicit", "implicit", "ambiguous"];
-
-/// All valid burden_type string values for CHECK constraint.
-const BURDEN_TYPE_VALUES: &[&str] = &[
-    "human_prompt_repair",
-    "human_scope_control",
-    "human_stop_control",
-    "human_validation_control",
-    "human_risk_control",
-    "context_recovery",
-    "model_error_recovery",
-    "unknown_burden",
-];
-
-/// All valid failure_relation string values for CHECK constraint.
-const FAILURE_RELATION_VALUES: &[&str] = &[
-    "prevention",
-    "correction",
-    "recovery",
-    "quality_control",
-    "risk_control",
-    "unknown_relation",
-];
-
-/// All valid labeler_type string values for CHECK constraint.
-const LABELER_TYPE_VALUES: &[&str] = &["rule", "posthoc", "human", "local_model", "frontier_model"];
-
 fn check_constraint(col: &str, values: &[&str]) -> String {
     let list: Vec<String> = values.iter().map(|v| format!("'{}'", v)).collect();
     format!("CHECK ({} IN ({}) )", col, list.join(", "))
@@ -406,21 +346,35 @@ pub async fn insert(pool: &Pool, record: &PromptInterventionRecord) -> Result<()
         ],
     )
     .await?;
+    crate::telemetry_prompt_interventions::record_prompt_intervention_emitted(record);
     Ok(())
 }
 
 /// Best-effort insert that logs warnings on failure.
 pub async fn insert_best_effort(pool: Option<&Pool>, record: PromptInterventionRecord) {
     let Some(pool) = pool else {
+        crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+            "no_pool",
+        );
         return;
     };
-    if let Err(e) = insert(pool, &record).await {
-        tracing::warn!(
-            target: "prompt_intervention",
-            record_id = %record.id,
-            exchange_id = %record.exchange_id,
-            "failed to insert prompt intervention record: {e}"
-        );
+    match insert(pool, &record).await {
+        Ok(()) => {
+            crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+                "success",
+            );
+        }
+        Err(e) => {
+            crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+                "error",
+            );
+            tracing::warn!(
+                target: "prompt_intervention",
+                record_id = %record.id,
+                exchange_id = %record.exchange_id,
+                "failed to insert prompt intervention record: {e}"
+            );
+        }
     }
 }
 

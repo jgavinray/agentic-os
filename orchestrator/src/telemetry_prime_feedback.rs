@@ -98,4 +98,42 @@ pub(crate) fn prime_feature_feedback_metrics() {
             .increment(0);
         }
     }
+    for intervention_type in crate::prompt_intervention_taxonomy::INTERVENTION_TYPE_VALUES {
+        for labeler_type in crate::prompt_intervention_taxonomy::LABELER_TYPE_VALUES {
+            counter!(
+                "prompt_intervention_records_total",
+                "intervention_type" => *intervention_type,
+                "labeler_type" => *labeler_type
+            )
+            .increment(0);
+        }
+    }
+    for signal_family in crate::prompt_intervention_taxonomy::SIGNAL_FAMILY_VALUES {
+        counter!(
+            "prompt_intervention_signal_family_total",
+            "signal_family" => *signal_family
+        )
+        .increment(0);
+    }
+    for burden_type in crate::prompt_intervention_taxonomy::BURDEN_TYPE_VALUES {
+        counter!(
+            "prompt_intervention_burden_type_total",
+            "burden_type" => *burden_type
+        )
+        .increment(0);
+    }
+    for failure_relation in crate::prompt_intervention_taxonomy::FAILURE_RELATION_VALUES {
+        counter!(
+            "prompt_intervention_failure_relation_total",
+            "failure_relation" => *failure_relation
+        )
+        .increment(0);
+    }
+    for result in crate::telemetry_prompt_interventions::PROMPT_INTERVENTION_BACKFILL_RESULTS {
+        counter!("prompt_intervention_backfill_runs_total", "result" => *result).increment(0);
+    }
+    for result in crate::telemetry_prompt_interventions::PROMPT_INTERVENTION_RUNTIME_WRITE_RESULTS {
+        counter!("prompt_intervention_runtime_write_attempts_total", "result" => *result)
+            .increment(0);
+    }
 }

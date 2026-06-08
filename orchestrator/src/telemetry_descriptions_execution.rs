@@ -93,4 +93,28 @@ pub(crate) fn describe_execution_metrics() {
         "harness_guardrail_decisions_total",
         "Deterministic runtime guardrail decisions by bounded action and reason."
     );
+    describe_counter!(
+        "prompt_intervention_records_total",
+        "Prompt intervention records emitted by bounded intervention type and labeler type."
+    );
+    describe_counter!(
+        "prompt_intervention_signal_family_total",
+        "Prompt intervention records emitted by bounded signal family."
+    );
+    describe_counter!(
+        "prompt_intervention_burden_type_total",
+        "Prompt intervention records emitted by bounded burden type."
+    );
+    describe_counter!(
+        "prompt_intervention_failure_relation_total",
+        "Prompt intervention records emitted by bounded failure relation."
+    );
+    describe_counter!(
+        "prompt_intervention_backfill_runs_total",
+        "Prompt intervention backfill runs by bounded result."
+    );
+    describe_counter!(
+        "prompt_intervention_runtime_write_attempts_total",
+        "Runtime prompt intervention write attempts by bounded result."
+    );
 }

@@ -240,6 +240,7 @@ pub mod telemetry_infrastructure;
 pub mod telemetry_model_services;
 pub mod telemetry_prime_feedback;
 pub mod telemetry_prime_runtime;
+pub mod telemetry_prompt_interventions;
 pub mod telemetry_recorder;
 pub mod telemetry_request_classification;
 pub mod telemetry_request_policy_prime;

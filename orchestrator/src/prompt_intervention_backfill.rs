@@ -66,6 +66,29 @@ pub async fn run_backfill(
     pool: &Pool,
     options: &BackfillOptions,
 ) -> Result<BackfillReport, anyhow::Error> {
+    let result = run_backfill_inner(pool, options).await;
+    match &result {
+        Ok(report) if report.rows_scanned == 0 => {
+            crate::telemetry_prompt_interventions::record_prompt_intervention_backfill_run(
+                "skipped",
+            );
+        }
+        Ok(_) => {
+            crate::telemetry_prompt_interventions::record_prompt_intervention_backfill_run(
+                "success",
+            );
+        }
+        Err(_) => {
+            crate::telemetry_prompt_interventions::record_prompt_intervention_backfill_run("error");
+        }
+    }
+    result
+}
+
+async fn run_backfill_inner(
+    pool: &Pool,
+    options: &BackfillOptions,
+) -> Result<BackfillReport, anyhow::Error> {
     let started_at = Utc::now();
     let mut report = BackfillReport {
         dry_run: options.dry_run,

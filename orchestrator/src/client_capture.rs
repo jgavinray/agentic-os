@@ -89,6 +89,9 @@ pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
                 }
             }
             Err(e) => {
+                crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+                    "assembly_error",
+                );
                 tracing::warn!(
                     exchange_id = %capture.exchange_id,
                     endpoint = %capture.endpoint,
