@@ -387,6 +387,7 @@ pub async fn insert(pool: &Pool, record: &PromptInterventionRecord) -> Result<()
             &record.confidence,
             &record.taxonomy_version,
             &record.supersedes_record_id,
+            &record.created_at,
         ],
     )
     .await?;
