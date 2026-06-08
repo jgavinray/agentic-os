@@ -1,4 +1,5 @@
 pub mod adversarial_harness;
+pub mod adversarial_harness_callback_normalization;
 pub mod adversarial_harness_callbacks;
 pub mod adversarial_harness_outcome;
 pub mod anthropic;
