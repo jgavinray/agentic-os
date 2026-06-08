@@ -31,6 +31,7 @@ pub mod db_connection;
 pub mod db_context_artifact_candidates;
 pub mod db_context_artifacts;
 pub mod db_context_compiler_ledger;
+pub mod db_context_event_queries;
 pub mod db_context_events;
 pub mod db_context_search;
 pub mod db_error_index;
