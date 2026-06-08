@@ -21,6 +21,7 @@ pub mod context_packing_policy;
 pub mod context_rendering;
 pub mod context_rendering_event_lines;
 pub mod context_rendering_failure_sections;
+pub mod context_rendering_flat;
 pub mod context_rendering_sections;
 pub mod context_search;
 pub mod db;
