@@ -81,13 +81,25 @@ pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
         return;
     };
     match record(pool, &capture).await {
-        Ok(()) => match crate::prompt_intervention_assembly::records_from_capture(&capture) {
+        Ok(()) => spawn_prompt_intervention_detection(pool, capture),
+        Err(e) => {
+            tracing::warn!(
+                exchange_id = %capture.exchange_id,
+                endpoint = %capture.endpoint,
+                "failed to record raw client capture: {e}"
+            );
+        }
+    }
+}
+
+fn spawn_prompt_intervention_detection(pool: &Pool, capture: RawHttpCapture) {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        match crate::prompt_intervention_assembly::records_from_capture(&capture) {
             Ok(records) => {
                 for record in records {
-                    crate::prompt_intervention_records::spawn_insert_best_effort(
-                        Some(pool),
-                        record,
-                    );
+                    crate::prompt_intervention_records::insert_best_effort(Some(&pool), record)
+                        .await;
                 }
             }
             Err(e) => {
@@ -100,15 +112,8 @@ pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
                     "failed to assemble prompt intervention records: {e}"
                 );
             }
-        },
-        Err(e) => {
-            tracing::warn!(
-                exchange_id = %capture.exchange_id,
-                endpoint = %capture.endpoint,
-                "failed to record raw client capture: {e}"
-            );
         }
-    }
+    });
 }
 
 pub async fn record_response_best_effort(
@@ -122,4 +127,26 @@ pub async fn record_response_best_effort(
     capture.response_headers = Some(serde_json::json!({"content-type": [content_type]}));
     capture.raw_response_body = Some(body);
     record_best_effort(pool, capture).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, StatusCode};
+
+    use super::{record_response_best_effort, to_json_bytes, RawHttpCapture};
+
+    #[tokio::test]
+    async fn record_response_best_effort_without_pool_is_non_failing() {
+        let capture = RawHttpCapture::new("messages", &HeaderMap::new(), b"{}".to_vec());
+        let body = serde_json::json!({"model": "qwen36-35b-heretic", "content": []});
+
+        record_response_best_effort(
+            None,
+            capture,
+            StatusCode::OK,
+            "application/json",
+            to_json_bytes(&body),
+        )
+        .await;
+    }
 }
