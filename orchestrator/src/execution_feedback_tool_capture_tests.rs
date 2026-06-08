@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn tool_result_parser_finds_synthetic_block() {
