@@ -119,6 +119,8 @@ pub mod harness_feedback_store;
 pub mod harness_feedback_taxonomy;
 pub mod harness_feedback_text_signals;
 pub mod hybrid;
+#[cfg(test)]
+mod hybrid_tests;
 pub mod litellm;
 pub mod litellm_cache;
 pub mod litellm_ledger;
