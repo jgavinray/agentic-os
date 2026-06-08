@@ -2,6 +2,14 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
+const HEADLINE_CONFIDENCE_THRESHOLD: f64 = 0.8;
+const HEADLINE_ELIGIBLE_PREDICATE: &str = "pi.confidence >= $4
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM prompt_interventions newer_pi
+                   WHERE newer_pi.supersedes_record_id = pi.id
+               )";
+
 #[derive(Debug, Clone)]
 pub struct ReportOptions {
     pub repo: Option<String>,
@@ -102,18 +110,30 @@ async fn count_per_day(
 ) -> Result<Vec<CountRow>, anyhow::Error> {
     let rows = conn
         .query(
-            "SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS label,
+            "SELECT to_char(date_trunc('day', pi.created_at), 'YYYY-MM-DD') AS label,
                     count(*)::BIGINT AS count
-             FROM prompt_interventions
-             WHERE ($1::TIMESTAMPTZ IS NULL OR created_at >= $1)
-               AND ($2::TIMESTAMPTZ IS NULL OR created_at <= $2)
-               AND ($3::TEXT IS NULL OR exchange_id IN (
+             FROM prompt_interventions pi
+             WHERE ($1::TIMESTAMPTZ IS NULL OR pi.created_at >= $1)
+               AND ($2::TIMESTAMPTZ IS NULL OR pi.created_at <= $2)
+               AND ($3::TEXT IS NULL OR pi.exchange_id IN (
                    SELECT exchange_id FROM raw_http_exchanges WHERE repo = $3
                ))
-             GROUP BY date_trunc('day', created_at)
-             ORDER BY date_trunc('day', created_at) DESC
-             LIMIT $4",
-            &[&opts.since, &opts.until, &opts.repo, &opts.limit],
+               AND pi.confidence >= $4
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM prompt_interventions newer_pi
+                   WHERE newer_pi.supersedes_record_id = pi.id
+               )
+             GROUP BY date_trunc('day', pi.created_at)
+             ORDER BY date_trunc('day', pi.created_at) DESC
+             LIMIT $5",
+            &[
+                &opts.since,
+                &opts.until,
+                &opts.repo,
+                &HEADLINE_CONFIDENCE_THRESHOLD,
+                &opts.limit,
+            ],
         )
         .await?;
     Ok(rows
@@ -130,22 +150,32 @@ async fn count_grouped(
     column: &str,
     opts: &ReportOptions,
 ) -> Result<Vec<CountRow>, anyhow::Error> {
-    let expr = report_expression(column)?;
+    let qualified_expr = report_expression_for_alias(column, "pi")?;
     let sql = format!(
-        "SELECT {expr} AS label, count(*)::BIGINT AS count
-         FROM prompt_interventions
-         WHERE ($1::TIMESTAMPTZ IS NULL OR created_at >= $1)
-           AND ($2::TIMESTAMPTZ IS NULL OR created_at <= $2)
-           AND ($3::TEXT IS NULL OR exchange_id IN (
+        "SELECT {qualified_expr} AS label, count(*)::BIGINT AS count
+         FROM prompt_interventions pi
+         WHERE ($1::TIMESTAMPTZ IS NULL OR pi.created_at >= $1)
+           AND ($2::TIMESTAMPTZ IS NULL OR pi.created_at <= $2)
+           AND ($3::TEXT IS NULL OR pi.exchange_id IN (
                SELECT exchange_id FROM raw_http_exchanges WHERE repo = $3
            ))
-           AND {expr} IS NOT NULL
-         GROUP BY {expr}
-         ORDER BY count DESC, {expr} ASC
-         LIMIT $4"
+           AND {qualified_expr} IS NOT NULL
+           AND {HEADLINE_ELIGIBLE_PREDICATE}
+         GROUP BY {qualified_expr}
+         ORDER BY count DESC, {qualified_expr} ASC
+         LIMIT $5"
     );
     let rows = conn
-        .query(&sql, &[&opts.since, &opts.until, &opts.repo, &opts.limit])
+        .query(
+            &sql,
+            &[
+                &opts.since,
+                &opts.until,
+                &opts.repo,
+                &HEADLINE_CONFIDENCE_THRESHOLD,
+                &opts.limit,
+            ],
+        )
         .await?;
     Ok(rows
         .into_iter()
@@ -156,20 +186,21 @@ async fn count_grouped(
         .collect())
 }
 
-fn report_expression(column: &str) -> Result<&'static str, anyhow::Error> {
-    match column {
-        "intervention_type" => Ok("intervention_type"),
-        "signal_family" => Ok("signal_family"),
-        "burden_type" => Ok("burden_type"),
-        "failure_relation" => Ok("failure_relation"),
-        "requested_model" => Ok("requested_model"),
-        "routed_model" => Ok("routed_model"),
-        "baseline_arm" => Ok("baseline_arm"),
-        "exact_prompt_hash" => Ok("exact_prompt_hash"),
-        "normalized_prompt_hash" => Ok("normalized_prompt_hash"),
-        "trajectory_id" => Ok("trajectory_id::TEXT"),
+fn report_expression_for_alias(column: &str, alias: &str) -> Result<String, anyhow::Error> {
+    let expr = match column {
+        "intervention_type" => format!("{alias}.intervention_type"),
+        "signal_family" => format!("{alias}.signal_family"),
+        "burden_type" => format!("{alias}.burden_type"),
+        "failure_relation" => format!("{alias}.failure_relation"),
+        "requested_model" => format!("{alias}.requested_model"),
+        "routed_model" => format!("{alias}.routed_model"),
+        "baseline_arm" => format!("{alias}.baseline_arm"),
+        "exact_prompt_hash" => format!("{alias}.exact_prompt_hash"),
+        "normalized_prompt_hash" => format!("{alias}.normalized_prompt_hash"),
+        "trajectory_id" => format!("{alias}.trajectory_id::TEXT"),
         _ => anyhow::bail!("unsupported prompt intervention report column"),
-    }
+    };
+    Ok(expr)
 }
 
 async fn outcome_correlation(
@@ -214,11 +245,22 @@ async fn outcome_correlation(
         .query_one(
             "SELECT count(*)::BIGINT AS intervention_count,
                     count(DISTINCT trajectory_id)::BIGINT AS trajectory_count
-             FROM prompt_interventions
-             WHERE trajectory_id = ANY($1::UUID[])
-               AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
-               AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)",
-            &[&accepted_trajectory_ids, &opts.since, &opts.until],
+             FROM prompt_interventions pi
+             WHERE pi.trajectory_id = ANY($1::UUID[])
+               AND ($2::TIMESTAMPTZ IS NULL OR pi.created_at >= $2)
+               AND ($3::TIMESTAMPTZ IS NULL OR pi.created_at <= $3)
+               AND pi.confidence >= $4
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM prompt_interventions newer_pi
+                   WHERE newer_pi.supersedes_record_id = pi.id
+               )",
+            &[
+                &accepted_trajectory_ids,
+                &opts.since,
+                &opts.until,
+                &HEADLINE_CONFIDENCE_THRESHOLD,
+            ],
         )
         .await?;
     Ok(correlation_from_counts(
@@ -330,19 +372,33 @@ mod tests {
 
     #[test]
     fn report_expression_rejects_unknown_columns() {
-        assert!(report_expression("evidence_excerpt").is_err());
-        assert!(report_expression("raw_prompt").is_err());
+        assert!(report_expression_for_alias("evidence_excerpt", "pi").is_err());
+        assert!(report_expression_for_alias("raw_prompt", "pi").is_err());
     }
 
     #[test]
     fn report_expression_allows_only_safe_derived_dimensions() {
         assert_eq!(
-            report_expression("normalized_prompt_hash").unwrap(),
-            "normalized_prompt_hash"
+            report_expression_for_alias("normalized_prompt_hash", "pi").unwrap(),
+            "pi.normalized_prompt_hash"
         );
         assert_eq!(
-            report_expression("trajectory_id").unwrap(),
-            "trajectory_id::TEXT"
+            report_expression_for_alias("trajectory_id", "pi").unwrap(),
+            "pi.trajectory_id::TEXT"
+        );
+    }
+
+    #[test]
+    fn headline_eligibility_uses_confidence_and_newer_supersession() {
+        assert_eq!(HEADLINE_CONFIDENCE_THRESHOLD, 0.8);
+        assert!(HEADLINE_ELIGIBLE_PREDICATE.contains("pi.confidence >= $4"));
+        assert!(
+            HEADLINE_ELIGIBLE_PREDICATE.contains("newer_pi.supersedes_record_id = pi.id"),
+            "default reports must exclude an original row when a newer row points at it"
+        );
+        assert!(
+            !HEADLINE_ELIGIBLE_PREDICATE.contains("pi.supersedes_record_id IS NULL"),
+            "replacement rows are still headline-eligible when they meet confidence threshold"
         );
     }
 
