@@ -232,6 +232,7 @@ pub mod tool_mediation_authorization_types;
 pub mod tool_mediation_canonical;
 pub mod tool_mediation_classification;
 pub mod tool_mediation_payload;
+pub mod tool_mediation_policy;
 pub mod tool_mediation_shaping;
 pub mod tool_mediation_shell;
 pub mod tool_mediation_types;

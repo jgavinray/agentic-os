@@ -14,11 +14,11 @@
 pub use crate::tool_mediation_authorization::{
     authorize_tool_call, authorize_tool_call_with_policy,
 };
-pub(crate) use crate::tool_mediation_authorization::{
-    policy_allows_tool_capability, policy_blocks_tool_capability,
-};
 pub use crate::tool_mediation_classification::{
     bounded_capability, bounded_decision, bounded_reason, bounded_tool_action, detect_tool_intent,
+};
+pub(crate) use crate::tool_mediation_policy::{
+    policy_allows_tool_capability, policy_blocks_tool_capability,
 };
 pub use crate::tool_mediation_shaping::{
     shape_anthropic_request, shape_anthropic_request_with_policy, shape_openai_request,
