@@ -57,9 +57,9 @@ pub fn records_from_capture(
             signal_strength: detection.signal_strength,
             burden_type: detection.burden_type,
             failure_relation: detection.failure_relation,
-            target_behavior: None,
-            blocked_behavior: None,
-            replacement_behavior: None,
+            target_behavior: detection.target_behavior,
+            blocked_behavior: detection.blocked_behavior,
+            replacement_behavior: detection.replacement_behavior,
             evidence_excerpt: detection.evidence_excerpt,
             evidence_hash: detection.evidence_hash,
             labeler_type: LabelerType::Rule,
@@ -239,5 +239,27 @@ mod tests {
         assert!(!records[0].evidence_excerpt.contains("secret-token"));
         assert!(records[0].evidence_excerpt.contains("<redacted>"));
         records[0].validate().unwrap();
+    }
+
+    #[test]
+    fn copies_detector_behavior_fields_into_records() {
+        let capture = capture_with_body(json!({
+            "model": "claude-opus-4-8",
+            "messages": [{
+                "role": "user",
+                "content": "No I don't want you to do it - I am explicitly asking you to develop me a prompt and report it here."
+            }]
+        }));
+
+        let records = records_from_capture(&capture).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.intervention_type, InterventionType::StopAndRedirect);
+        assert_eq!(record.blocked_behavior.as_deref(), Some("implementation"));
+        assert_eq!(
+            record.replacement_behavior.as_deref(),
+            Some("develop prompt and report it")
+        );
+        record.validate().unwrap();
     }
 }

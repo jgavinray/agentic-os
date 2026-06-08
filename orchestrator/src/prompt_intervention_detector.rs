@@ -27,6 +27,9 @@ pub struct DetectedPromptIntervention {
     pub burden_type: BurdenType,
     pub failure_relation: FailureRelation,
     pub confidence: f64,
+    pub target_behavior: Option<String>,
+    pub blocked_behavior: Option<String>,
+    pub replacement_behavior: Option<String>,
     pub evidence_excerpt: String,
     pub evidence_hash: String,
     pub exact_prompt_hash: String,
@@ -45,6 +48,9 @@ struct RuleMatch {
     burden_type: BurdenType,
     failure_relation: FailureRelation,
     confidence: f64,
+    target_behavior: Option<&'static str>,
+    blocked_behavior: Option<&'static str>,
+    replacement_behavior: Option<&'static str>,
 }
 
 /// Detect prompt intervention signals in extracted source candidates.
@@ -66,6 +72,9 @@ pub fn detect_prompt_interventions(
                 burden_type: rule_match.burden_type,
                 failure_relation: rule_match.failure_relation,
                 confidence: rule_match.confidence,
+                target_behavior: rule_match.target_behavior.map(str::to_string),
+                blocked_behavior: rule_match.blocked_behavior.map(str::to_string),
+                replacement_behavior: rule_match.replacement_behavior.map(str::to_string),
                 evidence_excerpt: excerpt,
                 evidence_hash,
                 exact_prompt_hash: fingerprint.exact_prompt_hash.clone(),
@@ -84,14 +93,27 @@ fn rule_matches(text: &str) -> Vec<RuleMatch> {
     let mut matches = Vec::new();
 
     if let Some(phrase) = stop_and_redirect_phrase(&lower) {
-        matches.push(rule(
-            "stop_and_redirect",
-            phrase,
-            InterventionType::StopAndRedirect,
-            SignalFamily::Steering,
-            BurdenType::HumanStopControl,
-            FailureRelation::Prevention,
-            0.9,
+        let replacement_behavior =
+            if lower.contains("develop") && lower.contains("prompt") && lower.contains("report it")
+            {
+                "develop prompt and report it"
+            } else {
+                "alternate requested behavior"
+            };
+
+        matches.push(with_behaviors(
+            rule(
+                "stop_and_redirect",
+                phrase,
+                InterventionType::StopAndRedirect,
+                SignalFamily::Steering,
+                BurdenType::HumanStopControl,
+                FailureRelation::Prevention,
+                0.9,
+            ),
+            None,
+            Some("implementation"),
+            Some(replacement_behavior),
         ));
     }
     if let Some(phrase) = first_phrase(
@@ -170,25 +192,41 @@ fn rule_matches(text: &str) -> Vec<RuleMatch> {
             "narrow the scope",
         ],
     ) {
-        matches.push(rule(
-            "scope_narrowing",
-            phrase,
-            InterventionType::ScopeNarrowing,
-            SignalFamily::Steering,
-            BurdenType::HumanScopeControl,
-            FailureRelation::Prevention,
-            0.9,
+        let target_behavior = if phrase == "edit only" || phrase == "only edit" {
+            "single-file edit"
+        } else {
+            "scope-limited work"
+        };
+
+        matches.push(with_behaviors(
+            rule(
+                "scope_narrowing",
+                phrase,
+                InterventionType::ScopeNarrowing,
+                SignalFamily::Steering,
+                BurdenType::HumanScopeControl,
+                FailureRelation::Prevention,
+                0.9,
+            ),
+            Some(target_behavior),
+            Some("broad repo edit or additional file access"),
+            None,
         ));
     }
     if let Some(phrase) = validation_phrase(&lower) {
-        matches.push(rule(
-            "validation_requirement",
-            phrase,
-            InterventionType::ValidationRequirement,
-            SignalFamily::ValidationPressure,
-            BurdenType::HumanValidationControl,
-            FailureRelation::QualityControl,
-            0.85,
+        matches.push(with_behaviors(
+            rule(
+                "validation_requirement",
+                phrase,
+                InterventionType::ValidationRequirement,
+                SignalFamily::ValidationPressure,
+                BurdenType::HumanValidationControl,
+                FailureRelation::QualityControl,
+                0.85,
+            ),
+            Some("testable implementation"),
+            None,
+            None,
         ));
     }
     if let Some(phrase) = risk_phrase(&lower) {
@@ -257,7 +295,22 @@ fn rule(
         burden_type,
         failure_relation,
         confidence,
+        target_behavior: None,
+        blocked_behavior: None,
+        replacement_behavior: None,
     }
+}
+
+fn with_behaviors(
+    mut rule_match: RuleMatch,
+    target_behavior: Option<&'static str>,
+    blocked_behavior: Option<&'static str>,
+    replacement_behavior: Option<&'static str>,
+) -> RuleMatch {
+    rule_match.target_behavior = target_behavior;
+    rule_match.blocked_behavior = blocked_behavior;
+    rule_match.replacement_behavior = replacement_behavior;
+    rule_match
 }
 
 fn stop_and_redirect_phrase(lower: &str) -> Option<&'static str> {
@@ -293,6 +346,9 @@ fn has_alternate_behavior(lower: &str) -> bool {
         || lower.contains("review")
         || lower.contains("explain")
         || lower.contains("fix")
+        || lower.contains("develop")
+        || lower.contains("report it")
+        || lower.contains("prompt")
 }
 
 fn validation_phrase(lower: &str) -> Option<&'static str> {
