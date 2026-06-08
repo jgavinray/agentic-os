@@ -344,6 +344,7 @@ pub async fn init(pool: &Pool) -> Result<(), anyhow::Error> {
 /// Insert a single prompt intervention record into the capture database.
 pub async fn insert(pool: &Pool, record: &PromptInterventionRecord) -> Result<(), anyhow::Error> {
     record.validate()?;
+    let prompt_fingerprint_version = i32::try_from(record.prompt_fingerprint_version)?;
     let conn = pool.get().await?;
     conn.execute(
         "INSERT INTO prompt_interventions
@@ -370,7 +371,7 @@ pub async fn insert(pool: &Pool, record: &PromptInterventionRecord) -> Result<()
             &record.routing_policy_version,
             &record.exact_prompt_hash,
             &record.normalized_prompt_hash,
-            &record.prompt_fingerprint_version,
+            &prompt_fingerprint_version,
             &record.source_kind.as_str(),
             &record.intervention_type.as_str(),
             &record.signal_family.as_str(),
