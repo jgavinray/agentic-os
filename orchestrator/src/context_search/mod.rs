@@ -75,7 +75,7 @@ pub(crate) async fn hybrid_search(
 mod tests {
     #[test]
     fn hybrid_search_uses_tokio_join() {
-        let src = include_str!("context_search.rs");
+        let src = include_str!("mod.rs");
         let hs_start = src
             .find("pub(crate) async fn hybrid_search")
             .expect("hybrid_search not found");
