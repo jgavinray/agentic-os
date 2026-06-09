@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::startup_backfill::{env_flag, positive_i64_env};
+use crate::startup::backfill::{env_flag, positive_i64_env};
 use crate::state::AppState;
 use crate::{harness_feedback, telemetry};
 

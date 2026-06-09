@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::env;
 
-use crate::{feature_extraction, sampling, startup_env, state};
+use crate::startup::env as startup_env;
+use crate::{feature_extraction, sampling, state};
 
 pub struct StartupConfig {
     pub db_url: String,

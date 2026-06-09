@@ -3,7 +3,7 @@ use std::env;
 use crate::state::AppState;
 use crate::{feature_extraction, request_classification, telemetry};
 
-pub use crate::startup_harness_feedback::{
+pub use crate::startup::harness_feedback::{
     run_startup_harness_feedback_backfill, spawn_harness_feedback_background_repair,
 };
 
