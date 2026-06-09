@@ -1,63 +1,7 @@
-use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use deadpool_postgres::Pool;
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
-#[derive(Clone, Debug)]
-pub struct RawHttpCapture {
-    pub exchange_id: Uuid,
-    pub attempt_id: Option<Uuid>,
-    pub endpoint: String,
-    pub method: String,
-    pub path: String,
-    pub namespace: Option<String>,
-    pub repo: Option<String>,
-    pub task: Option<String>,
-    pub request_headers: Value,
-    pub raw_request_body: Vec<u8>,
-    pub parsed_request_body: Option<Value>,
-    pub forwarded_request_body: Option<Vec<u8>>,
-    pub response_status: Option<i32>,
-    pub response_headers: Option<Value>,
-    pub raw_response_body: Option<Vec<u8>>,
-}
-
-impl RawHttpCapture {
-    pub fn new(endpoint: &str, headers: &HeaderMap, raw_request_body: Vec<u8>) -> Self {
-        Self {
-            exchange_id: Uuid::new_v4(),
-            attempt_id: None,
-            endpoint: endpoint.to_string(),
-            method: "POST".to_string(),
-            path: format!("/v1/{endpoint}"),
-            namespace: None,
-            repo: None,
-            task: None,
-            request_headers: headers_to_json(headers),
-            raw_request_body,
-            parsed_request_body: None,
-            forwarded_request_body: None,
-            response_status: None,
-            response_headers: None,
-            raw_response_body: None,
-        }
-    }
-
-    pub fn request_sha256(&self) -> String {
-        sha256_hex(&self.raw_request_body)
-    }
-
-    pub fn forwarded_sha256(&self) -> Option<String> {
-        self.forwarded_request_body
-            .as_ref()
-            .map(|body| sha256_hex(body))
-    }
-
-    pub fn response_sha256(&self) -> Option<String> {
-        self.raw_response_body.as_ref().map(|body| sha256_hex(body))
-    }
-}
+pub use crate::client_capture_types::{headers_to_json, to_json_bytes, RawHttpCapture};
 
 pub async fn init(pool: &Pool) -> Result<(), anyhow::Error> {
     let conn = pool.get().await?;
@@ -132,29 +76,140 @@ pub async fn record(pool: &Pool, capture: &RawHttpCapture) -> Result<(), anyhow:
     Ok(())
 }
 
-pub fn headers_to_json(headers: &HeaderMap) -> Value {
-    let mut object = serde_json::Map::new();
-    for (name, value) in headers {
-        let entry = object
-            .entry(name.as_str().to_string())
-            .or_insert_with(|| Value::Array(vec![]));
-        if let Value::Array(values) = entry {
-            values.push(Value::String(
-                value
-                    .to_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|_| format!("{:?}", value.as_bytes())),
-            ));
+pub async fn record_best_effort(pool: Option<&Pool>, capture: RawHttpCapture) {
+    let Some(pool) = pool else {
+        return;
+    };
+    match record(pool, &capture).await {
+        Ok(()) => spawn_prompt_intervention_detection(pool, capture),
+        Err(e) => {
+            tracing::warn!(
+                exchange_id = %capture.exchange_id,
+                endpoint = %capture.endpoint,
+                "failed to record raw client capture: {e}"
+            );
         }
     }
-    Value::Object(object)
 }
 
-pub fn to_json_bytes(value: &Value) -> Vec<u8> {
-    serde_json::to_vec(value).unwrap_or_default()
+fn spawn_prompt_intervention_detection(pool: &Pool, capture: RawHttpCapture) {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        match crate::prompt_intervention_assembly::records_from_capture(&capture) {
+            Ok(records) => {
+                for record in records {
+                    crate::prompt_intervention_records::insert_best_effort(Some(&pool), record)
+                        .await;
+                }
+            }
+            Err(e) => {
+                crate::telemetry_prompt_interventions::record_prompt_intervention_runtime_write_attempt(
+                    "assembly_error",
+                );
+                tracing::warn!(
+                    exchange_id = %capture.exchange_id,
+                    endpoint = %capture.endpoint,
+                    "failed to assemble prompt intervention records: {e}"
+                );
+            }
+        }
+    });
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!("{digest:x}")
+pub async fn record_response_best_effort(
+    pool: Option<&Pool>,
+    mut capture: RawHttpCapture,
+    status: StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) {
+    capture.response_status = Some(status.as_u16() as i32);
+    capture.response_headers = Some(serde_json::json!({"content-type": [content_type]}));
+    capture.raw_response_body = Some(body);
+    record_best_effort(pool, capture).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, StatusCode};
+    use serde_json::json;
+    use tokio::time::{sleep, Duration};
+    use uuid::Uuid;
+
+    use super::{init, record_response_best_effort, to_json_bytes, RawHttpCapture};
+
+    #[tokio::test]
+    async fn record_response_best_effort_without_pool_is_non_failing() {
+        let capture = RawHttpCapture::new("messages", &HeaderMap::new(), b"{}".to_vec());
+        let body = serde_json::json!({"model": "qwen36-35b-heretic", "content": []});
+
+        record_response_best_effort(
+            None,
+            capture,
+            StatusCode::OK,
+            "application/json",
+            to_json_bytes(&body),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_CAPTURE_DATABASE_URL pointing at a disposable Postgres database"]
+    async fn runtime_prompt_intervention_failure_does_not_block_raw_capture() {
+        let database_url = std::env::var("TEST_CAPTURE_DATABASE_URL")
+            .expect("TEST_CAPTURE_DATABASE_URL must be set");
+        let pool = crate::db::create_pool(&database_url).expect("pool");
+        init(&pool).await.expect("raw capture init");
+
+        let body = json!({
+            "model": "claude-opus-4-8",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Do not implement. Acceptance tests required."
+                }
+            ]
+        });
+        let mut capture = RawHttpCapture::new("messages", &HeaderMap::new(), to_json_bytes(&body));
+        let exchange_id = Uuid::new_v4();
+        capture.exchange_id = exchange_id;
+        capture.parsed_request_body = Some(body);
+
+        record_response_best_effort(
+            Some(&pool),
+            capture,
+            StatusCode::OK,
+            "application/json",
+            to_json_bytes(&json!({"model": "qwen3.6-27b", "content": []})),
+        )
+        .await;
+
+        let conn = pool.get().await.expect("conn");
+        let row = conn
+            .query_one(
+                "SELECT count(*)::BIGINT
+                 FROM raw_http_exchanges
+                 WHERE exchange_id = $1",
+                &[&exchange_id],
+            )
+            .await
+            .expect("count raw capture");
+        let raw_records: i64 = row.get(0);
+        assert_eq!(raw_records, 1);
+
+        let row = conn
+            .query_one("SELECT to_regclass('prompt_interventions')::TEXT", &[])
+            .await
+            .expect("check prompt intervention table");
+        let prompt_interventions_table: Option<String> = row.get(0);
+        assert_eq!(prompt_interventions_table, None);
+
+        sleep(Duration::from_millis(50)).await;
+        conn.execute(
+            "DELETE FROM raw_http_exchanges WHERE exchange_id = $1",
+            &[&exchange_id],
+        )
+        .await
+        .expect("cleanup raw capture");
+    }
 }

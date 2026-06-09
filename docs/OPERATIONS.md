@@ -88,6 +88,8 @@ cd orchestrator
 cargo run --bin orchestrator-maint -- backfill-signatures --dry-run
 cargo run --bin orchestrator-maint -- extract-features --dry-run
 cargo run --bin orchestrator-maint -- classify-harness-feedback --dry-run
+cargo run --bin orchestrator-maint -- backfill-prompt-interventions --dry-run
+cargo run --bin orchestrator-maint -- prompt-intervention-report --limit 20
 ```
 
 In a packaged deployment, run the built `orchestrator-maint` executable with the same environment as the orchestrator service.
@@ -98,6 +100,8 @@ With the Docker Compose stack in this repo, prefer a one-off container on the sa
 docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features --dry-run
 docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator extract-features
 docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator classify-harness-feedback --dry-run
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator backfill-prompt-interventions --dry-run
+docker compose run --rm --no-deps --entrypoint /usr/local/bin/orchestrator-maint orchestrator prompt-intervention-report --limit 20
 ```
 
 If the orchestrator container is already running and the image contains `/usr/local/bin/orchestrator-maint`, this is equivalent:
@@ -111,8 +115,22 @@ Current commands:
 - `backfill-signatures`: rewrites historical failed outcome events to carry inline deterministic failure signatures.
 - `extract-features`: bootstrap-tags historical operational events and rebuilds `agent_feature_records`.
 - `classify-harness-feedback`: reclassifies historical events with bounded harness feedback signals and quarantines poisoned benchmark traces from future context memory.
+- `backfill-prompt-interventions`: scans `CAPTURE_DATABASE_URL` raw HTTP exchanges, deterministically labels bounded prompt-intervention telemetry, and writes append-only derived records when not using `--dry-run`.
+- `prompt-intervention-report`: prints aggregate prompt-intervention counts by day, type, signal family, burden type, failure relation, requested model, routed model, baseline arm, prompt hashes, and trajectory when available.
 
 These commands are safe to re-run. Use `--dry-run` first when inspecting a production database.
+
+`backfill-prompt-interventions` accepts `--since`, `--until`,
+`--requested-model`, `--response-model`, `--repo`, `--namespace`,
+`--dry-run`, and `--batch-size`. Repeated write-mode runs deduplicate active
+records for the same exchange, intervention type, evidence hash, and taxonomy
+version.
+
+`prompt-intervention-report` accepts `--repo`, `--since`, `--until`, and
+`--limit`. Reports are derived from prompt-intervention records and do not print
+raw prompt text, raw evidence excerpts, file paths, commands, auth values, or
+user text. If `DATABASE_URL` is also set, the report includes outcome
+correlation fields for accepted results when those labels are available.
 
 New events do not require this CLI. The live orchestrator annotates new event metadata and runs best-effort inline feature extraction after event writes. Startup also runs a full idempotent feature backfill by default before serving traffic, and harness feedback repair runs automatically at startup plus periodically in the background. The CLI is mainly for explicit dry-runs, scoped repair, and manual rebuilds.
 

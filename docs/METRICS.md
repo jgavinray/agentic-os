@@ -72,6 +72,12 @@
 | `harness_feedback_learning_records_total` | counter | `status` | Structured harness feedback records available for later offline learning analysis. `status` is one of `recorded`, `quarantined`, or `ignored`. |
 | `harness_feedback_repair_runs_total` | counter | `result` | Startup and periodic harness feedback repair runs. `result` is `success` or `failure`. |
 | `harness_guardrail_decisions_total` | counter | `action`, `reason` | Deterministic runtime guardrail decisions for preflight checks and persisted non-allow events. `action` is one of `allow`, `warn`, `block`, `terminate`; `reason` is bounded and never includes raw paths or prompts. |
+| `prompt_intervention_records_total` | counter | `intervention_type`, `labeler_type` | Prompt intervention records emitted by bounded intervention type and labeler type. |
+| `prompt_intervention_signal_family_total` | counter | `signal_family` | Prompt intervention records emitted by bounded signal family. |
+| `prompt_intervention_burden_type_total` | counter | `burden_type` | Prompt intervention records emitted by bounded burden type. |
+| `prompt_intervention_failure_relation_total` | counter | `failure_relation` | Prompt intervention records emitted by bounded failure relation. |
+| `prompt_intervention_backfill_runs_total` | counter | `result` | Prompt intervention backfill runs by bounded result. |
+| `prompt_intervention_runtime_write_attempts_total` | counter | `result` | Runtime prompt intervention write attempts by bounded result. |
 | `request_classification_backfill_runs_total` | counter | `result` | Startup and operator request-classification backfill runs. |
 | `request_classifications_written_total` | counter | `result` | Request classification persistence outcomes. |
 | `request_classification_unknown_labels_total` | counter | `field` | Request classification rows containing bounded `unknown` labels. |

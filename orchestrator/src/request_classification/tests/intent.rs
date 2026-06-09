@@ -1,0 +1,76 @@
+use super::test_support::event;
+use super::*;
+use serde_json::json;
+
+#[test]
+fn composite_requests_emit_bounded_sub_intents() {
+    let row = classify_request_event(&event(
+        "e-composite",
+        "Search the repo for context injection; implement the fix in src/main.rs; run cargo test; summarize the result",
+        None,
+    ));
+
+    assert_eq!(row.features["is_composite"], true);
+    assert_eq!(row.features["decomposition_candidate"], true);
+    assert_eq!(row.features["decomposition_reason"], "sequence_separator");
+    assert_eq!(row.features["sub_intent_count"], 4);
+    assert_eq!(
+        row.features["sub_intents"],
+        json!(["search", "implement", "operate_tool", "summarize"])
+    );
+}
+
+#[test]
+fn implementation_language_maps_to_implement_intent() {
+    let row = classify_request_event(&event(
+        "e-implement",
+        "Implement the classifier change in src/request_classification.rs",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+    assert_eq!(row.response_contract, ResponseContract::ValidationRequired);
+}
+
+#[test]
+fn single_intent_with_conjunction_is_not_decomposed() {
+    let row = classify_request_event(&event(
+        "e-not-composite",
+        "Explain Docker and Kubernetes networking",
+        None,
+    ));
+
+    assert_eq!(row.features["is_composite"], false);
+    assert_eq!(row.features["decomposition_candidate"], false);
+    assert_eq!(row.features["decomposition_reason"], "none");
+    assert_eq!(row.features["sub_intent_count"], 0);
+    assert_eq!(row.features["sub_intents"], json!([]));
+}
+
+#[test]
+fn unknown_or_empty_events_produce_bounded_safe_defaults() {
+    let row = classify_request_event(&event("e-empty", "", None));
+
+    assert_eq!(row.intent, RequestIntent::Unknown);
+    assert_eq!(row.domain, RequestDomain::Unknown);
+    assert_eq!(row.artifact_type, RequestArtifactType::Unknown);
+    assert_eq!(row.risk, vec![RequestRisk::Unknown]);
+    assert_eq!(row.complexity, RequestComplexity::Unknown);
+    assert_eq!(row.recommended_route, RecommendedRoute::Unknown);
+    assert_eq!(row.response_contract, ResponseContract::Unknown);
+    assert_eq!(row.features["char_count"], 0);
+    assert_eq!(row.features["estimated_tokens"], 0);
+}
+
+#[test]
+fn non_empty_generic_requests_use_safe_fallback_labels() {
+    let row = classify_request_event(&event("e-generic", "Can you help with this?", None));
+
+    assert_eq!(row.intent, RequestIntent::Explain);
+    assert_eq!(row.domain, RequestDomain::Generic);
+    assert_eq!(row.artifact_type, RequestArtifactType::PlainText);
+    assert_eq!(row.risk, vec![RequestRisk::None]);
+    assert_ne!(row.complexity, RequestComplexity::Unknown);
+    assert_ne!(row.recommended_route, RecommendedRoute::Unknown);
+    assert_ne!(row.response_contract, ResponseContract::Unknown);
+}

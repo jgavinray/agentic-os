@@ -1,18 +1,35 @@
 model_list:
-  - model_name: glm-4.5-air
+  - model_name: gemma-4-31b
     litellm_params:
-      model: openai/glm-4.5-air
+      model: openai/gemma-4-31b
       api_base: http://192.168.0.196:8000/v1
       api_key: local-key
       timeout: 900
       stream_timeout: 900
     model_info:
-      id: glm-4.5-air
-      base_model: glm-4.5-air
+      id: gemma-4-31b
+      base_model: gemma-4-31b
       mode: chat
       input_cost_per_token: 0
       output_cost_per_token: 0
-      max_input_tokens: 131072
+      max_input_tokens: 65536
+  - model_name: qwen3.6-27b
+    litellm_params:
+      model: openai/qwen3.6-27b
+      api_base: http://192.168.0.196:8001/v1
+      api_key: local-key
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+      timeout: 900
+      stream_timeout: 900
+    model_info:
+      id: qwen3.6-27b
+      base_model: qwen3.6-27b
+      mode: chat
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+      max_input_tokens: 65536
   - model_name: qwen36-35b-heretic
     litellm_params:
       model: openai/qwen36-35b-heretic
