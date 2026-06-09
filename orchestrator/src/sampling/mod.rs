@@ -1,9 +1,9 @@
 use serde_json::Value;
 use std::env;
 
-pub use crate::sampling_audit::{
-    capture_with_override, capture_without_override, SamplingAudit, SamplingParams,
-};
+pub mod audit;
+
+pub use audit::{capture_with_override, capture_without_override, SamplingAudit, SamplingParams};
 
 pub const REQUEST_EVENT_SCHEMA_VERSION: u64 = 1;
 
@@ -128,5 +128,4 @@ pub fn capture_and_maybe_override(
 }
 
 #[cfg(test)]
-#[path = "sampling_tests.rs"]
-mod sampling_tests;
+mod tests;

@@ -22,11 +22,11 @@ impl SamplingPolicy for CountingPolicy {
     }
 }
 
-#[path = "sampling_audit_tests.rs"]
+#[path = "audit_tests.rs"]
 mod audit_tests;
 
-#[path = "sampling_override_tests.rs"]
+#[path = "override_tests.rs"]
 mod override_tests;
 
-#[path = "sampling_performance_tests.rs"]
+#[path = "performance_tests.rs"]
 mod performance_tests;
