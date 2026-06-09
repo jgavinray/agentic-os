@@ -133,6 +133,30 @@ pub async fn chat_completions(
             Some(&request_policy),
         );
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        if crate::tool_mediation::policy_requires_implementation_tool_surface(&request_policy) {
+            let missing = crate::tool_mediation::missing_implementation_tool_capabilities(&outcome);
+            if !missing.is_empty() {
+                let body = serde_json::json!({
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": format!(
+                            "implementation tool surface is incomplete; missing capabilities: {}",
+                            missing.join(", ")
+                        ),
+                        "missing_tool_capabilities": missing,
+                    }
+                });
+                crate::client_capture::record_response_best_effort(
+                    state.capture_pool.as_ref(),
+                    capture,
+                    StatusCode::BAD_REQUEST,
+                    "application/json",
+                    crate::client_capture::to_json_bytes(&body),
+                )
+                .await;
+                return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+            }
+        }
         Some(outcome.metadata())
     } else {
         None

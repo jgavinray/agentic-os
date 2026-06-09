@@ -24,7 +24,7 @@ pub(crate) fn recommend_route(
         RecommendedRoute::WebRequired
     } else if matches!(
         intent,
-        RequestIntent::OperateTool | RequestIntent::Implement | RequestIntent::ModifyConfig
+        RequestIntent::OperateTool | RequestIntent::ModifyConfig
     ) && !features.has_file_path
         && !features.has_config_shape
         && !features.has_shell_command

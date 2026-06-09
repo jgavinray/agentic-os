@@ -133,3 +133,38 @@ impl ToolMenuOutcome {
         self.offered_tools.iter().map(|tool| tool.capability)
     }
 }
+
+pub fn missing_implementation_tool_capabilities(outcome: &ToolMenuOutcome) -> Vec<&'static str> {
+    const REQUIRED: &[&str] = &["file_read", "text_search", "file_list", "file_edit"];
+
+    REQUIRED
+        .iter()
+        .copied()
+        .filter(|required| {
+            !outcome
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.capability == *required)
+        })
+        .collect()
+}
+
+pub fn policy_requires_implementation_tool_surface(
+    policy: &crate::orchestration_policy::OrchestrationPolicy,
+) -> bool {
+    let edit_policy_requires_files = matches!(
+        policy.edit_policy,
+        crate::orchestration_policy::EditPolicy::ExplicitFileOnly
+            | crate::orchestration_policy::EditPolicy::SingleFileEdit
+            | crate::orchestration_policy::EditPolicy::ScopedEdit
+            | crate::orchestration_policy::EditPolicy::MultiFileEdit
+    );
+    let file_edit_allowed = policy
+        .allowed_tools
+        .contains(&crate::orchestration_policy::ToolCapability::FileEdit);
+    let file_edit_blocked = policy
+        .blocked_tools
+        .contains(&crate::orchestration_policy::ToolCapability::FileEdit);
+
+    edit_policy_requires_files && file_edit_allowed && !file_edit_blocked
+}

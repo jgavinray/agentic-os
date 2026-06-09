@@ -33,6 +33,7 @@ pub use shaping::{
     shape_openai_request_with_policy,
 };
 pub use types::{
+    missing_implementation_tool_capabilities, policy_requires_implementation_tool_surface,
     ToolAuthorizeRequest, ToolAuthorizeResponse, ToolCapability, ToolIntent, ToolMenuOutcome,
     ToolPayloadFormat, ToolSummary, TOOL_MEDIATION_POLICY_VERSION,
 };
