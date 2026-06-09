@@ -1,11 +1,15 @@
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-pub use crate::adversarial_harness_callbacks::{
+pub mod callback_normalization;
+pub mod callbacks;
+pub mod outcome;
+
+pub use callbacks::{
     record_litellm_callback_payload, LiteLlmCallbackPayloadRequest, LiteLlmCallbackPayloadResponse,
     NormalizedLiteLlmCallbackFields,
 };
-pub use crate::adversarial_harness_outcome::{
+pub use outcome::{
     baseline_arm_from_header, validate_outcome_request, BaselineArm, HarnessOutcomeRequest,
     HarnessOutcomeResponse, HumanAttentionBucket, OutcomeLabelerType, BASELINE_ARM_HEADER,
     DEFAULT_BASELINE_ARM,

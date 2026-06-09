@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub use crate::adversarial_harness_callback_normalization::{
+pub use crate::adversarial_harness::callback_normalization::{
     normalize_litellm_callback_fields, NormalizedLiteLlmCallbackFields,
 };
 
