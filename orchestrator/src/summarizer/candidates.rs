@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::summarizer_promotion::{has_source_ids, should_promote_to_level};
+use crate::summarizer::promotion::{has_source_ids, should_promote_to_level};
 use crate::telemetry;
 
 pub(crate) type SummaryCandidate = (String, i32);

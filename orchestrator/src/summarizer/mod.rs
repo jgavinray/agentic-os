@@ -1,14 +1,21 @@
 use crate::state::AppState;
-use crate::summarizer_candidates::{
+use crate::telemetry;
+use candidates::{
     candidate_sessions, promotable_source_rows, source_event_ids, source_messages_text,
 };
-use crate::summarizer_failures::record_summarization_failure;
-use crate::summarizer_levels::{source_level_for_target, summary_prompt_for_level};
-use crate::summarizer_persistence::persist_summary_event;
-use crate::summarizer_upstream::request_summary;
-use crate::telemetry;
+use failures::record_summarization_failure;
+use levels::{source_level_for_target, summary_prompt_for_level};
+use persistence::persist_summary_event;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
+use upstream::request_summary;
+
+pub mod candidates;
+pub mod failures;
+pub mod levels;
+pub mod persistence;
+pub mod promotion;
+pub mod upstream;
 
 pub async fn run(state: Arc<AppState>) {
     let mut tick = interval(Duration::from_secs(60));
