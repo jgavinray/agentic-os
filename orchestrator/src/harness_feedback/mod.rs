@@ -7,20 +7,25 @@
 
 use serde_json::Value;
 
-use crate::harness_feedback_classification::classify_event;
-pub use crate::harness_feedback_guardrail::{evaluate_runtime_guardrail, RuntimeGuardrailDecision};
-use crate::harness_feedback_metadata::object_or_empty;
-pub use crate::harness_feedback_store::{run_backfill, BackfillOptions, BackfillReport};
-pub use crate::harness_feedback_taxonomy::{
+pub mod classification;
+pub mod guardrail;
+pub mod metadata;
+pub mod store;
+pub mod taxonomy;
+pub mod text_signals;
+
+use classification::classify_event;
+pub use guardrail::{evaluate_runtime_guardrail, RuntimeGuardrailDecision};
+use metadata::object_or_empty;
+pub use store::{run_backfill, BackfillOptions, BackfillReport};
+pub use taxonomy::{
     bounded_guardrail_action, bounded_guardrail_reason, bounded_learning_status,
     bounded_quarantine_reason, bounded_signal_type, GUARDRAIL_ACTION_ALLOW, GUARDRAIL_ACTION_BLOCK,
     GUARDRAIL_ACTION_TERMINATE, GUARDRAIL_ACTION_WARN, HARNESS_FEEDBACK_SCHEMA_VERSION,
     HARNESS_GUARDRAIL_ACTIONS, HARNESS_GUARDRAIL_REASONS, HARNESS_LEARNING_STATUSES,
     HARNESS_QUARANTINE_REASONS, HARNESS_SIGNAL_TYPES,
 };
-use crate::harness_feedback_taxonomy::{
-    GUARDRAIL_REASON_NONE, MEMORY_POLICY_EXCLUDE, MEMORY_POLICY_INCLUDE,
-};
+use taxonomy::{GUARDRAIL_REASON_NONE, MEMORY_POLICY_EXCLUDE, MEMORY_POLICY_INCLUDE};
 
 pub fn annotate_event_metadata(
     event_type: &str,
@@ -155,5 +160,4 @@ pub fn record_metadata_metrics(metadata: &Value) {
 }
 
 #[cfg(test)]
-#[path = "harness_feedback_tests.rs"]
 mod tests;

@@ -10,8 +10,6 @@ fn signal_names(metadata: &Value) -> Vec<&str> {
         .collect()
 }
 
-#[path = "harness_feedback_annotation_tests.rs"]
-mod annotation_tests;
+mod annotation;
 
-#[path = "harness_feedback_guardrail_tests.rs"]
-mod guardrail_tests;
+mod guardrail;
