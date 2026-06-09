@@ -1,6 +1,6 @@
 use crate::context_artifacts::{self, ContextArtifact};
+use crate::context_compiler::support::{record_ledger, total_recall_candidates};
 use crate::context_compiler::{CompilerRequest, ContextCompiler};
-use crate::context_compiler_support::{record_ledger, total_recall_candidates};
 
 pub(crate) async fn compile_total_recall_artifact(
     compiler: &ContextCompiler<'_>,

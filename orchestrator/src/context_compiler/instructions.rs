@@ -1,6 +1,6 @@
 use crate::context_artifacts::{self, ContextArtifact};
+use crate::context_compiler::support::{artifact_source_event_ids, record_ledger};
 use crate::context_compiler::CompilerRequest;
-use crate::context_compiler_support::{artifact_source_event_ids, record_ledger};
 use crate::db;
 
 pub(crate) async fn compile_active_instruction_artifact(

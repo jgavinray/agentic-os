@@ -1,14 +1,17 @@
 use crate::context_artifacts::{self, ContextArtifact};
-use crate::context_compiler_event_artifacts::{
+use crate::db;
+use event_artifacts::{
     compile_failure_history_artifact, compile_repo_decisions_artifact,
     compile_session_state_artifact,
 };
-use crate::context_compiler_instructions::compile_active_instruction_artifact;
-use crate::context_compiler_support::{
-    compile_repo_map, compile_service_topology, compiler_source_allowed, record_ledger,
-};
-use crate::context_compiler_total_recall::compile_total_recall_artifact;
-use crate::db;
+use instructions::compile_active_instruction_artifact;
+use support::{compile_repo_map, compile_service_topology, compiler_source_allowed, record_ledger};
+use total_recall::compile_total_recall_artifact;
+
+pub mod event_artifacts;
+pub mod instructions;
+pub mod support;
+pub mod total_recall;
 
 #[derive(Clone, Debug)]
 pub struct CompilerRequest {
