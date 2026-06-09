@@ -1,4 +1,4 @@
-use crate::context_rendering_event_lines::format_event_line;
+use crate::context_rendering::event_lines::format_event_line;
 use crate::db::{AgentEvent, FailureHistoryItem};
 
 pub(crate) fn append_failure_history_section(

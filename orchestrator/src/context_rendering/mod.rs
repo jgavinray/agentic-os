@@ -1,10 +1,15 @@
-use crate::context_rendering_sections::{
+use crate::db::ContextEvidence;
+use sections::{
     append_event_section, append_failure_history_section, append_failure_section,
     append_open_questions, append_operational_constraints_section, append_search_section,
 };
-use crate::db::ContextEvidence;
 
-pub use crate::context_rendering_flat::build_context;
+pub mod event_lines;
+pub mod failure_sections;
+pub mod flat;
+pub mod sections;
+
+pub use flat::build_context;
 
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
