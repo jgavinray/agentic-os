@@ -1,15 +1,18 @@
 use crate::state::{AppState, TokenUsage};
 
-pub(crate) use crate::vllm_cache_usage::{
+pub mod cache_usage;
+pub mod metrics_snapshot;
+
+pub(crate) use cache_usage::{
     anthropic_cache_usage_sse_event, inject_anthropic_cache_usage, merge_provider_cache_from_delta,
 };
-pub use crate::vllm_metrics_snapshot::{
+pub use metrics_snapshot::{
     fetch_cache_snapshot, parse_cache_snapshot, VllmCacheDelta, VllmCacheSnapshot,
 };
 
 pub(crate) async fn cache_snapshot(
     state: &AppState,
-) -> Option<(String, crate::vllm_metrics::VllmCacheSnapshot)> {
+) -> Option<(String, crate::vllm::VllmCacheSnapshot)> {
     let metrics_url = state.vllm_metrics_url.as_deref()?;
     match fetch_cache_snapshot(&state.http, metrics_url).await {
         Ok(snapshot) => Some((metrics_url.to_string(), snapshot)),
@@ -23,7 +26,7 @@ pub(crate) async fn cache_snapshot(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_cache_observation(
     state: &AppState,
-    before: Option<(String, crate::vllm_metrics::VllmCacheSnapshot)>,
+    before: Option<(String, crate::vllm::VllmCacheSnapshot)>,
     session_id: Option<&str>,
     namespace: &str,
     repo: &str,
@@ -31,7 +34,7 @@ pub(crate) async fn record_cache_observation(
     attempt: &crate::litellm::LiteLlmCallAttempt,
     usage: &TokenUsage,
     provider_cache: crate::litellm::ProviderCacheCounters,
-) -> Option<crate::vllm_metrics::VllmCacheDelta> {
+) -> Option<crate::vllm::VllmCacheDelta> {
     let Some((metrics_url, before)) = before else {
         return None;
     };

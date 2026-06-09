@@ -2,7 +2,7 @@ use serde_json::Value;
 
 pub(crate) fn merge_provider_cache_from_delta(
     provider_cache: crate::litellm::ProviderCacheCounters,
-    delta: Option<crate::vllm_metrics::VllmCacheDelta>,
+    delta: Option<crate::vllm::VllmCacheDelta>,
 ) -> crate::litellm::ProviderCacheCounters {
     let Some(delta) = delta else {
         return provider_cache;
@@ -45,7 +45,7 @@ pub(crate) fn anthropic_cache_usage_sse_event(
 }
 
 fn provider_cache_from_delta(
-    delta: crate::vllm_metrics::VllmCacheDelta,
+    delta: crate::vllm::VllmCacheDelta,
 ) -> crate::litellm::ProviderCacheCounters {
     let cache_read = delta
         .prompt_tokens_local_cache_hit_delta
