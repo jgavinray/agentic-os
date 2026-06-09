@@ -12,11 +12,11 @@ fn ctx() -> ExecutionEventContext {
     }
 }
 
-#[path = "execution_feedback_tool_capture_tests.rs"]
+#[path = "tool_capture.rs"]
 mod tool_capture_tests;
 
-#[path = "execution_feedback_validation_report_tests.rs"]
+#[path = "validation_report.rs"]
 mod validation_report_tests;
 
-#[path = "execution_feedback_capture_performance_tests.rs"]
+#[path = "capture_performance.rs"]
 mod performance_tests;
