@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::db;
-use crate::event_capture_background::spawn_feature_extraction;
+use crate::event_capture::background::spawn_feature_extraction;
 use crate::state::{AppState, AppendEventRequest};
 
 #[allow(clippy::too_many_arguments)]

@@ -1,6 +1,6 @@
 use crate::background::spawn_bounded_background;
 use crate::db;
-use crate::event_capture_background::spawn_feature_extraction;
+use crate::event_capture::background::spawn_feature_extraction;
 use crate::state::AppState;
 
 #[allow(clippy::too_many_arguments)]

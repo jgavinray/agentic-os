@@ -1,8 +1,9 @@
 use serde_json::Value;
 
 use crate::db;
-use crate::event_capture_background::spawn_feature_extraction;
-use crate::event_capture_background::{spawn_qdrant_index_event, spawn_trajectory_result_emit};
+use crate::event_capture::background::{
+    spawn_feature_extraction, spawn_qdrant_index_event, spawn_trajectory_result_emit,
+};
 use crate::orchestration_policy;
 use crate::state::{AppState, AppendEventRequest};
 

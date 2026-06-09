@@ -3,13 +3,17 @@ use serde_json::Value;
 use crate::db;
 use crate::state::{AppState, AppendEventRequest};
 
-pub(crate) use crate::event_capture_background::spawn_feature_extraction;
-pub(crate) use crate::event_capture_context::maybe_write_context_pack_event;
-pub(crate) use crate::event_capture_exchange::persist_exchange_with_correlation;
-pub(crate) use crate::event_capture_request::{
-    begin_trajectory_for_request, persist_request_event,
-};
-pub(crate) use crate::event_capture_tool_results::capture_tool_results_background;
+pub mod background;
+pub mod context;
+pub mod exchange;
+pub mod request;
+pub mod tool_results;
+
+pub(crate) use background::spawn_feature_extraction;
+pub(crate) use context::maybe_write_context_pack_event;
+pub(crate) use exchange::persist_exchange_with_correlation;
+pub(crate) use request::{begin_trajectory_for_request, persist_request_event};
+pub(crate) use tool_results::capture_tool_results_background;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_model_response_event(
