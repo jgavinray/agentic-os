@@ -33,6 +33,30 @@ fn implementation_language_maps_to_implement_intent() {
 }
 
 #[test]
+fn implementation_with_reporting_summary_stays_implement() {
+    let row = classify_request_event(&event(
+        "e-implement-summary",
+        "Continue the prompt-intervention implementation in orchestrator/src/tool_mediation/classification.rs, run relevant checks, and leave a concise summary of changes.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+    assert_eq!(row.response_contract, ResponseContract::ValidationRequired);
+}
+
+#[test]
+fn current_implementation_does_not_require_external_info() {
+    let row = classify_request_event(&event(
+        "e-current-implementation",
+        "Inspect the current implementation and implement the missing policy-to-tool pairing.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+    assert!(!row.risk.contains(&RequestRisk::ExternalCurrentInfoRequired));
+}
+
+#[test]
 fn single_intent_with_conjunction_is_not_decomposed() {
     let row = classify_request_event(&event(
         "e-not-composite",

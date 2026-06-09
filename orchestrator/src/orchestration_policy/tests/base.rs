@@ -90,6 +90,7 @@ fn test_implement_allows_edit_create_and_targeted_validation_only() {
     assert!(policy.allowed_tools.contains(&ToolCapability::RepoRead));
     assert!(policy.allowed_tools.contains(&ToolCapability::FileRead));
     assert!(policy.allowed_tools.contains(&ToolCapability::FileEdit));
+    assert!(policy.allowed_tools.contains(&ToolCapability::Validation));
     assert_eq!(policy.validation_policy, ValidationPolicy::TargetedTests);
     assert_eq!(policy.git_policy, GitPolicy::NoGitChanges);
     assert_eq!(policy.runtime_policy, RuntimePolicy::NoRestart);

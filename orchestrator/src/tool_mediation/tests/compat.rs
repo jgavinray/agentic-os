@@ -92,3 +92,59 @@ fn implementation_policy_hides_broad_and_unknown_tools() {
     assert!(hidden.contains(&"Delete"));
     assert!(hidden.contains(&"CreatePR"));
 }
+
+#[test]
+fn implementation_policy_keeps_tight_claude_code_file_tools() {
+    let text = "Continue the prompt-intervention implementation, run relevant checks, and leave a concise summary.";
+    let classification = crate::request_classification::classify_request_text(
+        "agentic-os",
+        "session-a",
+        text,
+        None,
+        "user_message",
+    );
+    let policy =
+        crate::orchestration_policy::derive_orchestration_policy(&classification, text, false);
+    let mut req = json!({
+        "messages": [],
+        "tools": [
+            {"name": "Read", "input_schema": {}},
+            {"name": "Glob", "input_schema": {}},
+            {"name": "Grep", "input_schema": {}},
+            {"name": "Edit", "input_schema": {}},
+            {"name": "Write", "input_schema": {}},
+            {"name": "run_tests", "input_schema": {}},
+            {"name": "Bash", "input_schema": {}},
+            {"name": "MultiEdit", "input_schema": {}},
+            {"name": "Delete", "input_schema": {}},
+            {"name": "mcp__plugin_ecc_github__create_or_update_file", "input_schema": {}},
+            {"name": "mcp__plugin_ecc_github__push_files", "input_schema": {}},
+            {"name": "mcp__plugin_ecc_playwright__browser_click", "input_schema": {}}
+        ]
+    });
+
+    let outcome = shape_anthropic_request_with_policy(&mut req, text, Some(&policy));
+    let allowed = req["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let hidden = outcome
+        .hidden_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(classification.intent.as_str(), "implement");
+    assert_eq!(
+        allowed,
+        vec!["Read", "Glob", "Grep", "Edit", "Write", "run_tests"]
+    );
+    assert!(hidden.contains(&"Bash"));
+    assert!(hidden.contains(&"MultiEdit"));
+    assert!(hidden.contains(&"Delete"));
+    assert!(hidden.contains(&"mcp__plugin_ecc_github__create_or_update_file"));
+    assert!(hidden.contains(&"mcp__plugin_ecc_github__push_files"));
+    assert!(hidden.contains(&"mcp__plugin_ecc_playwright__browser_click"));
+}

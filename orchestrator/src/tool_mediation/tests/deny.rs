@@ -35,7 +35,7 @@ fn policy_not_allowing_shell_read_denies_bash() {
 
     assert_eq!(response.decision, "deny");
     assert_eq!(response.reason, "policy_tool_not_allowed");
-    assert_eq!(response.capability, "shell_mutation");
+    assert_eq!(response.capability, "shell");
     assert_eq!(response.attempted_tool, "Bash");
     assert_eq!(response.preferred_tool, None);
     assert_eq!(
@@ -69,7 +69,7 @@ fn policy_shell_read_does_not_allow_generic_bash() {
 
 #[test]
 fn policy_blocks_shell_mutation_denies_mutating_bash() {
-    let policy = policy_with_tools(vec![], vec![PolicyCap::ShellMutation]);
+    let policy = policy_with_tools(vec![PolicyCap::ShellRead], vec![PolicyCap::ShellMutation]);
     let req = tool_request(
         "remove a file",
         "Bash",
