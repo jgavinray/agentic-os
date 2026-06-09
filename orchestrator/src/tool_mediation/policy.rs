@@ -8,7 +8,7 @@ use crate::tool_mediation_types::ToolCapability;
 /// - TextSearch -> RepoRead (allowed by RepoRead; blocked by RepoRead)
 /// - FileList -> RepoRead (allowed by RepoRead; blocked by RepoRead)
 /// - FileEdit -> FileEdit (allowed/blocked by FileEdit)
-/// - Validation -> ShellRead (allowed/blocked by ShellRead)
+/// - Validation -> Validation (allowed by named validation tools, not shell)
 /// - Publishing -> GitWrite (allowed/blocked by GitWrite)
 /// - Shell -> ShellRead (allowed/blocked by ShellRead)
 /// - ShellMutation -> ShellMutation (allowed/blocked by ShellMutation)
@@ -21,7 +21,7 @@ fn map_capability_to_policy(
         ToolCapability::TextSearch => crate::orchestration_policy::ToolCapability::RepoRead,
         ToolCapability::FileList => crate::orchestration_policy::ToolCapability::RepoRead,
         ToolCapability::FileEdit => crate::orchestration_policy::ToolCapability::FileEdit,
-        ToolCapability::Validation => crate::orchestration_policy::ToolCapability::ShellRead,
+        ToolCapability::Validation => crate::orchestration_policy::ToolCapability::Validation,
         ToolCapability::Publishing => crate::orchestration_policy::ToolCapability::GitWrite,
         ToolCapability::Shell => crate::orchestration_policy::ToolCapability::ShellRead,
         ToolCapability::ShellMutation => crate::orchestration_policy::ToolCapability::ShellMutation,
@@ -34,7 +34,8 @@ fn map_capability_to_policy(
 /// - FileRead: allowed if allowed_tools contains FileRead OR RepoRead.
 /// - TextSearch/FileList: allowed if allowed_tools contains RepoRead.
 /// - FileEdit: allowed if allowed_tools contains FileEdit.
-/// - Validation/Shell: allowed if allowed_tools contains ShellRead.
+/// - Validation: allowed if allowed_tools contains Validation.
+/// - Shell: allowed if allowed_tools contains ShellRead.
 /// - Publishing: allowed if allowed_tools contains GitWrite.
 /// - Unknown: always false (even if allowed_tools contains Unknown).
 pub(crate) fn policy_allows_tool_capability(
@@ -64,7 +65,8 @@ pub(crate) fn policy_allows_tool_capability(
 /// - FileRead: blocked if blocked_tools contains FileRead.
 /// - TextSearch/FileList: blocked if blocked_tools contains RepoRead.
 /// - FileEdit: blocked if blocked_tools contains FileEdit.
-/// - Validation/Shell: blocked if blocked_tools contains ShellRead.
+/// - Validation: blocked if blocked_tools contains Validation.
+/// - Shell: blocked if blocked_tools contains ShellRead.
 /// - Publishing: blocked if blocked_tools contains GitWrite.
 /// - Unknown: always false (even if blocked_tools contains Unknown).
 pub(crate) fn policy_blocks_tool_capability(

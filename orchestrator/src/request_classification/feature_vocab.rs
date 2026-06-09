@@ -89,7 +89,6 @@ pub(crate) const DESTRUCTIVE_VERBS: &[&str] = &[
 ];
 pub(crate) const LATEST_MARKERS: &[&str] = &[
     "latest",
-    "current",
     "today",
     "right now",
     "up to date",

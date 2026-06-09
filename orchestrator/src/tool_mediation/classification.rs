@@ -75,12 +75,15 @@ pub(crate) fn capability_for_tool_name(name: &str) -> ToolCapability {
         normalized.as_str(),
         "grep" | "rg" | "ripgrep" | "search" | "text_search" | "find_text"
     ) || normalized.ends_with("__search")
+        || normalized.ends_with("__search_code")
+        || normalized.ends_with("__search_repositories")
     {
         ToolCapability::TextSearch
     } else if matches!(
         normalized.as_str(),
         "glob" | "ls" | "list" | "list_files" | "file_list" | "find_files"
     ) || normalized.ends_with("__list_files")
+        || normalized.ends_with("__get_pull_request_files")
     {
         ToolCapability::FileList
     } else if matches!(

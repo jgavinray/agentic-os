@@ -16,6 +16,8 @@ pub enum ToolCapability {
     FileRead,
     /// File write or patch application.
     FileEdit,
+    /// Named non-shell validation, such as a test or lint tool.
+    Validation,
     /// Non-mutating shell execution, such as validation or safe inspection.
     ShellRead,
     /// Mutating or unclassified shell execution.
@@ -48,6 +50,7 @@ impl ToolCapability {
             Self::RepoRead => "repo_read",
             Self::FileRead => "file_read",
             Self::FileEdit => "file_edit",
+            Self::Validation => "validation",
             Self::ShellRead => "shell_read",
             Self::ShellMutation => "shell_mutation",
             Self::DockerRead => "docker_read",

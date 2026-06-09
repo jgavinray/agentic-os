@@ -53,14 +53,14 @@ fn policy_blocks_text_search_when_repo_read_blocked() {
 }
 
 #[test]
-fn policy_maps_validation_to_shell_read() {
+fn policy_maps_validation_to_named_validation_not_shell_read() {
     use crate::orchestration_policy::{
         EditPolicy, GitPolicy, RuntimePolicy, ToolCapability as PolicyCap,
     };
 
     let policy = crate::orchestration_policy::OrchestrationPolicy {
         context_sources: vec![],
-        allowed_tools: vec![PolicyCap::ShellRead],
+        allowed_tools: vec![PolicyCap::Validation],
         required_tools: vec![],
         blocked_tools: vec![],
         edit_policy: EditPolicy::ReadOnly,
@@ -75,6 +75,10 @@ fn policy_maps_validation_to_shell_read() {
     assert!(policy_allows_tool_capability(
         &policy,
         ToolCapability::Validation
+    ));
+    assert!(!policy_allows_tool_capability(
+        &policy,
+        ToolCapability::Shell
     ));
 }
 

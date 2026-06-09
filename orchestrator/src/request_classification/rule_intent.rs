@@ -10,15 +10,7 @@ pub(crate) fn classify_intent(
     if features.char_count == 0 {
         return RequestIntent::Unknown;
     }
-    if contains_any(lower, &["summarize", "summary", "recap"]) {
-        RequestIntent::Summarize
-    } else if contains_any(lower, &["classify", "categorize", "label this"]) {
-        RequestIntent::Classify
-    } else if contains_any(lower, &["search", "look up", "find current", "latest"]) {
-        RequestIntent::Search
-    } else if contains_any(lower, &["plan", "proposal", "approach", "design"]) {
-        RequestIntent::Plan
-    } else if contains_any(
+    if contains_any(
         lower,
         &[
             "implement",
@@ -42,6 +34,14 @@ pub(crate) fn classify_intent(
         && contains_any(lower, &["edit", "modify", "change", "fix", "update"])
     {
         RequestIntent::ModifyConfig
+    } else if contains_any(lower, &["summarize", "summary", "recap"]) {
+        RequestIntent::Summarize
+    } else if contains_any(lower, &["classify", "categorize", "label this"]) {
+        RequestIntent::Classify
+    } else if contains_any(lower, &["search", "look up", "find current", "latest"]) {
+        RequestIntent::Search
+    } else if contains_any(lower, &["plan", "proposal", "approach", "design"]) {
+        RequestIntent::Plan
     } else if contains_any(lower, &["run ", "execute ", "deploy", "restart"])
         || event_type == "tool_call"
     {

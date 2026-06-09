@@ -14,6 +14,7 @@ pub(crate) fn implement_policy() -> BasePolicy {
             ToolCapability::RepoRead,
             ToolCapability::FileRead,
             ToolCapability::FileEdit,
+            ToolCapability::Validation,
             ToolCapability::GitRead,
         ],
         required: vec![],

@@ -39,6 +39,32 @@ pub fn authorize_tool_call_with_policy(
     // get a canonical replacement suggestion first, because blocked means the
     // capability itself is outside the current request envelope.
     if let Some(p) = policy {
+        if attempted_capability == ToolCapability::Shell {
+            if policy_blocks_tool_capability(p, ToolCapability::Shell) {
+                return ToolAuthorizeResponse {
+                    policy_version: TOOL_MEDIATION_POLICY_VERSION,
+                    decision: "deny",
+                    reason: "policy_blocked_tool",
+                    capability: ToolCapability::Shell.as_str(),
+                    attempted_tool: req.tool_name.clone(),
+                    preferred_tool: None,
+                    replacement: None,
+                    message: "Tool call denied by orchestration policy.".to_string(),
+                };
+            }
+            if !policy_allows_tool_capability(p, ToolCapability::Shell) {
+                return ToolAuthorizeResponse {
+                    policy_version: TOOL_MEDIATION_POLICY_VERSION,
+                    decision: "deny",
+                    reason: "policy_tool_not_allowed",
+                    capability: ToolCapability::Shell.as_str(),
+                    attempted_tool: req.tool_name.clone(),
+                    preferred_tool: None,
+                    replacement: None,
+                    message: "Tool call is not allowed by orchestration policy.".to_string(),
+                };
+            }
+        }
         if policy_blocks_tool_capability(p, command_capability) {
             return ToolAuthorizeResponse {
                 policy_version: TOOL_MEDIATION_POLICY_VERSION,
