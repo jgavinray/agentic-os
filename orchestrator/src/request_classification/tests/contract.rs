@@ -7,9 +7,9 @@ use chrono::Utc;
 use std::collections::HashSet;
 
 const REQUEST_CLASSIFICATION_MIGRATIONS: &str = concat!(
-    include_str!("../migrations/V9__request_classifications.sql"),
+    include_str!("../../../migrations/V9__request_classifications.sql"),
     "\n",
-    include_str!("../migrations/V17__add_implement_request_intent.sql")
+    include_str!("../../../migrations/V17__add_implement_request_intent.sql")
 );
 
 #[test]

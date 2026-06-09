@@ -7,32 +7,57 @@
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::request_classification_composition::analyze_composition;
-pub use crate::request_classification_config::{
+pub mod backfill;
+pub mod backfill_queries;
+pub mod bindings;
+pub mod composition;
+pub mod config;
+pub mod feature_json;
+pub mod feature_keys;
+pub mod feature_vocab;
+pub mod features;
+pub mod fragments;
+pub mod input;
+pub mod labels;
+pub mod report;
+pub mod routing;
+pub mod rule_complexity;
+pub mod rule_context;
+pub mod rule_intent;
+pub mod rule_risk;
+pub mod rule_utils;
+pub mod rules;
+pub mod runtime;
+pub mod store;
+pub mod store_telemetry;
+pub mod taxonomy;
+pub mod telemetry;
+pub mod types;
+
+use composition::analyze_composition;
+pub use config::{
     live_policy_config_from_env, request_classification_startup_backfill_enabled,
     request_classification_startup_batch_size,
 };
-use crate::request_classification_feature_json::features_to_json;
-use crate::request_classification_features::extract_features;
-use crate::request_classification_input::{event_text, has_request_text, metadata_key_text};
-pub use crate::request_classification_labels::{
+use feature_json::features_to_json;
+use features::extract_features;
+use input::{event_text, has_request_text, metadata_key_text};
+pub use labels::{
     bounded_complexity, bounded_domain, bounded_intent, bounded_live_policy_action,
     bounded_live_policy_bypass, bounded_live_policy_reason, bounded_risk, bounded_route,
 };
-pub use crate::request_classification_report::request_classification_report;
-use crate::request_classification_routing::{recommend_route, response_contract};
-use crate::request_classification_rules::{
+pub use report::request_classification_report;
+use routing::{recommend_route, response_contract};
+use rules::{
     classify_artifact, classify_complexity, classify_domain, classify_intent, classify_risk,
     detected_domains,
 };
-pub use crate::request_classification_runtime::{
-    evaluate_live_policy, record_classification_metrics,
-};
-pub use crate::request_classification_store::{
+pub use runtime::{evaluate_live_policy, record_classification_metrics};
+pub use store::{
     classify_and_persist_event, persist_classification, run_backfill,
     update_classification_if_changed,
 };
-pub use crate::request_classification_types::{
+pub use types::{
     enum_inventory, BackfillOptions, BackfillReport, LabelCount, LivePolicyConfig,
     LivePolicyDecision, PersistOutcome, RecommendedRoute, ReportOptions, RequestArtifactType,
     RequestClassification, RequestClassificationReport, RequestComplexity, RequestDomain,
@@ -116,17 +141,14 @@ pub fn is_classifiable_request_event(event: &crate::db::AgentEvent) -> bool {
 }
 
 #[cfg(test)]
-#[path = "request_classification_test_support.rs"]
-mod test_support;
+mod tests {
+    pub(crate) use super::*;
+    pub(crate) mod support;
+    pub(crate) use support as test_support;
 
-#[cfg(test)]
-#[path = "request_classification_feature_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "request_classification_intent_tests.rs"]
-mod intent_tests;
-
-#[cfg(test)]
-#[path = "request_classification_risk_tests.rs"]
-mod risk_tests;
+    mod contract;
+    mod feature;
+    mod intent;
+    mod live_policy;
+    mod risk;
+}

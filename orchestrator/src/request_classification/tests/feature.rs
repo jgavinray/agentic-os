@@ -74,7 +74,7 @@ fn classifiable_request_event_selection_is_bounded() {
 
 #[test]
 fn backfill_sql_does_not_treat_separator_newline_as_request_text() {
-    let source = include_str!("request_classification_backfill_queries.rs");
+    let source = include_str!("../backfill_queries.rs");
 
     assert!(source.contains("btrim(coalesce(e.summary, '') || coalesce(e.evidence, '')"));
     assert!(!source.contains("btrim(coalesce(e.summary, '') || E'\\n'"));
