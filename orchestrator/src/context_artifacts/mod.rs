@@ -98,5 +98,4 @@ pub(crate) fn stable_hash(value: &serde_json::Value) -> String {
 }
 
 #[cfg(test)]
-#[path = "context_artifacts_tests.rs"]
 mod tests;
