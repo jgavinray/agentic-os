@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::state_context::EventMemory;
+use crate::state::context::EventMemory;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ContextPackStats {

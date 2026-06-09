@@ -2,25 +2,34 @@ use deadpool_postgres::Pool;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-pub use crate::state_api_types::{
+pub mod api_types;
+pub mod context;
+pub mod context_cache;
+pub mod context_policy;
+pub mod limits;
+pub mod summarizer;
+pub mod task_category;
+pub mod token_usage;
+
+pub use api_types::{
     AppendEventRequest, CheckpointRequest, ContextPackRequest, ContextPackResponse, ErrorRecord,
     HarnessGuardrailRequest, HarnessGuardrailResponse, SearchHit, StartSessionRequest,
     StartSessionResponse,
 };
-pub use crate::state_context::{
+pub use context::{
     ContextPolicy, EventMemory, MemoryLevel, MemoryScope, PromotionReason, TaskCategory,
     TaskContextConfig, CONTEXT_CACHE_TTL_MS, DEFAULT_CONTEXT_DECAY_RATE,
     DEFAULT_FAILURE_HISTORY_TOKEN_BUDGET, DEFAULT_OPERATIONAL_CONSTRAINTS_TOKEN_BUDGET,
 };
-pub use crate::state_context_cache::{
+pub use context_cache::{
     context_cache_key, CacheStats, CachedContext, ContextCache, ContextPackStats,
 };
-pub use crate::state_limits::{
+pub use limits::{
     configured_default_max_tokens, configured_max_max_tokens, DEFAULT_BACKGROUND_WORK_CONCURRENCY,
     DEFAULT_MAX_TOKENS, MAX_MAX_TOKENS,
 };
-pub use crate::state_summarizer::{MAX_SUMMARIZER_EVENTS, SUMMARIZER_MAX_TOKENS, SUMMARY_PROMPTS};
-pub use crate::state_token_usage::TokenUsage;
+pub use summarizer::{MAX_SUMMARIZER_EVENTS, SUMMARIZER_MAX_TOKENS, SUMMARY_PROMPTS};
+pub use token_usage::TokenUsage;
 
 /// Shared application state (cloned per request via Arc)
 #[derive(Clone)]
@@ -101,5 +110,4 @@ pub struct AppState {
 }
 
 #[cfg(test)]
-#[path = "state_tests.rs"]
 mod tests;

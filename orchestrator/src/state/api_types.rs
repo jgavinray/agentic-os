@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::state_context::EventMemory;
+use crate::state::context::EventMemory;
 
 #[derive(Debug, Deserialize)]
 pub struct StartSessionRequest {

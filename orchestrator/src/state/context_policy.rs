@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub use crate::state_task_category::TaskCategory;
+pub use crate::state::task_category::TaskCategory;
 
 /// Default TTL for cached context packs: 5 minutes.
 pub const CONTEXT_CACHE_TTL_MS: u64 = 300_000;
