@@ -1,7 +1,7 @@
 #[test]
 fn failure_history_and_validation_capture_are_feature_flagged() {
-    let context_src = include_str!("context_packing_build.rs");
-    let validations_src = include_str!("routes/validations.rs");
+    let context_src = include_str!("../../context_packing/build.rs");
+    let validations_src = include_str!("../../routes/validations.rs");
     assert!(context_src.contains("state.execution_feedback_enabled"));
     let ctx_start = context_src
         .find("async fn build_cached_context")
@@ -21,8 +21,8 @@ fn failure_history_and_validation_capture_are_feature_flagged() {
 
 #[test]
 fn trajectory_capture_is_feature_flagged() {
-    let sessions_src = include_str!("routes/sessions.rs");
-    let trajectory_src = include_str!("background/trajectory.rs");
+    let sessions_src = include_str!("../../routes/sessions.rs");
+    let trajectory_src = include_str!("../../background/trajectory.rs");
     assert!(sessions_src.contains("state.trajectory_capture_enabled"));
     let append_start = sessions_src
         .find("pub async fn append_event")
@@ -41,7 +41,7 @@ fn trajectory_capture_is_feature_flagged() {
 
 #[test]
 fn pack_context_into_req_uses_async_cache_refresh() {
-    let src = include_str!("handlers_context.rs");
+    let src = include_str!("../context.rs");
     let pctr_start = src
         .find("async fn pack_context_into_req")
         .expect("pack_context_into_req not found");
@@ -55,9 +55,10 @@ fn pack_context_into_req_uses_async_cache_refresh() {
         "pack_context_into_req should not await full context construction"
     );
     assert!(
-        include_str!("context_packing_cache.rs").contains("fn spawn_context_cache_refresh")
-            && include_str!("context_packing.rs").contains("get_or_build_cached_context_inner")
-            && include_str!("background/mod.rs").contains("tokio::spawn(async move"),
+        include_str!("../../context_packing/cache.rs").contains("fn spawn_context_cache_refresh")
+            && include_str!("../../context_packing/mod.rs")
+                .contains("get_or_build_cached_context_inner")
+            && include_str!("../../background/mod.rs").contains("tokio::spawn(async move"),
         "context cache refresh should run in the background"
     );
 }

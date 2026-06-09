@@ -3,10 +3,10 @@ use crate::db;
 use chrono::Utc;
 use serde_json::json;
 
-#[path = "handlers_context_pack_tests.rs"]
+#[path = "context_pack.rs"]
 mod context_pack_tests;
 
-#[path = "handlers_context_source_path_tests.rs"]
+#[path = "context_source_path.rs"]
 mod source_path_tests;
 
 fn test_event(event_type: &str, summary: &str, summary_level: i32) -> db::AgentEvent {
