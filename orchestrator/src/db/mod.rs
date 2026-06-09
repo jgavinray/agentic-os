@@ -1,44 +1,61 @@
 use deadpool_postgres::Pool;
 
+pub mod connection;
+pub mod context_artifact_candidates;
+pub mod context_artifacts;
+pub mod context_compiler_ledger;
+pub mod context_event_queries;
+pub mod context_events;
+pub mod context_search;
+pub mod error_index;
+pub mod event_rows;
+pub mod execution_events;
+pub mod failure_remediation;
+pub mod failures;
+pub mod sessions;
+pub mod trajectory;
+pub mod trajectory_queries;
+pub mod trajectory_results;
+pub mod types;
+pub mod usage;
+
 pub use crate::context_rendering::{build_context, build_layered_context, estimate_tokens};
-pub use crate::db_connection::{acquire_single_writer_lock, create_pool, SingleWriterGuard};
-pub use crate::db_context_artifacts::{
+pub use connection::{acquire_single_writer_lock, create_pool, SingleWriterGuard};
+pub use context_artifacts::{
     get_active_context_artifacts, get_context_artifacts_for_repo,
     get_recent_instruction_candidates, get_recent_repo_decision_candidates,
     get_recent_session_events, upsert_context_artifact,
 };
-pub use crate::db_context_compiler_ledger::{
+pub use context_compiler_ledger::{
     get_context_compiler_ledger, insert_context_compiler_ledger_entry,
 };
-pub use crate::db_context_events::{
+pub use context_events::{
     count_events_for_repo, get_context_events_for_repo, get_context_evidence_for_policy,
     get_events_for_repo, hydrate_active_search_hits, preferred_summary_levels, search_events_fts,
 };
-pub use crate::db_execution_events::{
+pub use execution_events::{
     append_execution_event, insert_compile_result_event, insert_execution_artifact_event,
     insert_lint_result_event, insert_patch_result_event, insert_remediation_event,
     insert_test_result_event, insert_tool_result_event, insert_validation_result_event,
 };
-pub use crate::db_failures::{
+pub use failures::{
     get_active_errors, get_failure_history_for_signatures, get_recent_failure_history,
     insert_error_record, warn_if_legacy_signature_backfill_pending,
 };
-pub use crate::db_sessions::{
+pub use sessions::{
     append_event_from_request, create_session, event_from_append_request, find_or_create_session,
     start_session_from_request,
 };
-pub use crate::db_trajectory::{
+pub use trajectory::{
     get_event_chain_by_event_id, get_trajectory, get_trajectory_attempts, get_trajectory_result,
     idle_trajectory_ids, latest_trajectory_event_for_session, order_event_chain,
 };
-pub use crate::db_trajectory_results::emit_trajectory_result_once;
-pub use crate::db_types::{
+pub use trajectory_results::emit_trajectory_result_once;
+pub use types::{
     AgentEvent, ContextCompilerLedgerEntry, ContextEvidence, FailureHistoryItem,
     VllmCacheObservationInput, VllmCacheStats,
 };
-pub use crate::db_usage::{
-    get_vllm_cache_stats, insert_vllm_cache_observation, record_token_usage,
-};
+pub use usage::{get_vllm_cache_stats, insert_vllm_cache_observation, record_token_usage};
 
 // ── DB query functions ────────────────────────────────────────
 
@@ -141,5 +158,4 @@ pub async fn check_ready(pool: &deadpool_postgres::Pool) -> Result<(), anyhow::E
 }
 
 #[cfg(test)]
-#[path = "db_tests.rs"]
 mod tests;

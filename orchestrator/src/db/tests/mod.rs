@@ -102,17 +102,17 @@ fn failed_event(summary: &str, evidence: &str, outcome: &str) -> AgentEvent {
 }
 
 #[cfg(test)]
-#[path = "db_context_rendering_tests.rs"]
+#[path = "context_rendering.rs"]
 mod context_rendering_tests;
 
 #[cfg(test)]
-#[path = "db_context_failure_tests.rs"]
+#[path = "context_failure.rs"]
 mod context_failure_tests;
 
 #[cfg(test)]
-#[path = "db_context_policy_tests.rs"]
+#[path = "context_policy.rs"]
 mod context_policy_tests;
 
 #[cfg(test)]
-#[path = "db_record_tests.rs"]
+#[path = "record.rs"]
 mod record_tests;
