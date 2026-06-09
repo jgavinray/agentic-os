@@ -2,28 +2,28 @@ use metrics::counter;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
-pub use crate::telemetry_context::{
-    record_cache_invalidation, record_context_cache_replacement, record_context_pack,
-    record_promotion,
-};
-pub use crate::telemetry_execution::record_execution_artifact;
-pub use crate::telemetry_feature_feedback::{
-    record_feature_extraction_duration, record_feature_extraction_failure,
-    record_feature_failure_class, record_harness_feedback_learning,
-    record_harness_feedback_quarantine, record_harness_feedback_repair_run,
-    record_harness_feedback_signal, record_harness_guardrail_decision,
-    record_operational_constraint_injected, record_operational_constraint_suppressed,
-    record_unknown_tag_schema_version,
-};
-pub use crate::telemetry_http::{http_metrics_middleware, prometheus_content_type};
-pub use crate::telemetry_infrastructure::{
-    record_db_query, record_qdrant_request, record_rate_limited, record_sampling_param_override,
-};
-pub use crate::telemetry_model_services::{
-    record_embedder_inference, record_embedder_input_tokens, record_sentiment,
-    record_summarizer_candidate, record_summarizer_duration, record_summarizer_tick,
-    record_summarizer_written,
-};
+pub mod context;
+pub mod descriptions;
+pub mod descriptions_execution;
+pub mod descriptions_model_context;
+pub mod descriptions_request;
+pub mod descriptions_runtime;
+pub mod descriptions_transport;
+pub mod execution;
+pub mod feature_feedback;
+pub mod http;
+pub mod infrastructure;
+pub mod model_services;
+pub mod prime_feedback;
+pub mod prime_runtime;
+pub mod recorder;
+pub mod request_policy_prime;
+pub mod runtime_metrics;
+pub mod setup;
+pub mod streaming;
+pub mod upstream;
+pub mod usage;
+
 pub use crate::telemetry_request_classification::{
     record_request_classification, record_request_classification_backfill_run,
     record_request_classification_unknown_label, record_request_classification_write,
@@ -31,15 +31,37 @@ pub use crate::telemetry_request_classification::{
     record_request_live_policy_bypass, record_request_risk_flag,
     record_request_route_recommendation,
 };
-pub use crate::telemetry_runtime_metrics::{record_pool_gauges, record_process_metrics};
-pub use crate::telemetry_setup::{install_recorder, prime_metrics};
-pub use crate::telemetry_streaming::StreamTracker;
 pub use crate::telemetry_tool_mediation::{record_tool_authorization, record_tool_menu_outcome};
-pub use crate::telemetry_upstream::{
+pub use context::{
+    record_cache_invalidation, record_context_cache_replacement, record_context_pack,
+    record_promotion,
+};
+pub use execution::record_execution_artifact;
+pub use feature_feedback::{
+    record_feature_extraction_duration, record_feature_extraction_failure,
+    record_feature_failure_class, record_harness_feedback_learning,
+    record_harness_feedback_quarantine, record_harness_feedback_repair_run,
+    record_harness_feedback_signal, record_harness_guardrail_decision,
+    record_operational_constraint_injected, record_operational_constraint_suppressed,
+    record_unknown_tag_schema_version,
+};
+pub use http::{http_metrics_middleware, prometheus_content_type};
+pub use infrastructure::{
+    record_db_query, record_qdrant_request, record_rate_limited, record_sampling_param_override,
+};
+pub use model_services::{
+    record_embedder_inference, record_embedder_input_tokens, record_sentiment,
+    record_summarizer_candidate, record_summarizer_duration, record_summarizer_tick,
+    record_summarizer_written,
+};
+pub use runtime_metrics::{record_pool_gauges, record_process_metrics};
+pub use setup::{install_recorder, prime_metrics};
+pub use streaming::StreamTracker;
+pub use upstream::{
     record_upstream_litellm, record_upstream_litellm_error, record_upstream_summarizer,
     record_upstream_summarizer_error, reqwest_error_kind, upstream_error_kind,
 };
-pub use crate::telemetry_usage::{
+pub use usage::{
     record_tokens, record_trajectory_feature_written, record_trajectory_result,
     record_vllm_cache_delta, record_vllm_cache_token_flow,
 };
