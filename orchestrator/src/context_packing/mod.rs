@@ -1,12 +1,17 @@
-use crate::context_packing_build::build_cached_context;
-pub(crate) use crate::context_packing_cache::cached_context_for_request;
-use crate::context_packing_cache::context_cache_task;
-pub use crate::context_packing_endpoint::context_pack;
-pub(crate) use crate::context_packing_policy::context_task_category;
-use crate::context_packing_policy::policy_context_cache_key;
+pub mod build;
+pub mod cache;
+pub mod endpoint;
+pub mod policy;
+
 use crate::db;
 use crate::state::*;
 use crate::telemetry;
+use build::build_cached_context;
+pub(crate) use cache::cached_context_for_request;
+use cache::context_cache_task;
+pub use endpoint::context_pack;
+pub(crate) use policy::context_task_category;
+use policy::policy_context_cache_key;
 
 pub(crate) async fn get_or_build_cached_context(
     state: &AppState,
@@ -92,5 +97,4 @@ pub(crate) async fn get_or_build_cached_context_inner(
 }
 
 #[cfg(test)]
-#[path = "context_packing_tests.rs"]
 mod tests;

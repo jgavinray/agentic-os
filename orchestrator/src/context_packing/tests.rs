@@ -1,6 +1,6 @@
 #[test]
 fn context_pack_parallelizes_context_io_calls() {
-    let src = include_str!("context_packing_build.rs");
+    let src = include_str!("build.rs");
     let ctx_start = src
         .find("async fn build_cached_context")
         .expect("build_cached_context not found in source");
@@ -26,7 +26,7 @@ fn context_pack_parallelizes_context_io_calls() {
 
 #[test]
 fn context_pack_preserves_error_propagation_for_events() {
-    let src = include_str!("context_packing_endpoint.rs");
+    let src = include_str!("endpoint.rs");
     let ctx_start = src
         .find("pub async fn context_pack")
         .expect("context_pack not found");
