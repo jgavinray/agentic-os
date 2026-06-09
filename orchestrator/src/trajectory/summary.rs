@@ -1,7 +1,7 @@
 use crate::db::AgentEvent;
-use crate::trajectory_event_payload::{event_payload, metadata_i64, metadata_str, payload_str};
-use crate::trajectory_summary_status::derive_status;
-use crate::trajectory_types::{BoundaryReason, EventRole, FinalStatus};
+use crate::trajectory::event_payload::{event_payload, metadata_i64, metadata_str, payload_str};
+use crate::trajectory::summary_status::derive_status;
+use crate::trajectory::types::{BoundaryReason, EventRole, FinalStatus};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;

@@ -5,17 +5,24 @@
 //! replayable from the event log without learned classification or new storage.
 
 use crate::db::AgentEvent;
-use crate::trajectory_event_payload::{event_payload, event_success, payload_bool};
+use event_payload::{event_payload, event_success, payload_bool};
 use serde_json::Value;
 
-pub use crate::trajectory_events::{
+pub mod event_payload;
+pub mod events;
+pub mod roles;
+pub mod summary;
+pub mod summary_status;
+pub mod types;
+
+pub use events::{
     context_pack_event, make_request_metadata, model_response_metadata, trajectory_result_event,
 };
-pub use crate::trajectory_roles::{
+pub use roles::{
     default_role_for_event_type, is_trajectory_participating_event_type, validate_event_role,
 };
-pub use crate::trajectory_summary::{summarize_trajectory, TrajectoryResultSummary};
-pub use crate::trajectory_types::{
+pub use summary::{summarize_trajectory, TrajectoryResultSummary};
+pub use types::{
     BoundaryReason, EventRole, FinalStatus, TrajectoryContext, DEFAULT_TRAJECTORY_IDLE_TIMEOUT_SEC,
     EVENT_ROLES, EVENT_TYPE_CONTEXT_PACK, EVENT_TYPE_TRAJECTORY_RESULT, FINAL_STATUSES,
 };

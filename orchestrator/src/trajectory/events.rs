@@ -1,5 +1,5 @@
 use crate::db::AgentEvent;
-use crate::trajectory_types::{
+use crate::trajectory::types::{
     EventRole, TrajectoryContext, EVENT_TYPE_CONTEXT_PACK, EVENT_TYPE_TRAJECTORY_RESULT,
 };
 use serde_json::{json, Value};
@@ -78,7 +78,7 @@ pub fn context_pack_event(
 pub fn trajectory_result_event(
     session_id: &str,
     repo: &str,
-    summary: crate::trajectory_summary::TrajectoryResultSummary,
+    summary: crate::trajectory::summary::TrajectoryResultSummary,
 ) -> AgentEvent {
     let payload = summary.payload();
     AgentEvent {

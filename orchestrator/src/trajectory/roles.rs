@@ -1,4 +1,4 @@
-use crate::trajectory_types::{EventRole, EVENT_TYPE_CONTEXT_PACK, EVENT_TYPE_TRAJECTORY_RESULT};
+use crate::trajectory::types::{EventRole, EVENT_TYPE_CONTEXT_PACK, EVENT_TYPE_TRAJECTORY_RESULT};
 
 pub fn validate_event_role(role: Option<&str>) -> Result<(), anyhow::Error> {
     if let Some(role) = role {

@@ -1,6 +1,6 @@
 use crate::db::AgentEvent;
-use crate::trajectory_event_payload::{event_payload, event_success, payload_bool};
-use crate::trajectory_types::{BoundaryReason, EventRole, FinalStatus};
+use crate::trajectory::event_payload::{event_payload, event_success, payload_bool};
+use crate::trajectory::types::{BoundaryReason, EventRole, FinalStatus};
 
 pub fn derive_status(
     events: &[AgentEvent],
