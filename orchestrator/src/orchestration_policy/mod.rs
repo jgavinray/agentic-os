@@ -12,10 +12,20 @@
 //! is a separate append-only step so policy decisions can be audited without
 //! mixing database behavior into the policy rules.
 
-pub use crate::orchestration_policy_store::{
-    compact_policy_metadata, persist_orchestration_policy,
-};
-pub use crate::orchestration_policy_types::{
+pub mod base;
+pub mod context_types;
+pub mod intents;
+pub mod intents_mutating;
+pub mod intents_read;
+pub mod overlay_types;
+pub mod overlays;
+pub mod posture_types;
+pub mod store;
+pub mod tool_types;
+pub mod types;
+
+pub use store::{compact_policy_metadata, persist_orchestration_policy};
+pub use types::{
     ContextSource, EditPolicy, GitPolicy, OrchestrationPolicy, PromptRefinementPolicy, RiskPolicy,
     RuntimePolicy, ScopePolicy, ToolCapability, ValidationPolicy, POLICY_SCHEMA_VERSION,
     POLICY_SOURCE_DETERMINISTIC_RULES,
@@ -25,11 +35,11 @@ pub use crate::orchestration_policy_types::{
 // derive_orchestration_policy
 // ---------------------------------------------------------------------------
 
-use crate::orchestration_policy_base::base_policy;
-use crate::orchestration_policy_overlays::{
+use crate::request_classification::RequestClassification;
+use base::base_policy;
+use overlays::{
     apply_prompt_refinement_overlay, apply_risk_overlays, normalize_blocked_capabilities,
 };
-use crate::request_classification::RequestClassification;
 
 /// Derive a deterministic orchestration policy from a request classification.
 ///
@@ -117,25 +127,14 @@ pub fn derive_orchestration_policy(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[path = "orchestration_policy_test_support.rs"]
-mod test_support;
+mod tests {
+    pub(crate) use super::*;
+    pub(crate) mod support;
+    pub(crate) use support as test_support;
 
-#[cfg(test)]
-#[path = "orchestration_policy_base_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "orchestration_policy_prompt_tests.rs"]
-mod prompt_tests;
-
-#[cfg(test)]
-#[path = "orchestration_policy_risk_tests.rs"]
-mod risk_tests;
-
-#[cfg(test)]
-#[path = "orchestration_policy_contract_tests.rs"]
-mod contract_tests;
-
-#[cfg(test)]
-#[path = "orchestration_policy_raw_capture_tests.rs"]
-mod raw_capture_tests;
+    mod base;
+    mod contract;
+    mod prompt;
+    mod raw_capture;
+    mod risk;
+}

@@ -1,6 +1,6 @@
 #[test]
 fn test_migration_has_expected_structure() {
-    let migration = include_str!("../migrations/V16__orchestration_policies.sql");
+    let migration = include_str!("../../../migrations/V16__orchestration_policies.sql");
 
     assert!(
         migration.contains("agent_orchestration_policies"),

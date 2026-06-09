@@ -31,11 +31,11 @@ fn classification(
     }
 }
 
-#[path = "orchestration_policy_serialization_tests.rs"]
+#[path = "serialization.rs"]
 mod serialization_tests;
 
-#[path = "orchestration_policy_migration_tests.rs"]
+#[path = "migration.rs"]
 mod migration_tests;
 
-#[path = "orchestration_policy_metadata_tests.rs"]
+#[path = "metadata.rs"]
 mod metadata_tests;
