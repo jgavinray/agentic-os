@@ -57,6 +57,29 @@ fn current_implementation_does_not_require_external_info() {
 }
 
 #[test]
+fn bug_fix_language_maps_to_implement_intent() {
+    let row = classify_request_event(&event(
+        "e-fix-bug",
+        "Fix this bug the way the implementation should work.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+    assert_eq!(row.response_contract, ResponseContract::ValidationRequired);
+}
+
+#[test]
+fn explanatory_error_request_stays_debug_intent() {
+    let row = classify_request_event(&event(
+        "e-explain-error",
+        "Please explain the Docker compose error",
+        Some("ERROR failed to connect to http://localhost:8088"),
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Debug);
+}
+
+#[test]
 fn single_intent_with_conjunction_is_not_decomposed() {
     let row = classify_request_event(&event(
         "e-not-composite",

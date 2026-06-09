@@ -34,6 +34,31 @@ docker compose up -d     # Start full stack (postgres, qdrant, embedding, litell
 cargo test               # Run tests
 ```
 
+## Headless Claude Through Orchestrator
+
+Use the clean namespace key when driving Claude Code through the local
+orchestrator. Do not use `sk-local-orchestrator` for implementation runs; that
+namespace is polluted by prior failed trajectories.
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8088 \
+ANTHROPIC_AUTH_TOKEN=sk-agent-clean-002 \
+ANTHROPIC_API_KEY=sk-agent-clean-002 \
+claude -p --model opus --dangerously-skip-permissions \
+  --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+  -- 'your prompt here'
+```
+
+Model selection should be done with `--model opus`. Do not add
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, or
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` for this path. Do not add `--allowedTools`;
+tool availability should be mediated by the orchestrator policy path. Keep
+`--strict-mcp-config --mcp-config '{"mcpServers":{}}'` unless MCP tools are
+explicitly part of the test; otherwise plugin MCP servers such as ECC GitHub
+search become part of the effective tool surface. The `--` separator is
+required because `--mcp-config` accepts multiple values and will otherwise
+consume the prompt.
+
 ## Key Patterns
 
 - **Auth**: Constant-time Bearer token comparison via `subtle` crate. `API_KEYS=token,ns;token2,ns2` format.
@@ -48,5 +73,5 @@ cargo test               # Run tests
 - **Naming**: snake_case
 - **Errors**: `anyhow::Error` for opaque, `Result` for propagation
 - **Tests**: Inline `#[cfg(test)]` modules with unit tests
-- **Commits**: conventional (`feat:`, `fix:`, `chore:`)
+- **Commits**: conventional commits only (`feat:`, `fix:`, `chore:`, etc.)
 - **Docker**: `cgr.dev/chainguard/rust:latest-dev`, multi-stage, glibc

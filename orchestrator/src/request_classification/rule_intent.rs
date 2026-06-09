@@ -34,6 +34,24 @@ pub(crate) fn classify_intent(
         && contains_any(lower, &["edit", "modify", "change", "fix", "update"])
     {
         RequestIntent::ModifyConfig
+    } else if contains_any(lower, &["fix", "repair", "patch", "resolve"])
+        && contains_any(
+            lower,
+            &[
+                "bug",
+                "issue",
+                "regression",
+                "failing test",
+                "test failure",
+                "tests failed",
+                "failure",
+                "code",
+                "repo",
+                "software",
+            ],
+        )
+    {
+        RequestIntent::Implement
     } else if contains_any(lower, &["summarize", "summary", "recap"]) {
         RequestIntent::Summarize
     } else if contains_any(lower, &["classify", "categorize", "label this"]) {
