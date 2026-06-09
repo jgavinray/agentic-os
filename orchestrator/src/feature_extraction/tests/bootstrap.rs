@@ -32,8 +32,8 @@ fn config(now: DateTime<Utc>) -> ExtractionConfig {
     }
 }
 
-#[path = "feature_extraction_live_health_tests.rs"]
-mod live_health_tests;
+#[path = "live_health.rs"]
+mod live_health;
 
-#[path = "feature_extraction_bootstrap_detection_tests.rs"]
-mod bootstrap_detection_tests;
+#[path = "bootstrap_detection.rs"]
+mod bootstrap_detection;
