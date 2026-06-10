@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 pub const HARNESS_FEEDBACK_SCHEMA_VERSION: u32 = 1;
 
-pub const HARNESS_SIGNAL_TYPES: [&str; 27] = [
+pub const HARNESS_SIGNAL_TYPES: [&str; 30] = [
+    "worker_scope_check",
+    "worker_stuck",
+    "completion_without_validation",
     "benchmark_trace",
     "invalid_path",
     "repeated_invalid_path",
@@ -92,6 +95,9 @@ pub(crate) fn guardrail_action_for_signals(signals: &BTreeSet<&'static str>) -> 
 
 pub fn bounded_signal_type(value: &str) -> &'static str {
     match value {
+        "worker_scope_check" => "worker_scope_check",
+        "worker_stuck" => "worker_stuck",
+        "completion_without_validation" => "completion_without_validation",
         "benchmark_trace" | "benchmark" => "benchmark_trace",
         "invalid_path" => "invalid_path",
         "repeated_invalid_path" => "repeated_invalid_path",

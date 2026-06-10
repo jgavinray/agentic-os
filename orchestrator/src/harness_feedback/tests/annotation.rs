@@ -1,6 +1,115 @@
 use super::*;
 
 #[test]
+fn worker_scope_check_marker_is_recorded() {
+    let metadata = annotate_event_metadata(
+        "assistant_message",
+        "SCOPE-CHECK: orchestrator/src/db.rs — schema change needed to add the column",
+        None,
+        json!({}),
+    );
+
+    let feedback = metadata.get("harness_feedback").unwrap();
+    assert!(feedback["signals"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("worker_scope_check".to_string())));
+    assert_eq!(feedback["quarantined"], false);
+}
+
+#[test]
+fn worker_stuck_marker_is_recorded() {
+    let metadata = annotate_event_metadata(
+        "assistant_message",
+        "STUCK: tried changing the import twice — cargo check still fails with E0433",
+        None,
+        json!({}),
+    );
+
+    let feedback = metadata.get("harness_feedback").unwrap();
+    assert!(feedback["signals"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("worker_stuck".to_string())));
+}
+
+#[test]
+fn completion_with_open_validation_gap_is_flagged_and_quarantined() {
+    let metadata = annotate_event_metadata(
+        "assistant_message",
+        "Done. I updated the handler and everything works.",
+        None,
+        json!({
+            "finish_reason": "end_turn",
+            "validation_gate": {
+                "required": "targeted_tests",
+                "edits_observed": true,
+                "validation_observed": false,
+                "nudge_injected": true
+            }
+        }),
+    );
+
+    let feedback = metadata.get("harness_feedback").unwrap();
+    assert!(feedback["signals"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("completion_without_validation".to_string())));
+    assert_eq!(feedback["quarantined"], true);
+    assert_eq!(feedback["quarantine_reason"], "contract_violation");
+}
+
+#[test]
+fn mid_loop_tool_use_response_with_gap_is_not_flagged() {
+    // finish_reason tool_use means the trajectory is still working; only a
+    // final answer with the gap open is a contract violation.
+    let metadata = annotate_event_metadata(
+        "assistant_message",
+        "Editing the handler now.",
+        None,
+        json!({
+            "finish_reason": "tool_use",
+            "validation_gate": {
+                "edits_observed": true,
+                "validation_observed": false
+            }
+        }),
+    );
+
+    let signals = metadata
+        .get("harness_feedback")
+        .and_then(|feedback| feedback.get("signals"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!signals.contains(&Value::String("completion_without_validation".to_string())));
+}
+
+#[test]
+fn validated_completion_is_not_flagged() {
+    let metadata = annotate_event_metadata(
+        "assistant_message",
+        "Done. cargo test passed.",
+        None,
+        json!({
+            "finish_reason": "end_turn",
+            "validation_gate": {
+                "edits_observed": true,
+                "validation_observed": true
+            }
+        }),
+    );
+
+    let signals = metadata
+        .get("harness_feedback")
+        .and_then(|feedback| feedback.get("signals"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(!signals.contains(&Value::String("completion_without_validation".to_string())));
+}
+
+#[test]
 fn context_ledger_path_typo_is_quarantined() {
     let metadata = annotate_event_metadata(
         "failed_attempt",
