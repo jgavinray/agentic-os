@@ -29,4 +29,7 @@ pub const FEATURE_KEYS: &[&str] = &[
     "decomposition_reason",
     "sub_intent_count",
     "sub_intents",
+    "intent_weight",
+    "intent_margin",
+    "intent_runner_up",
 ];

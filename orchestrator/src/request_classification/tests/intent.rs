@@ -104,6 +104,62 @@ fn refactor_requests_map_to_implement_intent() {
 }
 
 #[test]
+fn imperative_mutation_requests_map_to_implement() {
+    for (id, summary) in [
+        (
+            "e-make",
+            "Make the orchestrator return 429 when the rate limit is exceeded.",
+        ),
+        ("e-remove", "Remove the dead code path in handlers/mod.rs."),
+        ("e-rename", "Rename the hybrid module to retrieval."),
+    ] {
+        let row = classify_request_event(&event(id, summary, None));
+        assert_eq!(row.intent, RequestIntent::Implement, "case {id}");
+    }
+}
+
+#[test]
+fn code_shaped_requests_without_verbs_fall_back_to_implement() {
+    // Terse dev shorthand with a file reference but no recognized verb should
+    // get the implement surface (the envelope is the safety layer), not a
+    // read-only Explain menu that wedges the loop.
+    let row = classify_request_event(&event(
+        "e-terse",
+        "rule_utils.rs: word boundary chars must exclude underscore",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+}
+
+#[test]
+fn explain_requests_with_file_paths_stay_explain() {
+    let row = classify_request_event(&event(
+        "e-explain-path",
+        "Explain how handlers/mod.rs dispatches requests.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Explain);
+}
+
+#[test]
+fn intent_scoring_records_margin_and_runner_up() {
+    let row = classify_request_event(&event(
+        "e-scored",
+        "Implement the retry policy and summarize what changed.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+    assert_eq!(row.features["intent_runner_up"], "summarize");
+    assert!(
+        row.features["intent_margin"].as_u64().unwrap() > 0,
+        "margin must be recorded for diagnosis"
+    );
+}
+
+#[test]
 fn explanatory_error_request_stays_debug_intent() {
     let row = classify_request_event(&event(
         "e-explain-error",
