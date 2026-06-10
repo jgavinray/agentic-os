@@ -8,7 +8,24 @@ pub fn detect_tool_intent(text: &str) -> ToolIntent {
     }
     if contains_any(
         &lower,
-        &["commit", "push", "pull request", "open a pr", "create pr"],
+        &[
+            // Publishing must be an explicit verb phrase. Bare "commit"/"push"
+            // appear incidentally in edit requests ("do not commit") and were
+            // flipping the intent.
+            "git commit",
+            "commit the",
+            "commit this",
+            "commit my",
+            "commit and",
+            "git push",
+            "push the",
+            "push this",
+            "push my",
+            "pull request",
+            "open a pr",
+            "create pr",
+            "create a pr",
+        ],
     ) {
         ToolIntent::Publishing
     } else if contains_any(
@@ -63,8 +80,7 @@ pub fn detect_tool_intent(text: &str) -> ToolIntent {
 }
 
 pub(crate) fn capability_for_tool_name(name: &str) -> ToolCapability {
-    let lower = name.to_ascii_lowercase();
-    let normalized = lower.replace('-', "_");
+    let normalized = normalize_tool_name(name);
     if matches!(
         normalized.as_str(),
         "read" | "read_file" | "file_read" | "view" | "open_file"
@@ -124,6 +140,30 @@ pub(crate) fn capability_for_tool_name(name: &str) -> ToolCapability {
     } else {
         ToolCapability::Unknown
     }
+}
+
+/// Normalize a client tool name to lower snake_case so naming styles map to
+/// the same capability: `RunCommand`, `run-command`, and `run_command` all
+/// normalize to `run_command`. Runs of uppercase stay together (`LSP` → `lsp`).
+fn normalize_tool_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len() + 4);
+    let mut prev_lower_or_digit = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            if prev_lower_or_digit {
+                normalized.push('_');
+            }
+            normalized.push(c.to_ascii_lowercase());
+            prev_lower_or_digit = false;
+        } else if c == '-' {
+            normalized.push('_');
+            prev_lower_or_digit = false;
+        } else {
+            normalized.push(c);
+            prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+        }
+    }
+    normalized
 }
 
 fn looks_like_file_reference(value: &str) -> bool {

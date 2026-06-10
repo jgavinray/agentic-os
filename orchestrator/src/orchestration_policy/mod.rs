@@ -14,6 +14,7 @@
 
 pub mod base;
 pub mod context_types;
+pub mod envelope;
 pub mod intents;
 pub mod intents_mutating;
 pub mod intents_read;
@@ -24,6 +25,7 @@ pub mod store;
 pub mod tool_types;
 pub mod types;
 
+pub use envelope::{envelope_guidance, ENVELOPE_GUIDANCE_VERSION};
 pub use store::{compact_policy_metadata, persist_orchestration_policy};
 pub use types::{
     ContextSource, EditPolicy, GitPolicy, OrchestrationPolicy, PromptRefinementPolicy, RiskPolicy,

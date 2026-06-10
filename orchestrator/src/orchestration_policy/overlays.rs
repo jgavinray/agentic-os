@@ -71,17 +71,37 @@ pub(crate) fn apply_prompt_refinement_overlay(
     git: &mut GitPolicy,
     runtime: &mut RuntimePolicy,
 ) -> PromptRefinementPolicy {
+    // The overlay clears the entire allowed-tool surface, so the trigger must
+    // be unmistakable. Generic word co-occurrence ("task" + "review") matched
+    // ordinary implementation requests and silently stripped their tools;
+    // only explicit prompt/spec-refinement phrases qualify.
     let lower = request_text.to_ascii_lowercase();
-    let has_prompt_word = contains_any(
+    let is_refinement_request = contains_any(
         &lower,
-        &["prompt", "spec", "task", "deliverable", "constraints"],
-    );
-    let has_feedback_word = contains_any(
-        &lower,
-        &["feedback", "review", "rewrite", "refine", "is this good"],
+        &[
+            "review this prompt",
+            "review the prompt",
+            "review my prompt",
+            "refine this prompt",
+            "refine the prompt",
+            "refine my prompt",
+            "rewrite this prompt",
+            "rewrite the prompt",
+            "rewrite my prompt",
+            "improve this prompt",
+            "improve the prompt",
+            "improve my prompt",
+            "is this prompt good",
+            "review this spec",
+            "review the spec",
+            "refine this spec",
+            "refine the spec",
+            "rewrite this spec",
+            "rewrite the spec",
+        ],
     );
 
-    if !(has_prompt_word && has_feedback_word) {
+    if !is_refinement_request {
         return PromptRefinementPolicy::None;
     }
 

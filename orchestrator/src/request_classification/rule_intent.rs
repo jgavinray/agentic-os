@@ -1,5 +1,5 @@
 use crate::request_classification_features::RequestFeatures;
-use crate::request_classification_rule_utils::contains_any;
+use crate::request_classification_rule_utils::{contains_any, contains_word};
 use crate::request_classification_types::RequestIntent;
 
 pub(crate) fn classify_intent(
@@ -20,6 +20,10 @@ pub(crate) fn classify_intent(
             "add feature",
             "add support",
             "add functionality",
+            "add a ",
+            "add the ",
+            "create a ",
+            "refactor",
             "wire up",
             "integrate",
         ],
@@ -56,11 +60,11 @@ pub(crate) fn classify_intent(
         RequestIntent::Summarize
     } else if contains_any(lower, &["classify", "categorize", "label this"]) {
         RequestIntent::Classify
-    } else if contains_any(lower, &["search", "look up", "find current", "latest"]) {
+    } else if contains_word(lower, &["search", "look up", "find current", "latest"]) {
         RequestIntent::Search
-    } else if contains_any(lower, &["plan", "proposal", "approach", "design"]) {
+    } else if contains_word(lower, &["plan", "proposal", "approach", "design"]) {
         RequestIntent::Plan
-    } else if contains_any(lower, &["run ", "execute ", "deploy", "restart"])
+    } else if contains_word(lower, &["run", "execute", "deploy", "restart"])
         || event_type == "tool_call"
     {
         RequestIntent::OperateTool

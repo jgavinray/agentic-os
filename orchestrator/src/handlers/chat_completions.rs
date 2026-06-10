@@ -155,12 +155,30 @@ pub async fn chat_completions(
     } else {
         None
     };
+    let envelope_guidance = crate::orchestration_policy::envelope_guidance(&request_policy);
+    if let Some(envelope) = envelope_guidance.as_deref() {
+        crate::system_context::inject_system_context(&mut req, envelope);
+    }
+    let envelope_metadata = Some(serde_json::json!({
+        "policy_envelope": {
+            "version": crate::orchestration_policy::ENVELOPE_GUIDANCE_VERSION,
+            "guidance_injected": envelope_guidance.is_some(),
+        }
+    }));
+    let runtime_prompt_intervention =
+        crate::prompt_intervention_runtime::build_runtime_prompt_intervention(&user_content);
+    if let Some(guidance) = runtime_prompt_intervention.guidance.as_deref() {
+        crate::system_context::inject_system_context(&mut req, guidance);
+    }
+    let prompt_intervention_metadata = Some(runtime_prompt_intervention.metadata.clone());
     let baseline_metadata = Some(serde_json::json!({
         "baseline_arm": baseline_arm.as_str(),
     }));
     let request_metadata = merge_request_metadata([
         sampling_metadata,
         tool_mediation_metadata,
+        envelope_metadata,
+        prompt_intervention_metadata,
         baseline_metadata,
     ]);
     let (trajectory, request_event_id) = begin_and_persist_request(

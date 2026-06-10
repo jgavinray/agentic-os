@@ -246,8 +246,11 @@ fn implementation_policy_preserves_tight_claude_code_ops_surface_anthropic() {
         .map(|t| t.name.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(allowed, vec!["Edit", "LSP", "Read", "Write"]);
-    assert!(hidden.contains(&"Bash"), "Bash should stay hidden");
+    assert_eq!(allowed, vec!["Bash", "Edit", "LSP", "Read", "Write"]);
+    assert!(
+        !hidden.contains(&"Bash"),
+        "Bash must be exposed so implement requests can run validation commands"
+    );
     assert!(hidden.contains(&"Agent"), "Agent should stay hidden");
     assert!(hidden.contains(&"Workflow"), "Workflow should stay hidden");
     assert!(hidden.contains(&"Monitor"), "Monitor should stay hidden");
@@ -267,6 +270,7 @@ fn implementation_policy_preserves_tight_claude_code_ops_surface_anthropic() {
             .map(|tool| (tool.name.as_str(), tool.capability))
             .collect::<Vec<_>>(),
         vec![
+            ("Bash", "shell"),
             ("Edit", "file_edit"),
             ("LSP", "text_search"),
             ("Read", "file_read"),
@@ -313,7 +317,7 @@ fn all_intents_validate_the_full_claude_code_tool_surface() {
             name: "implement",
             intent: RequestIntent::Implement,
             artifact_type: RequestArtifactType::Code,
-            expected_allowed: &["Edit", "LSP", "Read", "Write"],
+            expected_allowed: &["Bash", "Edit", "LSP", "Read", "Write"],
         },
         Case {
             name: "generate_config",
@@ -411,12 +415,22 @@ fn all_intents_validate_the_full_claude_code_tool_surface() {
     }
 }
 
+#[test]
+fn file_edit_requests_mentioning_commit_are_not_publishing_intent() {
+    // "commit" as an incidental word ("do not commit") must not flip the
+    // tool intent to Publishing; the edit verbs decide.
+    let intent =
+        detect_tool_intent("Fix the bug in src/lib.rs and update the tests, but do not commit.");
+
+    assert_eq!(intent, ToolIntent::FileEdit);
+}
+
 // ---------------------------------------------------------------------------
 // Implementation policy: dangerous / broad tools hidden
 // ---------------------------------------------------------------------------
 
 #[test]
-fn implementation_policy_hides_bash_shell_delete_publishing_deploy_unknown_openai() {
+fn implementation_policy_exposes_shell_hides_delete_publishing_deploy_unknown_openai() {
     let policy = implementation_policy();
     let mut req = json!({
         "messages": [],
@@ -461,18 +475,19 @@ fn implementation_policy_hides_bash_shell_delete_publishing_deploy_unknown_opena
     assert!(allowed.contains(&"Edit"));
     assert!(allowed.contains(&"Write"));
 
-    // Bash / shell tools hidden.
-    assert!(hidden.contains(&"Bash"), "Bash should be hidden");
-    assert!(hidden.contains(&"Shell"), "Shell should be hidden");
+    // Shell tools exposed in the menu; per-command authorization still gates
+    // what they may run (validation allowed, mutation denied).
+    assert!(allowed.contains(&"Bash"), "Bash should be exposed");
+    assert!(allowed.contains(&"Shell"), "Shell should be exposed");
     assert!(
-        hidden.contains(&"RunCommand"),
-        "RunCommand should be hidden"
+        allowed.contains(&"RunCommand"),
+        "RunCommand should be exposed"
     );
     assert!(
-        hidden.contains(&"ExecuteCommand"),
-        "ExecuteCommand should be hidden"
+        allowed.contains(&"ExecuteCommand"),
+        "ExecuteCommand should be exposed"
     );
-    assert!(hidden.contains(&"Terminal"), "Terminal should be hidden");
+    assert!(allowed.contains(&"Terminal"), "Terminal should be exposed");
 
     // Delete / remove-style tools hidden.
     assert!(hidden.contains(&"Delete"), "Delete should be hidden");
@@ -498,7 +513,7 @@ fn implementation_policy_hides_bash_shell_delete_publishing_deploy_unknown_opena
 }
 
 #[test]
-fn implementation_policy_hides_bash_shell_delete_publishing_deploy_unknown_anthropic() {
+fn implementation_policy_exposes_shell_hides_delete_publishing_deploy_unknown_anthropic() {
     let policy = implementation_policy();
     let mut req = json!({
         "messages": [],
@@ -541,18 +556,19 @@ fn implementation_policy_hides_bash_shell_delete_publishing_deploy_unknown_anthr
     assert!(allowed.contains(&"Edit"));
     assert!(allowed.contains(&"Write"));
 
-    // Bash / shell tools hidden.
-    assert!(hidden.contains(&"Bash"), "Bash should be hidden");
-    assert!(hidden.contains(&"Shell"), "Shell should be hidden");
+    // Shell tools exposed in the menu; per-command authorization still gates
+    // what they may run (validation allowed, mutation denied).
+    assert!(allowed.contains(&"Bash"), "Bash should be exposed");
+    assert!(allowed.contains(&"Shell"), "Shell should be exposed");
     assert!(
-        hidden.contains(&"RunCommand"),
-        "RunCommand should be hidden"
+        allowed.contains(&"RunCommand"),
+        "RunCommand should be exposed"
     );
     assert!(
-        hidden.contains(&"ExecuteCommand"),
-        "ExecuteCommand should be hidden"
+        allowed.contains(&"ExecuteCommand"),
+        "ExecuteCommand should be exposed"
     );
-    assert!(hidden.contains(&"Terminal"), "Terminal should be hidden");
+    assert!(allowed.contains(&"Terminal"), "Terminal should be exposed");
 
     // Delete / remove-style tools hidden.
     assert!(hidden.contains(&"Delete"), "Delete should be hidden");
