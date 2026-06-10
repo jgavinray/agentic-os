@@ -198,6 +198,7 @@ pub use prompt_intervention::extraction as prompt_intervention_extraction;
 pub use prompt_intervention::fingerprint as prompt_intervention_fingerprint;
 pub use prompt_intervention::records as prompt_intervention_records;
 pub use prompt_intervention::report as prompt_intervention_report;
+pub use prompt_intervention::runtime as prompt_intervention_runtime;
 pub use prompt_intervention::taxonomy as prompt_intervention_taxonomy;
 pub use prompt_intervention::telemetry as telemetry_prompt_interventions;
 
