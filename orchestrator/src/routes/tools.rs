@@ -30,11 +30,46 @@ pub async fn authorize_tool(
     // attempted tool call and decides whether that concrete call is allowed.
     let (classification, policy) =
         derive_tool_authorization_policy(&req, &namespace, state.capture_pool.is_some());
-    let response = crate::tool_mediation::authorize_tool_call_with_policy(
+
+    // Stateful single-file enforcement: look up what this trajectory already
+    // edited before evaluating the stateless rules.
+    let prior_edit_target = match (req.trajectory_id, state.capture_pool.as_ref()) {
+        (Some(trajectory_id), Some(pool))
+            if policy.edit_policy == orchestration_policy::EditPolicy::SingleFileEdit =>
+        {
+            crate::tool_mediation::edit_targets::first_target(pool, trajectory_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("trajectory_edit_targets lookup failed: {e}");
+                    None
+                })
+        }
+        _ => None,
+    };
+    let response = crate::tool_mediation::single_file_target_denial(
         &req,
-        state.tool_mediation_enabled,
-        Some(&policy),
-    );
+        &policy,
+        prior_edit_target.as_deref(),
+    )
+    .unwrap_or_else(|| {
+        crate::tool_mediation::authorize_tool_call_with_policy(
+            &req,
+            state.tool_mediation_enabled,
+            Some(&policy),
+        )
+    });
+    if response.decision == "allow" {
+        if let (Some(trajectory_id), Some(target)) = (
+            req.trajectory_id,
+            crate::tool_mediation::edit_target_for_request(&req),
+        ) {
+            crate::tool_mediation::edit_targets::record_target_best_effort(
+                state.capture_pool.as_ref(),
+                trajectory_id,
+                target,
+            );
+        }
+    }
     let policy_metadata = orchestration_policy::compact_policy_metadata(&classification, &policy);
     telemetry::record_tool_authorization(&state.metrics, &response);
     persist_tool_authorization_event(

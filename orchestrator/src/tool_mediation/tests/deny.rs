@@ -64,6 +64,66 @@ fn single_file_edit_enforces_named_file_scope() {
 }
 
 #[test]
+fn single_file_edit_denies_second_distinct_file_in_trajectory() {
+    let mut policy = policy_with_tools(vec![PolicyCap::FileEdit, PolicyCap::RepoRead], vec![]);
+    policy.edit_policy = EditPolicy::SingleFileEdit;
+    let req = tool_request(
+        "fix the typo",
+        "Edit",
+        json!({"file_path": "src/b.rs", "old_string": "x", "new_string": "y"}),
+        vec!["Edit", "Read"],
+    );
+
+    let denial = single_file_target_denial(&req, &policy, Some("src/a.rs"))
+        .expect("second file must be denied");
+
+    assert_eq!(denial.decision, "deny");
+    assert_eq!(denial.reason, "edit_scope_violation");
+    assert!(denial.message.contains("src/a.rs"));
+    assert!(denial.message.contains("src/b.rs"));
+}
+
+#[test]
+fn single_file_edit_allows_repeated_edits_of_same_file() {
+    let mut policy = policy_with_tools(vec![PolicyCap::FileEdit, PolicyCap::RepoRead], vec![]);
+    policy.edit_policy = EditPolicy::SingleFileEdit;
+    let req = tool_request(
+        "fix the typo",
+        "Edit",
+        json!({"file_path": "./src/a.rs", "old_string": "x", "new_string": "y"}),
+        vec!["Edit", "Read"],
+    );
+
+    assert!(
+        single_file_target_denial(&req, &policy, Some("src/a.rs")).is_none(),
+        "same file (normalized) must remain editable"
+    );
+}
+
+#[test]
+fn single_file_tracking_ignores_non_edit_tools_and_other_policies() {
+    let mut policy = policy_with_tools(vec![PolicyCap::FileEdit, PolicyCap::RepoRead], vec![]);
+    policy.edit_policy = EditPolicy::SingleFileEdit;
+    let read_req = tool_request(
+        "read",
+        "Read",
+        json!({"file_path": "src/b.rs"}),
+        vec!["Read"],
+    );
+    assert!(single_file_target_denial(&read_req, &policy, Some("src/a.rs")).is_none());
+
+    let mut scoped = policy_with_tools(vec![PolicyCap::FileEdit], vec![]);
+    scoped.edit_policy = EditPolicy::ScopedEdit;
+    let edit_req = tool_request(
+        "edit",
+        "Edit",
+        json!({"file_path": "src/b.rs"}),
+        vec!["Edit"],
+    );
+    assert!(single_file_target_denial(&edit_req, &scoped, Some("src/a.rs")).is_none());
+}
+
+#[test]
 fn edit_scope_enforcement_skips_when_request_names_no_files() {
     let policy = explicit_file_only_policy();
     let req = tool_request(
