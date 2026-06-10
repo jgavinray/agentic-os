@@ -105,6 +105,42 @@ pub(crate) fn extract_token_usage_from_sse(raw: &str) -> TokenUsage {
     usage
 }
 
+/// Extract the final stop/finish reason from a buffered SSE stream.
+///
+/// Anthropic streams carry `delta.stop_reason` on `message_delta` events;
+/// OpenAI streams carry `choices[0].finish_reason`. The last non-null value
+/// wins, matching non-streaming semantics.
+pub(crate) fn optional_stop_reason_from_sse(raw: &str) -> Option<String> {
+    let mut stop_reason = None;
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data.trim() == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let chunk_reason = value
+            .get("delta")
+            .and_then(|delta| delta.get("stop_reason"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .and_then(|choices| choices.first())
+                    .and_then(|choice| choice.get("finish_reason"))
+                    .and_then(Value::as_str)
+            });
+        if let Some(reason) = chunk_reason {
+            stop_reason = Some(reason.to_string());
+        }
+    }
+    stop_reason
+}
+
 pub(crate) fn optional_token_usage_from_sse(raw: &str) -> (Option<i64>, Option<i64>) {
     let mut input = None;
     let mut output = None;
@@ -124,4 +160,34 @@ pub(crate) fn optional_token_usage_from_sse(raw: &str) -> (Option<i64>, Option<i
         output = chunk_output.or(output);
     }
     (input, output)
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_anthropic_stop_reason_from_message_delta() {
+        let raw = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":12}}\n";
+        assert_eq!(
+            optional_stop_reason_from_sse(raw).as_deref(),
+            Some("end_turn")
+        );
+    }
+
+    #[test]
+    fn extracts_openai_finish_reason_and_last_value_wins() {
+        let raw = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+        assert_eq!(optional_stop_reason_from_sse(raw).as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn missing_stop_reason_returns_none() {
+        let raw = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n";
+        assert_eq!(optional_stop_reason_from_sse(raw), None);
+    }
 }

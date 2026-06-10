@@ -137,6 +137,11 @@ pub fn model_response_metadata(
     if let Some(sampling) = sampling_metadata {
         metadata["sampling_params"] = sampling["sampling_params"].clone();
         metadata["forwarded_sampling_params"] = sampling["forwarded_sampling_params"].clone();
+        // The validation-gate state must ride on the response event so harness
+        // feedback can flag completions that left the gap open.
+        if let Some(gate) = sampling.get("validation_gate") {
+            metadata["validation_gate"] = gate.clone();
+        }
     }
     if let Some(trajectory) = trajectory {
         metadata["event_type"] = json!("assistant_message");
