@@ -55,7 +55,7 @@ pub mod usage;
 pub use crate::background::trajectory::run_trajectory_idle_sweep;
 pub use crate::context_packing::context_pack;
 pub use crate::routes::checkpoints::checkpoint;
-pub use crate::routes::context::context_artifacts;
+pub use crate::routes::context::{context_artifacts, register_context_artifact};
 pub use crate::routes::harness::{harness_guardrail, harness_outcome, litellm_callback_payload};
 pub use crate::routes::health::{health, health_live, health_ready, list_models};
 pub use crate::routes::observability::{cache_stats, metrics, metrics_json};

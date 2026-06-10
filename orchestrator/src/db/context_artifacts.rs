@@ -73,6 +73,7 @@ pub async fn get_active_context_artifacts(
                  ORDER BY
                    CASE artifact_type
                      WHEN 'service_topology' THEN 0
+                     WHEN 'architecture_spec' THEN 1
                      WHEN 'active_instruction' THEN 1
                      WHEN 'repo_map' THEN 2
                      WHEN 'durable_project_memory' THEN 3

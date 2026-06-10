@@ -32,7 +32,10 @@ pub fn build_router(state: Arc<AppState>) -> Result<Router, anyhow::Error> {
             post(handlers::litellm_callback_payload),
         )
         .route("/context/pack", post(handlers::context_pack))
-        .route("/context/artifacts", get(handlers::context_artifacts))
+        .route(
+            "/context/artifacts",
+            get(handlers::context_artifacts).post(handlers::register_context_artifact),
+        )
         .route("/cache/stats", get(handlers::cache_stats))
         .route("/metrics", get(handlers::metrics))
         .route("/metrics/json", get(handlers::metrics_json))
