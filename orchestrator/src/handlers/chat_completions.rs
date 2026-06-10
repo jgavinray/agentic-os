@@ -126,7 +126,11 @@ pub async fn chat_completions(
         &user_content,
         state.capture_pool.is_some(),
     );
-    if crate::tool_mediation::broaden_policy_for_observed_edits(&req, &mut request_policy) {
+    let trajectory_evidence = crate::tool_mediation::trajectory_tool_evidence(&req);
+    if crate::tool_mediation::broaden_policy_for_observed_edits(
+        &trajectory_evidence,
+        &mut request_policy,
+    ) {
         tracing::info!(
             endpoint = "chat/completions",
             "policy broadened: trajectory history shows edit tool use"
@@ -171,6 +175,12 @@ pub async fn chat_completions(
             "guidance_injected": envelope_guidance.is_some(),
         }
     }));
+    let validation_gate =
+        crate::tool_mediation::evaluate_validation_gate(&trajectory_evidence, &request_policy);
+    if let Some(nudge) = validation_gate.nudge.as_deref() {
+        crate::system_context::inject_system_context(&mut req, nudge);
+    }
+    let validation_gate_metadata = validation_gate.metadata;
     let runtime_prompt_intervention =
         crate::prompt_intervention_runtime::build_runtime_prompt_intervention_from_request(&req);
     if let Some(guidance) = runtime_prompt_intervention.guidance.as_deref() {
@@ -184,6 +194,7 @@ pub async fn chat_completions(
         sampling_metadata,
         tool_mediation_metadata,
         envelope_metadata,
+        validation_gate_metadata,
         prompt_intervention_metadata,
         baseline_metadata,
     ]);

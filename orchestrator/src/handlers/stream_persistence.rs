@@ -84,7 +84,7 @@ async fn persist_stream_trajectory_response(
         input_tokens,
         output_tokens,
         Some(completion.started.elapsed().as_millis() as i64),
-        None,
+        crate::sse::optional_stop_reason_from_sse(raw),
         completion.request_metadata.clone(),
         completion.context_pack_id,
         Some(trajectory),

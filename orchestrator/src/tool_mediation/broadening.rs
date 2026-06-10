@@ -15,8 +15,18 @@
 use serde_json::Value;
 
 use crate::orchestration_policy::{OrchestrationPolicy, RiskPolicy, ToolCapability as PolicyCap};
-use crate::tool_mediation_classification::capability_for_tool_name;
+use crate::tool_mediation_classification::{capability_for_tool_name, command_capability};
 use crate::tool_mediation_types::ToolCapability;
+
+/// What the request's assistant history shows the trajectory already doing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrajectoryToolEvidence {
+    /// An edit-capability tool call appears in the history.
+    pub edits_observed: bool,
+    /// A validation tool call (named validation tool, or a shell command that
+    /// classifies as validation such as `cargo test`) appears in the history.
+    pub validation_observed: bool,
+}
 
 /// Capabilities guaranteed once the trajectory has observed edit tool calls.
 const IMPLEMENT_SURFACE: &[PolicyCap] = &[
@@ -28,10 +38,39 @@ const IMPLEMENT_SURFACE: &[PolicyCap] = &[
     PolicyCap::GitRead,
 ];
 
+/// Scan the request's assistant messages for edit and validation tool use.
+pub fn trajectory_tool_evidence(req: &Value) -> TrajectoryToolEvidence {
+    let mut evidence = TrajectoryToolEvidence::default();
+    let Some(messages) = req.get("messages").and_then(Value::as_array) else {
+        return evidence;
+    };
+    for message in messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+    {
+        for (name, arguments) in assistant_tool_calls(message) {
+            match capability_for_tool_name(name) {
+                ToolCapability::FileEdit => evidence.edits_observed = true,
+                ToolCapability::Validation => evidence.validation_observed = true,
+                ToolCapability::Shell
+                    if command_capability(&arguments) == ToolCapability::Validation =>
+                {
+                    evidence.validation_observed = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    evidence
+}
+
 /// Broaden the policy when the request history shows the assistant already
 /// performing file edits. Returns true when any capability was added.
-pub fn broaden_policy_for_observed_edits(req: &Value, policy: &mut OrchestrationPolicy) -> bool {
-    if !history_contains_edit_tool_use(req) {
+pub fn broaden_policy_for_observed_edits(
+    evidence: &TrajectoryToolEvidence,
+    policy: &mut OrchestrationPolicy,
+) -> bool {
+    if !evidence.edits_observed {
         return false;
     }
 
@@ -58,51 +97,37 @@ pub fn broaden_policy_for_observed_edits(req: &Value, policy: &mut Orchestration
     broadened
 }
 
-fn history_contains_edit_tool_use(req: &Value) -> bool {
-    let Some(messages) = req.get("messages").and_then(Value::as_array) else {
-        return false;
-    };
-    messages
-        .iter()
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-        .any(assistant_used_edit_tool)
-}
-
-fn assistant_used_edit_tool(message: &Value) -> bool {
-    // Anthropic format: content blocks of type tool_use carry the tool name.
-    let anthropic_hit = message
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-                .filter_map(|block| block.get("name").and_then(Value::as_str))
-                .any(is_edit_tool)
-        })
-        .unwrap_or(false);
-    if anthropic_hit {
-        return true;
+/// Collect (tool name, arguments) pairs from one assistant message in either
+/// Anthropic (`tool_use` content blocks) or OpenAI (`tool_calls`) format.
+fn assistant_tool_calls(message: &Value) -> Vec<(&str, Value)> {
+    let mut calls = Vec::new();
+    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+        for block in blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        {
+            if let Some(name) = block.get("name").and_then(Value::as_str) {
+                calls.push((name, block.get("input").cloned().unwrap_or(Value::Null)));
+            }
+        }
     }
-    // OpenAI format: assistant messages carry tool_calls with function names.
-    message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
-            calls
-                .iter()
-                .filter_map(|call| {
-                    call.get("function")
-                        .and_then(|function| function.get("name"))
-                        .and_then(Value::as_str)
-                })
-                .any(is_edit_tool)
-        })
-        .unwrap_or(false)
-}
-
-fn is_edit_tool(name: &str) -> bool {
-    capability_for_tool_name(name) == ToolCapability::FileEdit
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in tool_calls {
+            let Some(function) = call.get("function") else {
+                continue;
+            };
+            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                // OpenAI serializes arguments as a JSON string.
+                let arguments = function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or(Value::Null);
+                calls.push((name, arguments));
+            }
+        }
+    }
+    calls
 }
 
 #[cfg(test)]
@@ -149,8 +174,8 @@ mod tests {
         let mut policy = policy_for(RequestIntent::Explain, vec![RequestRisk::None]);
         assert!(policy.blocked_tools.contains(&PolicyCap::FileEdit));
 
-        let broadened =
-            broaden_policy_for_observed_edits(&anthropic_history_with("Edit"), &mut policy);
+        let evidence = trajectory_tool_evidence(&anthropic_history_with("Edit"));
+        let broadened = broaden_policy_for_observed_edits(&evidence, &mut policy);
 
         assert!(broadened);
         assert!(policy.allowed_tools.contains(&PolicyCap::FileEdit));
@@ -166,8 +191,8 @@ mod tests {
     fn read_only_history_does_not_broaden() {
         let mut policy = policy_for(RequestIntent::Explain, vec![RequestRisk::None]);
 
-        let broadened =
-            broaden_policy_for_observed_edits(&anthropic_history_with("Read"), &mut policy);
+        let evidence = trajectory_tool_evidence(&anthropic_history_with("Read"));
+        let broadened = broaden_policy_for_observed_edits(&evidence, &mut policy);
 
         assert!(!broadened);
         assert!(!policy.allowed_tools.contains(&PolicyCap::FileEdit));
@@ -178,7 +203,8 @@ mod tests {
         let mut policy = policy_for(RequestIntent::Implement, vec![RequestRisk::HighStakes]);
         assert!(policy.blocked_tools.contains(&PolicyCap::FileEdit));
 
-        broaden_policy_for_observed_edits(&anthropic_history_with("Write"), &mut policy);
+        let evidence = trajectory_tool_evidence(&anthropic_history_with("Write"));
+        broaden_policy_for_observed_edits(&evidence, &mut policy);
 
         assert!(
             !policy.allowed_tools.contains(&PolicyCap::FileEdit),
@@ -198,10 +224,62 @@ mod tests {
             ]
         });
 
-        let broadened = broaden_policy_for_observed_edits(&req, &mut policy);
+        let evidence = trajectory_tool_evidence(&req);
+        let broadened = broaden_policy_for_observed_edits(&evidence, &mut policy);
 
         assert!(broadened);
         assert!(policy.allowed_tools.contains(&PolicyCap::ShellRead));
         assert!(policy.allowed_tools.contains(&PolicyCap::FileEdit));
+    }
+
+    #[test]
+    fn bash_validation_command_counts_as_validation_evidence() {
+        let req = json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": "src/lib.rs"}},
+                    {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "cargo test -p orchestrator"}}
+                ]}
+            ]
+        });
+
+        let evidence = trajectory_tool_evidence(&req);
+
+        assert!(evidence.edits_observed);
+        assert!(evidence.validation_observed);
+    }
+
+    #[test]
+    fn bash_read_command_is_not_validation_evidence() {
+        let req = json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cat src/lib.rs"}}
+                ]}
+            ]
+        });
+
+        let evidence = trajectory_tool_evidence(&req);
+
+        assert!(!evidence.edits_observed);
+        assert!(!evidence.validation_observed);
+    }
+
+    #[test]
+    fn openai_string_arguments_are_parsed_for_validation_commands() {
+        let req = json!({
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"type": "function", "function": {
+                        "name": "Bash",
+                        "arguments": "{\"command\": \"cargo check --all-targets\"}"
+                    }}
+                ]}
+            ]
+        });
+
+        let evidence = trajectory_tool_evidence(&req);
+
+        assert!(evidence.validation_observed);
     }
 }

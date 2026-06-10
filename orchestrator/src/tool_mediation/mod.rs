@@ -17,6 +17,7 @@ pub mod broadening;
 pub mod canonical;
 pub mod classification;
 pub mod decision_store;
+pub mod edit_targets;
 pub mod payload;
 pub mod policy;
 pub mod shaping;
@@ -24,9 +25,15 @@ pub mod shaping_policy;
 pub mod shell;
 pub mod telemetry;
 pub mod types;
+pub mod validation_gate;
 
-pub use authorization::{authorize_tool_call, authorize_tool_call_with_policy};
-pub use broadening::broaden_policy_for_observed_edits;
+pub use authorization::{
+    authorize_tool_call, authorize_tool_call_with_policy, edit_target_for_request,
+    single_file_target_denial,
+};
+pub use broadening::{
+    broaden_policy_for_observed_edits, trajectory_tool_evidence, TrajectoryToolEvidence,
+};
 pub use classification::{
     bounded_capability, bounded_decision, bounded_reason, bounded_tool_action, detect_tool_intent,
 };
@@ -40,6 +47,7 @@ pub use types::{
     ToolAuthorizeRequest, ToolAuthorizeResponse, ToolCapability, ToolIntent, ToolMenuOutcome,
     ToolPayloadFormat, ToolSummary, TOOL_MEDIATION_POLICY_VERSION,
 };
+pub use validation_gate::{evaluate_validation_gate, ValidationGateOutcome};
 
 #[cfg(test)]
 mod tests {
