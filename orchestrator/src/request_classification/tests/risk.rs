@@ -68,6 +68,42 @@ fn high_stakes_domains_set_high_stakes_risk() {
 }
 
 #[test]
+fn high_stakes_domain_markers_do_not_match_embedded_software_terms() {
+    for (id, summary) in [
+        (
+            "e-taxonomy",
+            "Implement the prompt intervention taxonomy module.",
+        ),
+        (
+            "e-record-contract",
+            "Read docs/PromptInterventions/02-record-contract.md and implement the runtime hook.",
+        ),
+        (
+            "e-restock",
+            "Patch the restock_inventory.rs fixture in this repository.",
+        ),
+    ] {
+        let row = classify_request_event(&event(id, summary, None));
+        assert_ne!(row.domain, RequestDomain::Medical);
+        assert_ne!(row.domain, RequestDomain::Legal);
+        assert_ne!(row.domain, RequestDomain::Finance);
+        assert!(!row.risk.contains(&RequestRisk::HighStakes));
+    }
+}
+
+#[test]
+fn high_stakes_domain_markers_match_later_standalone_occurrences() {
+    let row = classify_request_event(&event(
+        "e-later-standalone-marker",
+        "The taxonomy module should not match, but tax guidance should.",
+        None,
+    ));
+
+    assert_eq!(row.domain, RequestDomain::Finance);
+    assert!(row.risk.contains(&RequestRisk::HighStakes));
+}
+
+#[test]
 fn infrastructure_terms_map_to_expected_domains() {
     let row = classify_request_event(&event(
         "e-domains",

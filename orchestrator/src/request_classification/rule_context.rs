@@ -1,5 +1,5 @@
 use crate::request_classification_features::RequestFeatures;
-use crate::request_classification_rule_utils::{contains_any, push_if};
+use crate::request_classification_rule_utils::{contains_any, contains_word, push_if};
 use crate::request_classification_types::{RequestArtifactType, RequestDomain};
 
 pub(crate) fn detected_domains(features: &RequestFeatures, lower: &str) -> Vec<RequestDomain> {
@@ -31,17 +31,17 @@ pub(crate) fn detected_domains(features: &RequestFeatures, lower: &str) -> Vec<R
     );
     push_if(
         &mut domains,
-        contains_any(lower, &["medical", "doctor", "diagnosis", "medicine"]),
+        contains_word(lower, &["medical", "doctor", "diagnosis", "medicine"]),
         RequestDomain::Medical,
     );
     push_if(
         &mut domains,
-        contains_any(lower, &["legal", "lawyer", "lawsuit", "contract"]),
+        contains_word(lower, &["legal", "lawyer", "lawsuit", "contract"]),
         RequestDomain::Legal,
     );
     push_if(
         &mut domains,
-        contains_any(lower, &["finance", "tax", "investment", "stock", "loan"]),
+        contains_word(lower, &["finance", "tax", "investment", "stock", "loan"]),
         RequestDomain::Finance,
     );
     push_if(
