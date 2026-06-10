@@ -204,6 +204,7 @@ pub fn bounded_reason(value: &str) -> &'static str {
         "policy_filtered_all_tools" => "policy_filtered_all_tools",
         "policy_blocked_tool" => "policy_blocked_tool",
         "policy_tool_not_allowed" => "policy_tool_not_allowed",
+        "edit_scope_violation" => "edit_scope_violation",
         _ => "unknown",
     }
 }

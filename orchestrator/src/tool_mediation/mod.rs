@@ -13,6 +13,7 @@
 
 pub mod authorization;
 pub mod authorization_types;
+pub mod broadening;
 pub mod canonical;
 pub mod classification;
 pub mod decision_store;
@@ -25,6 +26,7 @@ pub mod telemetry;
 pub mod types;
 
 pub use authorization::{authorize_tool_call, authorize_tool_call_with_policy};
+pub use broadening::broaden_policy_for_observed_edits;
 pub use classification::{
     bounded_capability, bounded_decision, bounded_reason, bounded_tool_action, detect_tool_intent,
 };
