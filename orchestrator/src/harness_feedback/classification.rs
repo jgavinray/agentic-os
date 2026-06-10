@@ -75,6 +75,7 @@ fn collect_structured_metadata(metadata: &Value, classification: &mut HarnessCla
 
     collect_structured_path_signals(metadata, classification);
     collect_structured_contract_signals(metadata, classification);
+    collect_validation_gate_signals(metadata, classification);
 
     if bool_path(metadata, &["harness_feedback", "quarantined"])
         || bool_path(metadata, &["harness", "quarantine"])
@@ -113,6 +114,26 @@ fn collect_structured_contract_signals(
     }
 }
 
+/// Flag final answers that closed a trajectory with the validation gap open.
+///
+/// The validation gate (tool_mediation::validation_gate) stamps request and
+/// response metadata with the observed edit/validation state. A response whose
+/// finish reason ends the turn while edits happened without validation is a
+/// contract violation: the model declared completion without running the
+/// required checks. Mid-loop responses (finish reason `tool_use`/`tool_calls`)
+/// are still working and are not flagged.
+fn collect_validation_gate_signals(metadata: &Value, classification: &mut HarnessClassification) {
+    let edits = bool_path(metadata, &["validation_gate", "edits_observed"]);
+    let validated = bool_path(metadata, &["validation_gate", "validation_observed"]);
+    let finished = matches!(
+        string_path(metadata, &["finish_reason"]),
+        Some("end_turn") | Some("stop")
+    );
+    if edits && !validated && finished {
+        classification.signal("completion_without_validation");
+    }
+}
+
 fn collect_structured_path_signals(metadata: &Value, classification: &mut HarnessClassification) {
     let requested_path = string_path(metadata, &["harness", "requested_path"])
         .or_else(|| string_path(metadata, &["harness", "requested_file"]))
@@ -146,6 +167,9 @@ fn apply_quarantine_rules(classification: &mut HarnessClassification) {
         || classification
             .signals
             .contains("missing_required_validation")
+        || classification
+            .signals
+            .contains("completion_without_validation")
     {
         classification.quarantine("contract_violation");
     } else if classification.signals.contains("fake_success_claim")

@@ -142,6 +142,15 @@ pub(crate) fn collect_text_signals(
     ) {
         classification.signal("scope_violation");
     }
+    // Deterministic worker escalation markers (see
+    // docs/WORKER_CLAUDE_MD_TEMPLATE.md): the model is asking for an operator
+    // decision instead of expanding scope or thrashing.
+    if haystack.contains("scope-check:") {
+        classification.signal("worker_scope_check");
+    }
+    if haystack.contains("stuck:") {
+        classification.signal("worker_stuck");
+    }
     if contains_any(
         &haystack,
         &["enum_variant_hash", "placeholder", "early return"],
