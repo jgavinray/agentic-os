@@ -38,9 +38,16 @@ The live request path is:
 ```text
 client request
   -> authentication and namespace selection
+  -> live-policy guardrail checks
   -> request classification
   -> orchestration policy derivation
-  -> tool-menu shaping and request metadata enrichment
+  -> optional classification-driven model override
+  -> policy-aware tool-menu shaping
+  -> operating-envelope guidance injection
+  -> validation-gate evaluation and guidance injection
+  -> execution-plan guidance for composite requests
+  -> runtime prompt intervention
+  -> request metadata enrichment
   -> context packing
   -> LiteLLM forwarding
   -> response and event persistence
@@ -66,9 +73,11 @@ after a durable event exists, so the policy row can reference the event id.
 
 | File | Responsibility |
 | --- | --- |
-| `orchestrator/src/orchestration_policy.rs` | Defines policy enums, derives policies from classifications, builds compact metadata, and persists policy rows. |
-| `orchestrator/src/handlers.rs` | Calls policy derivation on request and tool-authorization paths, attaches compact metadata, and persists policy decisions. |
-| `orchestrator/src/tool_mediation.rs` | Applies policy to model tool menus and pending tool calls. |
+| `orchestrator/src/orchestration_policy/` | Defines policy enums, derives policies from classifications, renders operating-envelope guidance, builds compact metadata, and persists policy rows. |
+| `orchestrator/src/handlers/chat_completions.rs` | OpenAI request path: classification, policy derivation, model override, tool shaping, guidance injection, context packing, forwarding, and persistence. |
+| `orchestrator/src/handlers/anthropic_messages.rs` | Anthropic request path with the same policy stages while preserving Anthropic request shape. |
+| `orchestrator/src/routes/tools.rs` | `/tools/authorize` endpoint and policy persistence for pre-tool hooks. |
+| `orchestrator/src/tool_mediation/` | Applies policy to model tool menus and pending tool calls, records decisions, tracks edit targets, broadens policy from trajectory evidence, and evaluates validation gates. |
 | `orchestrator/migrations/V16__orchestration_policies.sql` | Creates the append-only policy ledger table. |
 | `docs/TOOL_MEDIATION.md` | Documents client-facing tool shaping and authorization behavior. |
 | `docs/RequestClassification/ARCHITECTURE.md` | Documents the upstream labels consumed by policy derivation. |
@@ -136,12 +145,13 @@ The `Unknown` fallback is deliberately minimal: no allowed tools, read-only,
 no git changes, no restarts, no validation, and `no_scp`.
 
 `Implement` is intentionally narrower than a general coding-agent mode. It
-allows repository read/search/list, file read, file edit/create, and git read.
-It blocks generic shell, shell mutation, docker mutation, deployment, service
-restart, git write/publishing, and remote host access. The policy carries a
-targeted-test validation posture as an expectation, but generic shell validation
-is not exposed during the implementation request itself; a later
-validation-specific phase should make that tool surface explicit.
+allows repository read/search/list, file read, file edit/create, git read, and
+validation. It blocks generic shell mutation, docker mutation, deployment,
+service restart, git write/publishing, and remote host access. Shell validation
+commands are treated as validation capability, while arbitrary or unrecognized
+shell commands remain blocked as mutation. The policy carries a targeted-test
+validation posture, and the validation gate can inject a reminder when edits
+are observed without validation.
 
 ### Risk Overlays
 
@@ -187,7 +197,7 @@ and shell commands into practical execution categories. The orchestration policy
 has a broader capability taxonomy because it describes the operating envelope
 for the whole request.
 
-`tool_mediation.rs` bridges the two with a mapping function. Important rules:
+`orchestrator/src/tool_mediation/` bridges the two with a mapping function. Important rules:
 
 - `TextSearch` and `FileList` map to policy `RepoRead`.
 - `FileRead` can be allowed by either policy `FileRead` or `RepoRead`.

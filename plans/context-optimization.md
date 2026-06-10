@@ -39,8 +39,8 @@ The orchestrator rebuilds the entire context pack from scratch on **every reques
 
 **What changes:**
 - `state.rs`: Add `CachedContext` struct and `ContextCache` with TTL (5 min default)
-- `handlers.rs`: Wrap `context_pack` handler in cache lookup. Key = `"{repo}:{task}:{event_count}"`. Add cache invalidation on `append_event`.
-- `handlers.rs`: Add `GET /cache/stats` debug endpoint
+- `handlers/context.rs`: Wrap `context_pack` handler in cache lookup. Key = `"{repo}:{task}:{event_count}"`. Add cache invalidation on `append_event`.
+- `routes/observability.rs`: Add `GET /cache/stats` debug endpoint
 - `main.rs`: Add `CONTEXT_CACHE_TTL_MS` env var
 
 **Acceptance criteria:**
@@ -58,7 +58,7 @@ The orchestrator rebuilds the entire context pack from scratch on **every reques
 **What changes:**
 - `hybrid.rs`: Add `compute_decay` function using exponential decay: `e^(-λ * age_minutes)`, default λ=0.006. 1 hour = ~70% of original score, 1 day is effectively suppressed.
 - `hybrid.rs`: Add `with_decay` field to `SearchHit` to carry timestamp through merge
-- `handlers.rs`: Pass timestamp through RRF merge; stale events get reduced contribution
+- `context_packing/`: Pass timestamp through RRF merge; stale events get reduced contribution
 - `state.rs`: Add `CONTEXT_DECAY_RATE` env var (default: 0.006)
 
 **Acceptance criteria:**
@@ -77,7 +77,7 @@ The orchestrator rebuilds the entire context pack from scratch on **every reques
 **What changes:**
 - `db.rs`: Add `summary_level` column (0=raw, 1=event-level, 2=session-level, 3=executive)
 - `summarizer.rs`: Promote summaries across levels. L3 executive summaries trigger after 200+ L2 summaries. Each summary level has a distinct prompt template.
-- `handlers.rs`: `context_pack` fetches from appropriate level based on event count:
+- `handlers/context.rs`: `context_pack` fetches from appropriate level based on event count:
   - < 20 messages: raw (L0)
   - 20-200: L1 summaries
   - 200-2000: L2 summaries
@@ -118,9 +118,9 @@ The orchestrator rebuilds the entire context pack from scratch on **every reques
 
 | Phase | Deliverable | Files Modified | Lines Changed | Time |
 |-------|-------------|----------------|---------------|------|
-| 1 | Context caching | `state.rs` (+50), `handlers.rs` (+40, -10), `main.rs` (+5) | ~100 lines | ~1.5 hours |
-| 2 | Time decay | `hybrid.rs` (+30), `handlers.rs` (+15), `state.rs` (+10) | ~60 lines | ~1 hour |
-| 3 | Summary hierarchy | `db.rs` (+30), `summarizer.rs` (+40), `handlers.rs` (+20), `state.rs` (+20) | ~110 lines | ~2 hours |
+| 1 | Context caching | `state.rs` (+50), `handlers/context.rs` (+40, -10), `main.rs` (+5) | ~100 lines | ~1.5 hours |
+| 2 | Time decay | `hybrid.rs` (+30), `context_packing/` (+15), `state.rs` (+10) | ~60 lines | ~1 hour |
+| 3 | Summary hierarchy | `db.rs` (+30), `summarizer.rs` (+40), `handlers/context.rs` (+20), `state.rs` (+20) | ~110 lines | ~2 hours |
 | 4 | Integration + tests | All above files | ~30 lines of test glue | ~1 hour |
 | | | | **Total: ~300 lines** | **~5-6 hours** |
 
