@@ -94,7 +94,11 @@ fn test_implement_allows_edit_create_and_targeted_validation_only() {
     assert_eq!(policy.validation_policy, ValidationPolicy::TargetedTests);
     assert_eq!(policy.git_policy, GitPolicy::NoGitChanges);
     assert_eq!(policy.runtime_policy, RuntimePolicy::NoRestart);
-    assert!(policy.blocked_tools.contains(&ToolCapability::ShellRead));
+    assert!(
+        policy.allowed_tools.contains(&ToolCapability::ShellRead),
+        "implement must expose read/validation shell so clients without a \
+         dedicated test tool can satisfy targeted_tests"
+    );
     assert!(policy
         .blocked_tools
         .contains(&ToolCapability::ShellMutation));

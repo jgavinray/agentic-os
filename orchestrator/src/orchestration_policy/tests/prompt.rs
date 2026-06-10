@@ -30,6 +30,29 @@ fn test_prompt_review_overlay() {
 }
 
 #[test]
+fn implementation_text_with_task_and_review_words_keeps_edit_tools() {
+    // "task" + "review" are everyday words in implementation requests. They
+    // must not trigger the prompt-refinement overlay, which clears the entire
+    // allowed-tool surface.
+    let c = classification(
+        RequestIntent::Implement,
+        vec![RequestRisk::None],
+        RequestArtifactType::Code,
+    );
+    let policy = derive_orchestration_policy(
+        &c,
+        "Implement the task described in docs/spec.md, run cargo test, and review the failing tests.",
+        false,
+    );
+
+    assert_eq!(
+        policy.prompt_refinement_policy,
+        PromptRefinementPolicy::None
+    );
+    assert!(policy.allowed_tools.contains(&ToolCapability::FileEdit));
+}
+
+#[test]
 fn test_prompt_review_overlay_with_external_info() {
     let c = classification(
         RequestIntent::Explain,

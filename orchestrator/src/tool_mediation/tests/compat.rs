@@ -86,8 +86,11 @@ fn implementation_policy_hides_broad_and_unknown_tools() {
         .collect::<Vec<_>>();
 
     assert_eq!(classification.intent.as_str(), "implement");
-    assert_eq!(allowed, vec!["Read", "Grep", "Edit", "Write"]);
-    assert!(hidden.contains(&"Bash"));
+    assert_eq!(allowed, vec!["Read", "Grep", "Edit", "Write", "Bash"]);
+    assert!(
+        !hidden.contains(&"Bash"),
+        "Bash is exposed; per-command authorization gates what it may run"
+    );
     assert!(hidden.contains(&"MultiEdit"));
     assert!(hidden.contains(&"Delete"));
     assert!(hidden.contains(&"CreatePR"));
@@ -139,9 +142,12 @@ fn implementation_policy_keeps_tight_claude_code_file_tools() {
     assert_eq!(classification.intent.as_str(), "implement");
     assert_eq!(
         allowed,
-        vec!["Read", "Glob", "Grep", "Edit", "Write", "run_tests"]
+        vec!["Read", "Glob", "Grep", "Edit", "Write", "run_tests", "Bash"]
     );
-    assert!(hidden.contains(&"Bash"));
+    assert!(
+        !hidden.contains(&"Bash"),
+        "Bash is exposed; per-command authorization gates what it may run"
+    );
     assert!(hidden.contains(&"MultiEdit"));
     assert!(hidden.contains(&"Delete"));
     assert!(hidden.contains(&"mcp__plugin_ecc_github__create_or_update_file"));

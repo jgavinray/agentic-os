@@ -13,6 +13,8 @@ pub(crate) fn command_capability(arguments: &Value) -> ToolCapability {
         ToolCapability::TextSearch
     } else if is_shell_file_list(&lower) {
         ToolCapability::FileList
+    } else if is_shell_validation(&lower) {
+        ToolCapability::Validation
     } else {
         // Unknown shell means mutation, not "safe shell". This is intentionally
         // conservative: read-only policy must not authorize arbitrary shell just
@@ -79,6 +81,36 @@ fn is_shell_file_list(command: &str) -> bool {
     starts_with_command(command, "ls")
         || starts_with_command(command, "find")
         || starts_with_command(command, "tree")
+}
+
+fn is_shell_validation(command: &str) -> bool {
+    // Build/test/lint invocations are validation, not mutation. The list is
+    // deliberately explicit: only the leading subcommand decides, so
+    // `cargo install` or `npm publish` still fall through to ShellMutation.
+    const VALIDATION_PREFIXES: &[&str] = &[
+        "cargo test",
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt --check",
+        "go test",
+        "go vet",
+        "go build",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "yarn test",
+        "pytest",
+        "mypy",
+        "ruff check",
+        "tsc",
+        "make test",
+        "make check",
+        "make lint",
+    ];
+    VALIDATION_PREFIXES
+        .iter()
+        .any(|prefix| command == *prefix || command.starts_with(&format!("{prefix} ")))
 }
 
 fn starts_with_command(command: &str, binary: &str) -> bool {

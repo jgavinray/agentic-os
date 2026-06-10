@@ -69,6 +69,41 @@ fn bug_fix_language_maps_to_implement_intent() {
 }
 
 #[test]
+fn research_requests_are_not_search_intent() {
+    // "research" must not substring-match the "search" trigger, which would
+    // route the request into a read-only search policy.
+    let row = classify_request_event(&event(
+        "e-research",
+        "Research the existing handler modules and document how streaming works.",
+        None,
+    ));
+
+    assert_ne!(row.intent, RequestIntent::Search);
+}
+
+#[test]
+fn additive_code_requests_map_to_implement_intent() {
+    let row = classify_request_event(&event(
+        "e-add-helper",
+        "Add a word-boundary helper to rule_utils.rs and update the call sites.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+}
+
+#[test]
+fn refactor_requests_map_to_implement_intent() {
+    let row = classify_request_event(&event(
+        "e-refactor",
+        "Refactor the streaming handler so persistence is a separate module.",
+        None,
+    ));
+
+    assert_eq!(row.intent, RequestIntent::Implement);
+}
+
+#[test]
 fn explanatory_error_request_stays_debug_intent() {
     let row = classify_request_event(&event(
         "e-explain-error",

@@ -6,9 +6,11 @@ use crate::orchestration_policy_types::{
 use crate::request_classification_types::RequestArtifactType;
 
 pub(crate) fn implement_policy() -> BasePolicy {
-    // Implementation requests may inspect the repo and edit/create files. They
-    // deliberately do not expose generic shell, publishing, runtime mutation,
-    // deployment, or broad mutation surfaces.
+    // Implementation requests may inspect the repo, edit/create files, and use
+    // read/validation shell commands (build, test, lint). Shell *mutation*,
+    // publishing, runtime mutation, deployment, and broad mutation surfaces
+    // stay blocked; per-command authorization enforces the split for clients
+    // whose only validation surface is a generic shell tool.
     BasePolicy {
         allowed: vec![
             ToolCapability::RepoRead,
@@ -16,11 +18,11 @@ pub(crate) fn implement_policy() -> BasePolicy {
             ToolCapability::FileEdit,
             ToolCapability::Validation,
             ToolCapability::GitRead,
+            ToolCapability::ShellRead,
         ],
         required: vec![],
         blocked: vec![
             ToolCapability::ShellMutation,
-            ToolCapability::ShellRead,
             ToolCapability::DockerMutation,
             ToolCapability::Deploy,
             ToolCapability::RestartService,
