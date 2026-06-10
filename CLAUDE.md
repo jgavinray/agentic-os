@@ -12,19 +12,23 @@ The orchestrator is the "brain stem." Models are interchangeable compute units.
 
 ## Code Layout
 
-`orchestrator/src/` — All Rust source in a flat module tree:
+`orchestrator/src/` — directory modules (the old flat files were split; do
+not look for `handlers.rs`, `db.rs`, or `state.rs` — they are directories):
 
 | Module | Responsibility |
 |--------|---------------|
-| `main.rs` | Entry point, routes, graceful shutdown |
-| `handlers.rs` | HTTP endpoints — auth, streaming, persistence (largest file) |
-| `anthropic.rs` | Anthropic↔OpenAI protocol translation, SSE streaming |
-| `db.rs` | Postgres schema, queries, context pack builder |
-| `qdrant.rs` | Qdrant vector store/search via TEI embeddings |
-| `hybrid.rs` | RRF merge for semantic + FTS search |
-| `summarizer.rs` | Background session summarizer |
-| `state.rs` | AppState, request types, task categorization |
-| `logging.rs` | Structured JSON logging init |
+| `main.rs` | Entry point, startup, graceful shutdown |
+| `app_router.rs`, `routes/` | Route table and non-proxy endpoints |
+| `handlers/` | Proxy endpoints — `anthropic_messages.rs`, `chat_completions.rs`, streaming, persistence |
+| `anthropic.rs`, `anthropic_user_content.rs` | Protocol translation, user-content extraction |
+| `db/` | Postgres queries, context artifacts, sessions |
+| `request_classification/` | Intent/domain/risk rules, scoring, corpus tests |
+| `orchestration_policy/` | Per-intent policy envelopes, risk overlays, envelope guidance |
+| `tool_mediation/` | Tool menu shaping, per-command authorization, broadening, validation gate |
+| `prompt_intervention/` | Operator-constraint detection and runtime injection |
+| `context_packing/`, `context_compiler/`, `context_artifacts/` | Context pack assembly and stable-prefix artifacts |
+| `qdrant.rs`, `hybrid.rs` | Vector store and RRF hybrid search |
+| `summarizer/`, `state/`, `logging.rs` | Background summarizer, AppState, logging |
 
 ## Running
 
