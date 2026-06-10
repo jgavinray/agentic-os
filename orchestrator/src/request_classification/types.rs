@@ -109,6 +109,18 @@ pub struct RequestClassificationReport {
     pub top_risk_flags: Vec<LabelCount>,
     pub unknown_label_counts: Vec<LabelCount>,
     pub repeated_guardrail_sessions: Vec<SessionRouteCount>,
+    /// Contested intent decisions (small weight margin between winner and
+    /// runner-up). These are the hand-labeling candidates for the golden
+    /// corpus: classifier drift shows up here first.
+    pub low_margin_intents: Vec<LowMarginIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowMarginIntent {
+    pub event_id: String,
+    pub intent: String,
+    pub runner_up: Option<String>,
+    pub margin: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
