@@ -213,6 +213,40 @@ fn rule_matches(text: &str) -> Vec<RuleMatch> {
             None,
         ));
     }
+    if let Some(phrase) = first_phrase(
+        &lower,
+        &[
+            "do not refactor",
+            "don't refactor",
+            "avoid refactoring",
+            "no refactoring",
+            "no cleanups",
+            "no cleanup",
+            "do not clean up",
+            "don't clean up",
+            "do not reorganize",
+            "don't reorganize",
+            "leave everything else",
+            "leave the rest",
+            "touch only",
+            "only touch",
+        ],
+    ) {
+        matches.push(with_behaviors(
+            rule(
+                "refactor_block",
+                phrase,
+                InterventionType::ScopeNarrowing,
+                SignalFamily::Steering,
+                BurdenType::HumanScopeControl,
+                FailureRelation::Prevention,
+                0.9,
+            ),
+            Some("change only what the request asks"),
+            Some("refactoring or cleanup beyond the request"),
+            None,
+        ));
+    }
     if let Some(phrase) = validation_phrase(&lower) {
         matches.push(with_behaviors(
             rule(
