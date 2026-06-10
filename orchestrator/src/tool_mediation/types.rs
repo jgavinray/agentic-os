@@ -32,6 +32,7 @@ pub enum ToolCapability {
     FileRead,
     TextSearch,
     FileList,
+    WebSearch,
     FileEdit,
     Validation,
     Publishing,
@@ -46,6 +47,7 @@ impl ToolCapability {
             Self::FileRead => "file_read",
             Self::TextSearch => "text_search",
             Self::FileList => "file_list",
+            Self::WebSearch => "web_search",
             Self::FileEdit => "file_edit",
             Self::Validation => "validation",
             Self::Publishing => "publishing",
@@ -135,18 +137,25 @@ impl ToolMenuOutcome {
 }
 
 pub fn missing_implementation_tool_capabilities(outcome: &ToolMenuOutcome) -> Vec<&'static str> {
-    const REQUIRED: &[&str] = &["file_read", "text_search", "file_list", "file_edit"];
+    let has_capability = |required: &str| {
+        outcome
+            .allowed_tools
+            .iter()
+            .any(|tool| tool.capability == required)
+    };
 
-    REQUIRED
-        .iter()
-        .copied()
-        .filter(|required| {
-            !outcome
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.capability == *required)
-        })
-        .collect()
+    let mut missing = Vec::new();
+    if !has_capability("file_read") {
+        missing.push("file_read");
+    }
+    if !has_capability("text_search") && !has_capability("file_list") {
+        missing.push("text_search");
+        missing.push("file_list");
+    }
+    if !has_capability("file_edit") {
+        missing.push("file_edit");
+    }
+    missing
 }
 
 pub fn policy_requires_implementation_tool_surface(

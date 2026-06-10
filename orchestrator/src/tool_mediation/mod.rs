@@ -15,6 +15,7 @@ pub mod authorization;
 pub mod authorization_types;
 pub mod canonical;
 pub mod classification;
+pub mod decision_store;
 pub mod payload;
 pub mod policy;
 pub mod shaping;

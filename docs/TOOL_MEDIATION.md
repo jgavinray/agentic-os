@@ -16,6 +16,7 @@ Tools are mapped into bounded capabilities:
 - `file_read`
 - `text_search`
 - `file_list`
+- `web_search`
 - `file_edit`
 - `validation`
 - `publishing`
@@ -74,7 +75,9 @@ hidden tools: Bash
 reason: prefer_canonical_tool
 ```
 
-For implementation intent, policy-aware shaping keeps only the tools needed to
+For read/search intents, policy-aware shaping can preserve repository
+navigation and web lookup tools while keeping mutation tools hidden. For
+implementation intent, policy-aware shaping keeps only the tools needed to
 inspect and edit repository files. A broad client menu such as:
 
 ```text
@@ -209,13 +212,33 @@ This keeps client-specific hook formats outside the core orchestrator while pres
 
 ## Trajectory Recording
 
-Menu shaping metadata is attached to request and model-response metadata for captured trajectories. Authorization decisions are recorded as `tool_authorization_decision` events when the client supplies `session_id`. If trajectory fields are supplied, the event uses:
+Menu shaping metadata is attached to request and model-response metadata for captured trajectories. When `CAPTURE_DATABASE_URL` is configured, every shaped request also writes a bounded `tool_mediation_decisions` row keyed by the raw capture `exchange_id`. That row records request intent, route, edit/validation/runtime posture, offered tools, allowed tools, hidden tools, bounded capabilities, and missing implementation-surface capabilities.
+
+Authorization decisions are recorded as `tool_authorization_decision` events when the client supplies `session_id`. If trajectory fields are supplied, the event uses:
 
 - `trajectory_id`
 - `attempt_index`
 - `event_role=tool_call`
 
 This keeps decisions queryable without introducing a new storage backend or changing the trajectory event-role enum.
+
+## Implementation Surface Limits
+
+For implementation intent, tool mediation preserves tight concrete tools when
+the client offers them: file read, search/list/code-navigation (`Grep`, `Glob`,
+`rg`, `List`, `LS`, `LSP`), file edit/write, and explicit validation tools such
+as `run_tests`.
+Broad shell, delete, deploy/restart, remote host access, and git-write style
+tools remain hidden unless a later policy explicitly authorizes them.
+
+The orchestrator does not synthesize new client tools that were not offered in
+the incoming request. For example, when Claude Code offers `Read`, `Edit`,
+`Write`, `LSP`, and broad operational tools, the orchestrator preserves
+`Read`/`Edit`/`Write`/`LSP`, hides broad `Bash` and operational tools, and
+records any still-missing implementation-surface capabilities in
+`tool_mediation_decisions`. It cannot make Claude execute a `Grep`/`Glob` tool
+that the client did not advertise. That limitation is deliberately observable
+rather than papered over with broad Bash exposure.
 
 ## Metrics
 
