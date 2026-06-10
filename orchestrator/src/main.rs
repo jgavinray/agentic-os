@@ -2,6 +2,7 @@ use orchestrator::{
     app_router, client_capture, db, handlers, logging, migrations, prompt_intervention_records,
     qdrant, rate_limit, request_classification, sampling, startup_backfill, startup_config,
     startup_runtime, state, summarizer, telemetry, tool_mediation_decision_store,
+    tool_mediation_edit_targets,
 };
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ async fn main() -> Result<(), anyhow::Error> {
         client_capture::init(&pool).await?;
         prompt_intervention_records::init(&pool).await?;
         tool_mediation_decision_store::init(&pool).await?;
+        tool_mediation_edit_targets::init(&pool).await?;
         Some(pool)
     } else {
         None

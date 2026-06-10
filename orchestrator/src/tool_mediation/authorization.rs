@@ -177,6 +177,57 @@ fn edit_scope_denial(
     })
 }
 
+/// Stateful single-file enforcement: once a trajectory has edited one file,
+/// deny edits to any other file for the rest of the trajectory. The prior
+/// target comes from the capture-side `trajectory_edit_targets` table; this
+/// function stays pure so the rule is testable without storage.
+pub fn single_file_target_denial(
+    req: &ToolAuthorizeRequest,
+    policy: &crate::orchestration_policy::OrchestrationPolicy,
+    prior_target: Option<&str>,
+) -> Option<ToolAuthorizeResponse> {
+    use crate::orchestration_policy::EditPolicy;
+
+    if policy.edit_policy != EditPolicy::SingleFileEdit {
+        return None;
+    }
+    if capability_for_tool_name(&req.tool_name) != ToolCapability::FileEdit {
+        return None;
+    }
+    let prior = prior_target?;
+    let target = edit_target_path(&req.arguments)?;
+    if normalize_path(&target) == normalize_path(prior) {
+        return None;
+    }
+
+    Some(ToolAuthorizeResponse {
+        policy_version: TOOL_MEDIATION_POLICY_VERSION,
+        decision: "deny",
+        reason: "edit_scope_violation",
+        capability: ToolCapability::FileEdit.as_str(),
+        attempted_tool: req.tool_name.clone(),
+        preferred_tool: None,
+        replacement: None,
+        message: format!(
+            "Edit denied: this trajectory already edited {prior} and the edit policy \
+             (single_file_edit) allows exactly one file. {target} is a second file."
+        ),
+    })
+}
+
+/// Extract the edit target from tool arguments, if the tool call is a file
+/// edit with a recognizable path field.
+pub fn edit_target_for_request(req: &ToolAuthorizeRequest) -> Option<String> {
+    if capability_for_tool_name(&req.tool_name) != ToolCapability::FileEdit {
+        return None;
+    }
+    edit_target_path(&req.arguments)
+}
+
+fn normalize_path(path: &str) -> String {
+    path.trim().trim_start_matches("./").to_string()
+}
+
 fn edit_target_path(arguments: &serde_json::Value) -> Option<String> {
     for key in ["file_path", "path", "filename", "notebook_path"] {
         if let Some(path) = arguments.get(key).and_then(serde_json::Value::as_str) {
