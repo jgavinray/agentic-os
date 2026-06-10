@@ -84,6 +84,9 @@ async fn main() -> Result<(), anyhow::Error> {
         prefix_cache_canary_enabled: config.prefix_cache_canary_enabled,
         prefix_cache_canary_namespace_allowlist: config.prefix_cache_canary_namespace_allowlist,
         tool_mediation_enabled: config.tool_mediation_enabled,
+        classification_routing_enabled: config.classification_routing_enabled,
+        route_model_small: config.route_model_small,
+        route_model_strong: config.route_model_strong,
         prometheus,
         metrics,
     });

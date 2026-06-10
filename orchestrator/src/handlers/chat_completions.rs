@@ -126,6 +126,30 @@ pub async fn chat_completions(
         &user_content,
         state.capture_pool.is_some(),
     );
+    let classification_routing_metadata = if state.classification_routing_enabled {
+        crate::request_classification::classification_model_override(
+            request_classification.recommended_route,
+            state.route_model_small.as_deref(),
+            state.route_model_strong.as_deref(),
+        )
+        .map(|routed_model| {
+            tracing::info!(
+                endpoint = "chat/completions",
+                route = request_classification.recommended_route.as_str(),
+                model = %routed_model,
+                "classification routing override"
+            );
+            req["model"] = serde_json::Value::String(routed_model.clone());
+            serde_json::json!({
+                "classification_routing": {
+                    "recommended_route": request_classification.recommended_route.as_str(),
+                    "model": routed_model,
+                }
+            })
+        })
+    } else {
+        None
+    };
     let trajectory_evidence = crate::tool_mediation::trajectory_tool_evidence(&req);
     if crate::tool_mediation::broaden_policy_for_observed_edits(
         &trajectory_evidence,
@@ -181,6 +205,12 @@ pub async fn chat_completions(
         crate::system_context::inject_system_context(&mut req, nudge);
     }
     let validation_gate_metadata = validation_gate.metadata;
+    let execution_plan =
+        crate::request_classification::execution_plan(&user_content, &request_classification);
+    let execution_plan_metadata = execution_plan.as_ref().map(|plan| plan.metadata.clone());
+    if let Some(plan) = execution_plan {
+        crate::system_context::inject_system_context(&mut req, &plan.guidance);
+    }
     let runtime_prompt_intervention =
         crate::prompt_intervention_runtime::build_runtime_prompt_intervention_from_request(&req);
     if let Some(guidance) = runtime_prompt_intervention.guidance.as_deref() {
@@ -195,6 +225,8 @@ pub async fn chat_completions(
         tool_mediation_metadata,
         envelope_metadata,
         validation_gate_metadata,
+        execution_plan_metadata,
+        classification_routing_metadata,
         prompt_intervention_metadata,
         baseline_metadata,
     ]);
