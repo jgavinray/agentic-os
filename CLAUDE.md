@@ -59,6 +59,22 @@ search become part of the effective tool surface. The `--` separator is
 required because `--mcp-config` accepts multiple values and will otherwise
 consume the prompt.
 
+## Tool Mediation Validation Requirement
+
+When validating intent-to-tool mediation, do not prove correctness by forcing
+`tool_choice` to a specific tool. The requirement is that the orchestrator
+classifies the request intent and then exposes the correct narrowed tool menu
+to the LLM for that intent through the normal `/v1/messages` or
+`/v1/chat/completions` path. Runtime evidence must come from live orchestrator
+requests with a broad client-provided tool menu and no forced tool choice, then
+querying the captured `tool_mediation_decisions` row to verify intent,
+allowed tools, hidden tools, and missing implementation capabilities.
+
+If validating that the LLM can use a tool, use natural prompts that make that
+tool appropriate for the request intent, without overriding mediation with
+forced `tool_choice`. Forced tool probes only prove provider/tool-call
+plumbing and are not evidence that intent mediation is correct.
+
 ## Key Patterns
 
 - **Auth**: Constant-time Bearer token comparison via `subtle` crate. `API_KEYS=token,ns;token2,ns2` format.

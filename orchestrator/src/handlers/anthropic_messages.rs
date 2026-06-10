@@ -132,29 +132,22 @@ pub async fn messages(
             Some(&request_policy),
         );
         telemetry::record_tool_menu_outcome(&state.metrics, &outcome);
+        crate::tool_mediation_decision_store::insert_best_effort(
+            state.capture_pool.as_ref(),
+            "messages",
+            capture.exchange_id,
+            &request_classification,
+            &request_policy,
+            &outcome,
+        );
         if crate::tool_mediation::policy_requires_implementation_tool_surface(&request_policy) {
             let missing = crate::tool_mediation::missing_implementation_tool_capabilities(&outcome);
             if !missing.is_empty() {
-                let message = format!(
-                    "implementation tool surface is incomplete; missing capabilities: {}",
-                    missing.join(", ")
+                tracing::warn!(
+                    endpoint = "messages",
+                    missing_tool_capabilities = ?missing,
+                    "implementation tool surface is incomplete after shaping"
                 );
-                let mut body = anthropic::error_value("invalid_request_error", message);
-                if let Some(error) = body.get_mut("error").and_then(Value::as_object_mut) {
-                    error.insert(
-                        "missing_tool_capabilities".to_string(),
-                        serde_json::json!(missing),
-                    );
-                }
-                crate::client_capture::record_response_best_effort(
-                    state.capture_pool.as_ref(),
-                    capture,
-                    StatusCode::BAD_REQUEST,
-                    "application/json",
-                    crate::client_capture::to_json_bytes(&body),
-                )
-                .await;
-                return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
             }
         }
         Some(outcome.metadata())

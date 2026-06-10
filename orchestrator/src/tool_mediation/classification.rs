@@ -73,12 +73,26 @@ pub(crate) fn capability_for_tool_name(name: &str) -> ToolCapability {
         ToolCapability::FileRead
     } else if matches!(
         normalized.as_str(),
-        "grep" | "rg" | "ripgrep" | "search" | "text_search" | "find_text"
+        "grep"
+            | "rg"
+            | "ripgrep"
+            | "search"
+            | "text_search"
+            | "find_text"
+            | "lsp"
+            | "language_server"
+            | "workspace_symbol"
+            | "find_references"
     ) || normalized.ends_with("__search")
         || normalized.ends_with("__search_code")
         || normalized.ends_with("__search_repositories")
     {
         ToolCapability::TextSearch
+    } else if matches!(
+        normalized.as_str(),
+        "websearch" | "web_search" | "webfetch" | "web_fetch" | "fetch_url" | "search_web"
+    ) {
+        ToolCapability::WebSearch
     } else if matches!(
         normalized.as_str(),
         "glob" | "ls" | "list" | "list_files" | "file_list" | "find_files"
@@ -159,6 +173,7 @@ pub fn bounded_capability(value: &str) -> &'static str {
         "file_read" => "file_read",
         "text_search" => "text_search",
         "file_list" => "file_list",
+        "web_search" => "web_search",
         "file_edit" => "file_edit",
         "validation" => "validation",
         "publishing" => "publishing",

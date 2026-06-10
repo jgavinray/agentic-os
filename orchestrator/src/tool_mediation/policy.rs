@@ -7,6 +7,7 @@ use crate::tool_mediation_types::ToolCapability;
 /// - FileRead -> FileRead (allowed by FileRead or RepoRead; blocked by FileRead)
 /// - TextSearch -> RepoRead (allowed by RepoRead; blocked by RepoRead)
 /// - FileList -> RepoRead (allowed by RepoRead; blocked by RepoRead)
+/// - WebSearch -> WebSearch (allowed/blocked by WebSearch)
 /// - FileEdit -> FileEdit (allowed/blocked by FileEdit)
 /// - Validation -> Validation (allowed by named validation tools, not shell)
 /// - Publishing -> GitWrite (allowed/blocked by GitWrite)
@@ -20,6 +21,7 @@ fn map_capability_to_policy(
         ToolCapability::FileRead => crate::orchestration_policy::ToolCapability::FileRead,
         ToolCapability::TextSearch => crate::orchestration_policy::ToolCapability::RepoRead,
         ToolCapability::FileList => crate::orchestration_policy::ToolCapability::RepoRead,
+        ToolCapability::WebSearch => crate::orchestration_policy::ToolCapability::WebSearch,
         ToolCapability::FileEdit => crate::orchestration_policy::ToolCapability::FileEdit,
         ToolCapability::Validation => crate::orchestration_policy::ToolCapability::Validation,
         ToolCapability::Publishing => crate::orchestration_policy::ToolCapability::GitWrite,
@@ -33,6 +35,7 @@ fn map_capability_to_policy(
 ///
 /// - FileRead: allowed if allowed_tools contains FileRead OR RepoRead.
 /// - TextSearch/FileList: allowed if allowed_tools contains RepoRead.
+/// - WebSearch: allowed if allowed_tools contains WebSearch.
 /// - FileEdit: allowed if allowed_tools contains FileEdit.
 /// - Validation: allowed if allowed_tools contains Validation.
 /// - Shell: allowed if allowed_tools contains ShellRead.
@@ -64,6 +67,7 @@ pub(crate) fn policy_allows_tool_capability(
 ///
 /// - FileRead: blocked if blocked_tools contains FileRead.
 /// - TextSearch/FileList: blocked if blocked_tools contains RepoRead.
+/// - WebSearch: blocked if blocked_tools contains WebSearch.
 /// - FileEdit: blocked if blocked_tools contains FileEdit.
 /// - Validation: blocked if blocked_tools contains Validation.
 /// - Shell: blocked if blocked_tools contains ShellRead.

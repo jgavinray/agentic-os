@@ -279,6 +279,7 @@ pub use tool_mediation::authorization as tool_mediation_authorization;
 pub use tool_mediation::authorization_types as tool_mediation_authorization_types;
 pub use tool_mediation::canonical as tool_mediation_canonical;
 pub use tool_mediation::classification as tool_mediation_classification;
+pub use tool_mediation::decision_store as tool_mediation_decision_store;
 pub use tool_mediation::payload as tool_mediation_payload;
 pub use tool_mediation::policy as tool_mediation_policy;
 pub use tool_mediation::shaping as tool_mediation_shaping;
