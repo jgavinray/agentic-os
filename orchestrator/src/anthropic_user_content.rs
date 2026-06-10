@@ -39,7 +39,7 @@ fn extract_real_text_from_content(content: &Value) -> String {
     }
 }
 
-fn strip_system_reminders(text: &str) -> String {
+pub(crate) fn strip_system_reminders(text: &str) -> String {
     let mut remaining = text;
     let mut out = String::new();
 

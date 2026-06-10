@@ -208,6 +208,33 @@ fn detects_scope_narrowing_without_matching_paths_alone() {
 }
 
 #[test]
+fn detects_refactor_blocks_as_scope_narrowing() {
+    let finding = one(
+        "Fix the parser in src/parse.rs, but do not refactor anything else",
+        InterventionType::ScopeNarrowing,
+    );
+    assert_eq!(finding.signal_type, "refactor_block");
+    assert_eq!(
+        finding.blocked_behavior.as_deref(),
+        Some("refactoring or cleanup beyond the request")
+    );
+
+    let finding = one(
+        "Add the endpoint; no cleanups in files you pass through",
+        InterventionType::ScopeNarrowing,
+    );
+    assert_eq!(finding.signal_type, "refactor_block");
+
+    let finding = one(
+        "Implement the helper and leave everything else alone",
+        InterventionType::ScopeNarrowing,
+    );
+    assert_eq!(finding.signal_type, "refactor_block");
+
+    assert!(types("Refactor the streaming handler into modules").is_empty());
+}
+
+#[test]
 fn detects_validation_requirements_but_not_generated_checklists() {
     assert_eq!(
         types("Run tests before committing"),
