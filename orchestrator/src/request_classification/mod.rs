@@ -12,6 +12,7 @@ pub mod backfill_queries;
 pub mod bindings;
 pub mod composition;
 pub mod config;
+pub mod execution_plan;
 pub mod feature_json;
 pub mod feature_keys;
 pub mod feature_vocab;
@@ -39,6 +40,7 @@ pub use config::{
     live_policy_config_from_env, request_classification_startup_backfill_enabled,
     request_classification_startup_batch_size,
 };
+pub use execution_plan::{execution_plan, ExecutionPlan, EXECUTION_PLAN_VERSION};
 use feature_json::features_to_json;
 use features::extract_features;
 use input::{event_text, has_request_text, metadata_key_text};
@@ -47,6 +49,7 @@ pub use labels::{
     bounded_live_policy_bypass, bounded_live_policy_reason, bounded_risk, bounded_route,
 };
 pub use report::request_classification_report;
+pub use routing::classification_model_override;
 use routing::{recommend_route, response_contract};
 use rules::{
     classify_artifact, classify_complexity, classify_domain, classify_intent_scored, classify_risk,
@@ -59,10 +62,11 @@ pub use store::{
 };
 pub use types::{
     enum_inventory, BackfillOptions, BackfillReport, LabelCount, LivePolicyConfig,
-    LivePolicyDecision, PersistOutcome, RecommendedRoute, ReportOptions, RequestArtifactType,
-    RequestClassification, RequestClassificationReport, RequestComplexity, RequestDomain,
-    RequestIntent, RequestRisk, ResponseContract, SessionRouteCount, CLASSIFICATION_SCHEMA_VERSION,
-    CLASSIFIER_SOURCE_DETERMINISTIC_RULES, FEATURE_KEYS, ROUTING_POLICY_VERSION,
+    LivePolicyDecision, LowMarginIntent, PersistOutcome, RecommendedRoute, ReportOptions,
+    RequestArtifactType, RequestClassification, RequestClassificationReport, RequestComplexity,
+    RequestDomain, RequestIntent, RequestRisk, ResponseContract, SessionRouteCount,
+    CLASSIFICATION_SCHEMA_VERSION, CLASSIFIER_SOURCE_DETERMINISTIC_RULES, FEATURE_KEYS,
+    ROUTING_POLICY_VERSION,
 };
 
 /// Classify a loaded event into deterministic request-level features and labels.
