@@ -116,12 +116,18 @@ pub async fn messages(
     let mut req =
         prepare_anthropic_litellm_request(payload, &route.routed_model, reasoning_selection);
     let session_id = find_or_create_capture_session(&state, &repo, &task).await;
-    let (request_classification, request_policy) = classify_and_derive_request_policy(
+    let (request_classification, mut request_policy) = classify_and_derive_request_policy(
         &repo,
         session_id.as_deref().unwrap_or("unknown"),
         &user_content,
         state.capture_pool.is_some(),
     );
+    if crate::tool_mediation::broaden_policy_for_observed_edits(&req, &mut request_policy) {
+        tracing::info!(
+            endpoint = "messages",
+            "policy broadened: trajectory history shows edit tool use"
+        );
+    }
     let tool_mediation_metadata = if state.tool_mediation_enabled {
         // Same policy-aware shaping as the OpenAI endpoint, but applied to the
         // Anthropic `tools` shape. The payload stays Anthropic-formatted all the
@@ -165,7 +171,7 @@ pub async fn messages(
         }
     }));
     let runtime_prompt_intervention =
-        crate::prompt_intervention_runtime::build_runtime_prompt_intervention(&user_content);
+        crate::prompt_intervention_runtime::build_runtime_prompt_intervention_from_request(&req);
     if let Some(guidance) = runtime_prompt_intervention.guidance.as_deref() {
         crate::system_context::inject_system_context_anthropic(&mut req, guidance);
     }
