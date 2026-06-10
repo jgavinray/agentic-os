@@ -16,7 +16,7 @@ Set `SUMMARIZER_ENABLED=false` to pause memory compaction. Set `SUMMARIZER_BASE_
 
 ## Context Cache
 
-The cache is in process only. Full context packs are derived state and are not rebuilt on the user-facing request path. Model requests use the newest cached pack for the repo/task/session scope when one exists, fall back to a minimal context when none exists, and enqueue a coalesced background refresh for the next turn. The explicit `/context-pack` endpoint still builds synchronously because its contract is to return the generated pack.
+The cache is in process only. Full context packs are derived state and are not rebuilt on the user-facing request path. Model requests use the newest cached pack for the repo/task/session scope when one exists, fall back to a minimal context when none exists, and enqueue a coalesced background refresh for the next turn. The explicit `/context/pack` endpoint still builds synchronously because its contract is to return the generated pack.
 
 Stored cache entries are keyed by `repo:task:event_count`, with limit overrides
 and policy shape folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls

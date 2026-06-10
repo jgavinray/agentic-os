@@ -86,7 +86,7 @@ Suggested starting allocations:
 
 **Phase 4.2: Retrieval by level**
 - `db.rs`: Add query helpers for L0, L1, L2, L3, failures, and remediations
-- `handlers.rs`: Replace single-level context retrieval with `ContextPolicy`
+- `context_packing/` and `handlers/context.rs`: Replace single-level context retrieval with `ContextPolicy`
 - `db.rs`: Build context sections in a stable order:
   1. Durable Project Memory
   2. Repo Patterns and Decisions
@@ -116,7 +116,7 @@ Suggested starting allocations:
 |----------------|------------|
 | `state.rs` | Medium |
 | `db.rs` | Medium-High |
-| `handlers.rs` | Medium |
+| `handlers/context.rs` | Medium |
 | tests | Medium |
 
 ---
@@ -192,7 +192,7 @@ source_event_ids
 | `db.rs` | Medium |
 | `state.rs` | Medium |
 | `summarizer.rs` | Medium-High |
-| `handlers.rs` | Medium |
+| `handlers/context.rs` | Medium |
 | tests | Medium |
 
 ---
@@ -265,7 +265,7 @@ The harness should assert:
 | Files Modified | Complexity |
 |----------------|------------|
 | `state.rs` | Medium |
-| `handlers.rs` | Medium |
+| `handlers/context.rs` | Medium |
 | `db.rs` | Medium |
 | `summarizer.rs` | Medium |
 | test fixtures | Medium-High |

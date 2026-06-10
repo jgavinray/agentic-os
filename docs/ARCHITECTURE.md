@@ -12,8 +12,8 @@ All endpoints except `/health`, `/health/live`, and `/health/ready` require `Aut
 | `/health/live` | GET | Liveness check alias used by container health checks. |
 | `/health/ready` | GET | Checks Postgres, Qdrant, and LiteLLM reachability. |
 | `/v1/models` | GET | Proxies LiteLLM `/models`; falls back to the configured default model when LiteLLM cannot return JSON. |
-| `/v1/chat/completions` | POST | OpenAI-compatible chat endpoint. It derives namespace/task, injects memory context, forwards to LiteLLM, streams when requested, and persists user/assistant exchanges. |
-| `/v1/messages` | POST | Anthropic-compatible messages passthrough. It keeps Anthropic format, injects memory into `system`, forwards to LiteLLM `/messages`, and persists exchanges. |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat endpoint. It derives namespace/task, classifies the request, derives policy, shapes tools, injects policy/context guidance, forwards to LiteLLM, streams when requested, and persists exchanges. |
+| `/v1/messages` | POST | Anthropic-compatible messages passthrough. It keeps Anthropic format, classifies the request, derives policy, shapes tools, injects guidance into `system`, forwards to LiteLLM `/messages`, and persists exchanges. |
 | `/v1/validations` | POST | Captures structured validation, patch, remediation, and failure feedback as execution events. |
 | `/tools/authorize` | POST | Authorizes a pending client tool call before execution. Denials return a bounded reason and canonical preferred tool guidance. |
 | `/sessions/start` | POST | Creates an explicit agent session for a repo/task/actor. |
@@ -71,6 +71,14 @@ trajectory events for local inspection, while normalized policy rows are
 appended to `agent_orchestration_policies` for analytics and future classifier
 improvement. See [ORCHESTRATION_POLICY.md](ORCHESTRATION_POLICY.md).
 
+For model requests, the live pre-dispatch path is authentication, namespace
+selection, live-policy guardrails, request classification, orchestration policy
+derivation, optional classification-driven model override, policy-aware
+tool-menu shaping, operating-envelope injection, validation-gate evaluation,
+execution-plan guidance, runtime prompt intervention, context packing, and then
+LiteLLM forwarding. These stages are deterministic except for the eventual
+model call.
+
 ## Tool Mediation
 
 Tool mediation is deterministic infrastructure between request classification and eventual full orchestration. In the current proxy mode, the client still owns tool execution and supplies the tool menu. When `TOOL_MEDIATION_ENABLED=true`, agentic-os maps those tool names into bounded capabilities, detects simple tool intent, applies the active orchestration policy, and shapes the OpenAI or Anthropic `tools` array before forwarding the request. For example, if a request is a file-read intent and the client supplied both `Read` and `Bash`, the orchestrator hides `Bash` for that model call so the model sees the canonical read capability. For implementation intent, a broad coding-client menu is narrowed to read/search/edit/write style tools.
@@ -111,7 +119,7 @@ In Compose, that endpoint is a dedicated llama.cpp sidecar (`http://summarizer:8
 
 ## Context Cache
 
-Context packs are cached in process. Model requests use stale-while-revalidate semantics: the orchestrator injects the newest cached pack for the repo/task/session scope, or a minimal fallback when no cache exists, then refreshes the full pack in a coalesced background task. This keeps context computation, semantic retrieval, and constraint lookup off the first-token path. The explicit `/context-pack` endpoint still builds synchronously because callers use it to fetch the pack itself.
+Context packs are cached in process. Model requests use stale-while-revalidate semantics: the orchestrator injects the newest cached pack for the repo/task/session scope, or a minimal fallback when no cache exists, then refreshes the full pack in a coalesced background task. This keeps context computation, semantic retrieval, and constraint lookup off the first-token path. The explicit `/context/pack` endpoint still builds synchronously because callers use it to fetch the pack itself.
 
 Stored cache keys use `repo:task:event_count`, with optional limit and policy
 shape folded into the task portion. `CONTEXT_CACHE_TTL_MS` controls expiration
