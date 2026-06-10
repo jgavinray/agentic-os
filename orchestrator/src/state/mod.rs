@@ -103,6 +103,12 @@ pub struct AppState {
     pub prefix_cache_canary_namespace_allowlist: HashSet<String>,
     /// Enables deterministic tool menu shaping and tool-call authorization.
     pub tool_mediation_enabled: bool,
+    /// Enables classification-driven model routing (recommended_route → model).
+    pub classification_routing_enabled: bool,
+    /// Model used for RecommendedRoute::SmallLocalModel when routing is on.
+    pub route_model_small: Option<String>,
+    /// Model used for RecommendedRoute::StrongLocalModel when routing is on.
+    pub route_model_strong: Option<String>,
     /// Prometheus scrape handle.
     pub prometheus: metrics_exporter_prometheus::PrometheusHandle,
     /// JSON compatibility snapshot for legacy metrics callers.

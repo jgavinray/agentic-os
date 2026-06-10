@@ -51,6 +51,69 @@ pub(crate) fn recommend_route(
     }
 }
 
+/// Map a recommended route to a configured model override.
+///
+/// Only the small/strong local-model routes participate: guardrail,
+/// clarification, web, and tool routes describe *how* to answer, not which
+/// model tier to use, and Unknown must never override the client's choice.
+pub fn classification_model_override(
+    route: RecommendedRoute,
+    route_model_small: Option<&str>,
+    route_model_strong: Option<&str>,
+) -> Option<String> {
+    match route {
+        RecommendedRoute::SmallLocalModel => route_model_small.map(str::to_string),
+        RecommendedRoute::StrongLocalModel => route_model_strong.map(str::to_string),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn small_and_strong_routes_map_to_configured_models() {
+        assert_eq!(
+            classification_model_override(
+                RecommendedRoute::SmallLocalModel,
+                Some("small-7b"),
+                Some("strong-32b"),
+            )
+            .as_deref(),
+            Some("small-7b")
+        );
+        assert_eq!(
+            classification_model_override(
+                RecommendedRoute::StrongLocalModel,
+                Some("small-7b"),
+                Some("strong-32b"),
+            )
+            .as_deref(),
+            Some("strong-32b")
+        );
+    }
+
+    #[test]
+    fn other_routes_and_missing_config_do_not_override() {
+        assert!(classification_model_override(
+            RecommendedRoute::RefuseOrGuardrail,
+            Some("small-7b"),
+            Some("strong-32b"),
+        )
+        .is_none());
+        assert!(classification_model_override(
+            RecommendedRoute::Unknown,
+            Some("small-7b"),
+            Some("strong-32b"),
+        )
+        .is_none());
+        assert!(
+            classification_model_override(RecommendedRoute::SmallLocalModel, None, None).is_none()
+        );
+    }
+}
+
 pub(crate) fn response_contract(
     intent: RequestIntent,
     artifact_type: RequestArtifactType,
