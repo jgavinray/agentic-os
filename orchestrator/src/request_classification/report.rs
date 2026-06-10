@@ -2,8 +2,11 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 
 use crate::request_classification_types::{
-    LabelCount, ReportOptions, RequestClassificationReport, SessionRouteCount,
+    LabelCount, LowMarginIntent, ReportOptions, RequestClassificationReport, SessionRouteCount,
 };
+
+/// Intent decisions with a margin at or below this are "contested".
+const LOW_MARGIN_THRESHOLD: i64 = 10;
 
 pub async fn request_classification_report(
     pool: &Pool,
@@ -23,13 +26,52 @@ pub async fn request_classification_report(
     let repeated_guardrail_sessions =
         count_repeated_guardrail_sessions(&conn, opts.repo.as_deref(), opts.since).await?;
     let top_risk_flags = count_risk_flags(&conn, opts.repo.as_deref(), opts.since, 20).await?;
+    let low_margin_intents =
+        list_low_margin_intents(&conn, opts.repo.as_deref(), opts.since, 20).await?;
 
     Ok(RequestClassificationReport {
         by_route,
         top_risk_flags,
         unknown_label_counts,
         repeated_guardrail_sessions,
+        low_margin_intents,
     })
+}
+
+/// Most recent contested intent decisions: the winning weight barely beat the
+/// runner-up. These rows are the highest-value candidates to hand-label into
+/// the golden corpus (tests/corpus.rs) before changing classifier rules.
+async fn list_low_margin_intents(
+    conn: &deadpool_postgres::Object,
+    repo: Option<&str>,
+    since: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<LowMarginIntent>, anyhow::Error> {
+    let rows = conn
+        .query(
+            "SELECT event_id::TEXT AS event_id,
+                    intent,
+                    features->>'intent_runner_up' AS runner_up,
+                    (features->>'intent_margin')::BIGINT AS margin
+             FROM agent_request_classifications
+             WHERE features ? 'intent_margin'
+               AND (features->>'intent_margin')::BIGINT <= $3
+               AND ($1::TEXT IS NULL OR repo = $1)
+               AND ($2::TIMESTAMPTZ IS NULL OR event_created_at >= $2)
+             ORDER BY event_created_at DESC
+             LIMIT $4",
+            &[&repo, &since, &LOW_MARGIN_THRESHOLD, &limit],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| LowMarginIntent {
+            event_id: row.get("event_id"),
+            intent: row.get("intent"),
+            runner_up: row.get("runner_up"),
+            margin: row.get("margin"),
+        })
+        .collect())
 }
 
 async fn count_grouped(

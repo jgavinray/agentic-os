@@ -21,6 +21,16 @@ pub(super) fn print_request_classification_report(
     for row in &report.repeated_guardrail_sessions {
         println!("  {} {}", row.session_id, row.count);
     }
+    println!("low_margin_intents (corpus labeling candidates):");
+    for row in &report.low_margin_intents {
+        println!(
+            "  {} intent={} runner_up={} margin={}",
+            row.event_id,
+            row.intent,
+            row.runner_up.as_deref().unwrap_or("-"),
+            row.margin
+        );
+    }
 }
 
 pub(super) fn print_prompt_intervention_report(
