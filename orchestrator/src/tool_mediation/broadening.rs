@@ -26,6 +26,10 @@ pub struct TrajectoryToolEvidence {
     /// A validation tool call (named validation tool, or a shell command that
     /// classifies as validation such as `cargo test`) appears in the history.
     pub validation_observed: bool,
+    /// Assistant turns that called tools without making any edit. While
+    /// `edits_observed` is false this is the discovery-spiral counter: a small
+    /// model that keeps reading instead of starting the work.
+    pub exploration_turns: usize,
 }
 
 /// Capabilities guaranteed once the trajectory has observed edit tool calls.
@@ -48,17 +52,25 @@ pub fn trajectory_tool_evidence(req: &Value) -> TrajectoryToolEvidence {
         .iter()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
     {
-        for (name, arguments) in assistant_tool_calls(message) {
+        let calls = assistant_tool_calls(message);
+        let mut message_edited = false;
+        for (name, arguments) in &calls {
             match capability_for_tool_name(name) {
-                ToolCapability::FileEdit => evidence.edits_observed = true,
+                ToolCapability::FileEdit => {
+                    evidence.edits_observed = true;
+                    message_edited = true;
+                }
                 ToolCapability::Validation => evidence.validation_observed = true,
                 ToolCapability::Shell
-                    if command_capability(&arguments) == ToolCapability::Validation =>
+                    if command_capability(arguments) == ToolCapability::Validation =>
                 {
                     evidence.validation_observed = true;
                 }
                 _ => {}
             }
+        }
+        if !calls.is_empty() && !message_edited {
+            evidence.exploration_turns += 1;
         }
     }
     evidence

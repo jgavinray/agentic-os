@@ -205,6 +205,12 @@ pub async fn chat_completions(
         crate::system_context::inject_system_context(&mut req, nudge);
     }
     let validation_gate_metadata = validation_gate.metadata;
+    let discovery_gate =
+        crate::tool_mediation::evaluate_discovery_gate(&trajectory_evidence, &request_policy);
+    if let Some(nudge) = discovery_gate.nudge.as_deref() {
+        crate::system_context::inject_system_context(&mut req, nudge);
+    }
+    let discovery_gate_metadata = discovery_gate.metadata;
     let execution_plan =
         crate::request_classification::execution_plan(&user_content, &request_classification);
     let execution_plan_metadata = execution_plan.as_ref().map(|plan| plan.metadata.clone());
@@ -225,6 +231,7 @@ pub async fn chat_completions(
         tool_mediation_metadata,
         envelope_metadata,
         validation_gate_metadata,
+        discovery_gate_metadata,
         execution_plan_metadata,
         classification_routing_metadata,
         prompt_intervention_metadata,

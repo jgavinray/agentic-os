@@ -47,7 +47,9 @@ pub use types::{
     ToolAuthorizeRequest, ToolAuthorizeResponse, ToolCapability, ToolIntent, ToolMenuOutcome,
     ToolPayloadFormat, ToolSummary, TOOL_MEDIATION_POLICY_VERSION,
 };
-pub use validation_gate::{evaluate_validation_gate, ValidationGateOutcome};
+pub use validation_gate::{
+    evaluate_discovery_gate, evaluate_validation_gate, ValidationGateOutcome,
+};
 
 #[cfg(test)]
 mod tests {
