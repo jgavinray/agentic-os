@@ -45,6 +45,7 @@ orchestrator. Do not use `sk-local-orchestrator` for implementation runs; that
 namespace is polluted by prior failed trajectories.
 
 ```bash
+CLAUDE_CONFIG_DIR=/archive/agentic-os/worker-profile \
 ANTHROPIC_BASE_URL=http://localhost:8088 \
 ANTHROPIC_AUTH_TOKEN=sk-agent-clean-002 \
 ANTHROPIC_API_KEY=sk-agent-clean-002 \
@@ -52,6 +53,14 @@ claude -p --model opus --dangerously-skip-permissions \
   --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
   -- 'your prompt here'
 ```
+
+`CLAUDE_CONFIG_DIR` is required for worker runs. The default `~/.claude`
+profile carries ECC/superpowers plugins whose hook payloads (tens of KB of
+"you have superpowers" instructions plus task-tool reminders that reference
+tools the orchestrator hides) flow into the worker model's context every
+request and demonstrably push small models into discovery loops. The
+committed `worker-profile/` directory is a minimal profile with no plugins
+and no hooks.
 
 Model selection should be done with `--model opus`. Do not add
 `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, or

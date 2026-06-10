@@ -1,0 +1,5 @@
+# Claude Code writes runtime state (credentials, projects, history) into the
+# config dir. Only the committed minimal settings define the worker profile.
+*
+!settings.json
+!.gitignore
