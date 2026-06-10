@@ -30,6 +30,9 @@ pub struct StartupConfig {
     pub failure_history_token_budget: usize,
     pub feature_extraction_enabled: bool,
     pub tool_mediation_enabled: bool,
+    pub classification_routing_enabled: bool,
+    pub route_model_small: Option<String>,
+    pub route_model_strong: Option<String>,
     pub prefix_cache_canary_enabled: bool,
     pub prefix_cache_canary_namespace_allowlist: HashSet<String>,
     pub summarizer_enabled: bool,
@@ -102,6 +105,12 @@ pub fn load_startup_config() -> Result<StartupConfig, anyhow::Error> {
         ),
         feature_extraction_enabled: feature_extraction::feature_extraction_enabled_from_env(),
         tool_mediation_enabled: startup_env::bool_env("TOOL_MEDIATION_ENABLED", true),
+        classification_routing_enabled: startup_env::bool_env(
+            "CLASSIFICATION_ROUTING_ENABLED",
+            false,
+        ),
+        route_model_small: startup_env::optional_trimmed_env("ROUTE_MODEL_SMALL"),
+        route_model_strong: startup_env::optional_trimmed_env("ROUTE_MODEL_STRONG"),
         prefix_cache_canary_enabled: startup_env::bool_env("PREFIX_CACHE_CANARY_ENABLED", false),
         prefix_cache_canary_namespace_allowlist: startup_env::comma_list_env(
             "PREFIX_CACHE_CANARY_NAMESPACE_ALLOWLIST",
