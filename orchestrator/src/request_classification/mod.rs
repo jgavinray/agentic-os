@@ -49,7 +49,7 @@ pub use labels::{
 pub use report::request_classification_report;
 use routing::{recommend_route, response_contract};
 use rules::{
-    classify_artifact, classify_complexity, classify_domain, classify_intent, classify_risk,
+    classify_artifact, classify_complexity, classify_domain, classify_intent_scored, classify_risk,
     detected_domains,
 };
 pub use runtime::{evaluate_live_policy, record_classification_metrics};
@@ -86,7 +86,19 @@ pub fn classify_request_event(event: &crate::db::AgentEvent) -> RequestClassific
     );
     row.trajectory_id = event.trajectory_id;
     row.features = features_to_json(&features, &detected_domains, &composite);
-    row.intent = classify_intent(&features, &lower, &event.event_type);
+    let scored = classify_intent_scored(&features, &lower, &event.event_type);
+    row.intent = scored.intent;
+    if let Some(feature_map) = row.features.as_object_mut() {
+        feature_map.insert("intent_weight".to_string(), scored.weight.into());
+        feature_map.insert("intent_margin".to_string(), scored.margin.into());
+        feature_map.insert(
+            "intent_runner_up".to_string(),
+            scored
+                .runner_up
+                .map(|intent| intent.as_str().into())
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
     row.domain = classify_domain(&features, &lower, &detected_domains);
     row.secondary_domains = detected_domains
         .iter()
@@ -147,6 +159,7 @@ mod tests {
     pub(crate) use support as test_support;
 
     mod contract;
+    mod corpus;
     mod feature;
     mod intent;
     mod live_policy;
